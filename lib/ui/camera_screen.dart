@@ -6,7 +6,6 @@ import 'package:flutter/services.dart' show DeviceOrientation;
 import '../core/app_controller.dart';
 import '../core/app_scope.dart';
 import '../models/expression.dart';
-import '../models/person.dart';
 import '../theme/app_theme.dart';
 import 'overlay_painter.dart';
 import 'settings/settings_screen.dart';
@@ -113,32 +112,64 @@ class _StatusPanel extends StatelessWidget {
       listenable: controller,
       builder: (context, _) {
         final r = controller.result;
-        final face = r.face;
+        final faces = r.faces;
+        final mainFace = r.face; // 主脸（面积最大，且含表情/网格）
         final rows = <Widget>[];
 
-        rows.add(_line(
-          icon: CupertinoIcons.smiley,
-          text: face == null
-              ? '未检测到人脸'
-              : '表情：${face.expression.expression.emoji} '
-                  '${face.expression.expression.label}',
-          color: face == null
-              ? AppTheme.tertiaryLabel
-              : face.expression.expression.color,
-        ));
+        // 人脸数量 + 主脸表情
+        if (faces.isEmpty) {
+          rows.add(_line(
+            icon: CupertinoIcons.smiley,
+            text: '未检测到人脸',
+            color: AppTheme.tertiaryLabel,
+          ));
+        } else {
+          final exprText = (mainFace != null && mainFace.landmarks.isNotEmpty)
+              ? '  ${mainFace.expression.expression.emoji}'
+                  '${mainFace.expression.expression.label}'
+              : '';
+          rows.add(_line(
+            icon: CupertinoIcons.smiley,
+            text: '人脸：${faces.length} 张$exprText',
+            color: mainFace?.expression.expression.color ?? AppTheme.accentGreen,
+          ));
+        }
 
-        rows.add(_line(
-          icon: CupertinoIcons.person_fill,
-          text: face?.identity != null
-              ? '身份：${face!.identity!.person.name}'
-                  '（${face.identity!.person.relation.label}）'
-              : (controller.faceRecognition.isAvailable
-                  ? '身份：未识别'
-                  : '身份：未加载模型'),
-          color: face?.identity != null
-              ? AppTheme.accent
-              : AppTheme.tertiaryLabel,
-        ));
+        // 身份：列出所有脸的身份（命中者显示姓名，未识别/无模型显示占位）
+        if (faces.isEmpty) {
+          rows.add(_line(
+            icon: CupertinoIcons.person_fill,
+            text: controller.faceRecognition.isAvailable ? '身份：未识别' : '身份：未加载模型',
+            color: AppTheme.tertiaryLabel,
+          ));
+        } else if (!controller.faceRecognition.isAvailable) {
+          rows.add(_line(
+            icon: CupertinoIcons.person_fill,
+            text: '身份：未加载模型',
+            color: AppTheme.tertiaryLabel,
+          ));
+        } else {
+          final parts = <String>[];
+          var unknownCount = 0;
+          for (final f in faces) {
+            final m = f.identity;
+            if (m != null) {
+              parts.add(m.person.name);
+            } else {
+              unknownCount++;
+            }
+          }
+          var text = parts.join('、');
+          if (unknownCount > 0) {
+            text = text.isEmpty ? '$unknownCount 人未识别' : '$text、$unknownCount 人未识别';
+          }
+          final anyKnown = parts.isNotEmpty;
+          rows.add(_line(
+            icon: CupertinoIcons.person_fill,
+            text: '身份：$text',
+            color: anyKnown ? AppTheme.accent : AppTheme.tertiaryLabel,
+          ));
+        }
 
         rows.add(_line(
           icon: CupertinoIcons.hand_raised_fill,

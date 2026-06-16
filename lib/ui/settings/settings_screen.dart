@@ -225,7 +225,7 @@ class _ModelStatus extends StatelessWidget {
             child: Text(
               msg,
               style: const TextStyle(
-                  color: AppTheme.tertiaryLabel, fontSize: 12),
+                  color: AppTheme.tertiaryLabel, fontSize: 12, decoration: TextDecoration.none),
             ),
           ),
         ],
@@ -253,17 +253,7 @@ class _AboutSection extends StatelessWidget {
               AppTheme.secondaryLabel),
           title: Text('版本', style: TextStyle(color: AppTheme.label)),
           trailing: Text('1.0.0',
-              style: TextStyle(color: AppTheme.secondaryLabel)),
-        ),
-        CupertinoListTile.notched(
-          backgroundColor: AppTheme.groupedBackground,
-          leading: _LeadingIcon(
-              CupertinoIcons.cube_box_fill, AppTheme.secondaryLabel),
-          title: Text('识别引擎', style: TextStyle(color: AppTheme.label)),
-          subtitle: Text(
-            'MediaPipe Face Landmarker · Hand Detection · MobileFaceNet',
-            style: TextStyle(color: AppTheme.secondaryLabel),
-          ),
+              style: TextStyle(color: AppTheme.secondaryLabel, fontSize: 14, decoration: TextDecoration.none)),
         ),
       ],
     );

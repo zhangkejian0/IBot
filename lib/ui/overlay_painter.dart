@@ -33,8 +33,7 @@ class DetectionOverlayPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final face = result.face;
-    if (face != null) {
+    for (final face in result.faces) {
       _paintFace(canvas, size, face);
     }
     for (final hand in result.hands) {
@@ -43,8 +42,8 @@ class DetectionOverlayPainter extends CustomPainter {
   }
 
   void _paintFace(Canvas canvas, Size size, FaceOverlay face) {
-    // 关键点网格
-    if (settings.showFaceMesh) {
+    // 关键点网格（仅主脸——嫁接了 MediaPipe 478 点——才有关键点）
+    if (settings.showFaceMesh && face.landmarks.isNotEmpty) {
       final dot = Paint()
         ..color = AppTheme.accentTeal.withValues(alpha: 0.75)
         ..style = PaintingStyle.fill;
@@ -66,9 +65,10 @@ class DetectionOverlayPainter extends CustomPainter {
       );
     }
 
-    // 表情标签（框上方）
+    // 表情标签（框上方）：只在主脸（有真实关键点）显示，避免给仅含包围盒的
+    // 副脸显示占位的「中性」造成误导。
     final labels = <_Chip>[];
-    if (settings.showExpression) {
+    if (settings.showExpression && face.landmarks.isNotEmpty) {
       final expr = face.expression;
       labels.add(_Chip(
         '${expr.expression.emoji} ${expr.expression.label}'

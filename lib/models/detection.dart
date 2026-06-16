@@ -38,27 +38,33 @@ class FaceOverlay {
 }
 
 /// 一帧聚合的全部识别结果，用于驱动覆盖层与信息面板。
+///
+/// 人脸为列表（[faces]）以支持多人脸：第 0 个为主脸（面积最大、且携带
+/// MediaPipe 478 点网格与表情），其余脸仅有包围盒与身份。手势为列表
+/// （[hands]）支持多只手。所有覆盖层坐标均归一化到 0..1。
 class DetectionResult {
-  final FaceOverlay? face;
+  final List<FaceOverlay> faces;
   final List<HandOverlay> hands;
 
   /// 画面是否需要水平镜像（前置摄像头）。
   final bool mirror;
 
   const DetectionResult({
-    this.face,
+    this.faces = const [],
     this.hands = const [],
     this.mirror = false,
   });
 
+  /// 便捷访问：主脸（列表首个，可能为空）。
+  FaceOverlay? get face => faces.isEmpty ? null : faces.first;
+
   DetectionResult copyWith({
-    FaceOverlay? face,
+    List<FaceOverlay>? faces,
     List<HandOverlay>? hands,
     bool? mirror,
-    bool clearFace = false,
   }) {
     return DetectionResult(
-      face: clearFace ? null : (face ?? this.face),
+      faces: faces ?? this.faces,
       hands: hands ?? this.hands,
       mirror: mirror ?? this.mirror,
     );
