@@ -2,6 +2,7 @@ import 'package:camera/camera.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show DeviceOrientation;
+import 'package:webview_flutter/webview_flutter.dart';
 
 import '../core/app_controller.dart';
 import '../core/app_scope.dart';
@@ -17,37 +18,44 @@ class CameraScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final controller = AppScope.of(context);
     final cam = controller.cameraController;
+    // 调试模式：开启显示摄像头识别画面，关闭显示虚拟宠物网页（默认关闭）。
+    final showDebug = controller.settings.debugMode;
 
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
         fit: StackFit.expand,
         children: [
-          if (cam != null && cam.value.isInitialized)
-            _CameraPreviewCover(controller: cam)
+          if (showDebug)
+            if (cam != null && cam.value.isInitialized)
+              _CameraPreviewCover(controller: cam)
+            else
+              const ColoredBox(color: Colors.black)
           else
-            const ColoredBox(color: Colors.black),
+            const _VirtualPetWebView(),
 
-          // 识别结果覆盖层
-          ListenableBuilder(
-            listenable: controller,
-            builder: (context, _) {
-              return CustomPaint(
-                painter: DetectionOverlayPainter(
-                  result: controller.result,
-                  settings: controller.settings,
-                ),
-                size: Size.infinite,
-              );
-            },
-          ),
+          // 识别结果覆盖层（仅调试/摄像头模式显示）
+          if (showDebug)
+            ListenableBuilder(
+              listenable: controller,
+              builder: (context, _) {
+                return CustomPaint(
+                  painter: DetectionOverlayPainter(
+                    result: controller.result,
+                    settings: controller.settings,
+                  ),
+                  size: Size.infinite,
+                );
+              },
+            ),
 
-          // 顶部状态面板
-          Positioned(
-            top: 12,
-            left: 12,
-            child: SafeArea(child: _StatusPanel(controller: controller)),
-          ),
+          // 顶部状态面板（仅调试/摄像头模式显示）
+          if (showDebug)
+            Positioned(
+              top: 12,
+              left: 12,
+              child: SafeArea(child: _StatusPanel(controller: controller)),
+            ),
 
           // 右上角设置入口
           Positioned(
@@ -66,6 +74,79 @@ class CameraScreen extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _VirtualPetWebView extends StatefulWidget {
+  const _VirtualPetWebView();
+
+  @override
+  State<_VirtualPetWebView> createState() => _VirtualPetWebViewState();
+}
+
+class _VirtualPetWebViewState extends State<_VirtualPetWebView> {
+  late final WebViewController _controller;
+  bool _loaded = false;
+  bool _loading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    debugPrint('[VirtualPet] initState');
+    _controller = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setBackgroundColor(Colors.black)
+      ..setNavigationDelegate(NavigationDelegate(
+        onPageStarted: (url) {
+          debugPrint('[VirtualPet] onPageStarted: $url');
+        },
+        onPageFinished: (url) {
+          debugPrint('[VirtualPet] onPageFinished: $url');
+          if (mounted) setState(() => _loaded = true);
+        },
+        onWebResourceError: (error) {
+          debugPrint('[VirtualPet] error: ${error.errorType} ${error.description}');
+        },
+      ))
+      ..enableZoom(false);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    debugPrint('[VirtualPet] didChangeDependencies _loading=$_loading _loaded=$_loaded');
+    if (!_loading && !_loaded) {
+      _loading = true;
+      _loadUrl();
+    }
+  }
+
+  Future<void> _loadUrl() async {
+    final appController = AppScope.of(context);
+    debugPrint('[VirtualPet] starting server...');
+    final base = await appController.startVirtualPetServer();
+    // 默认显示模式为 ambient（暗背景 + 环境光晕 + 卡哇伊珍珠眼）。
+    // 其它可选：?style=neon（霓虹机器人）/ 留空（默认写实脸）。
+    final url = '$base?style=ambient';
+    debugPrint('[VirtualPet] server url: $url');
+    if (mounted) {
+      debugPrint('[VirtualPet] loading request...');
+      _controller.loadRequest(Uri.parse(url));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        WebViewWidget(controller: _controller),
+        if (!_loaded)
+          const Center(
+            child: CircularProgressIndicator(color: Colors.white),
+          ),
+      ],
     );
   }
 }

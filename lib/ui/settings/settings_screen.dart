@@ -34,6 +34,27 @@ class SettingsScreen extends StatelessWidget {
                     color: AppTheme.groupedBackground,
                     borderRadius: BorderRadius.all(Radius.circular(12)),
                   ),
+                  header: const _Header('显示模式'),
+                  footer: const _Footer(
+                      '关闭时显示虚拟宠物画面；开启后切换到摄像头识别画面（用于调试人脸/手势识别）。'),
+                  children: [
+                    _SwitchTile(
+                      icon: CupertinoIcons.antenna_radiowaves_left_right,
+                      color: AppTheme.accentOrange,
+                      label: '调试模式',
+                      value: s.debugMode,
+                      onChanged: (v) =>
+                          controller.updateSettings(() => s.debugMode = v),
+                    ),
+                  ],
+                ),
+
+                CupertinoListSection.insetGrouped(
+                  backgroundColor: AppTheme.background,
+                  decoration: const BoxDecoration(
+                    color: AppTheme.groupedBackground,
+                    borderRadius: BorderRadius.all(Radius.circular(12)),
+                  ),
                   header: const _Header('身份识别'),
                   children: [
                     CupertinoListTile.notched(

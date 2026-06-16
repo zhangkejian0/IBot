@@ -18,6 +18,7 @@ import '../services/face_recognition_service.dart';
 import '../services/hand_engine.dart';
 import '../services/mlkit_face_engine.dart';
 import '../services/person_repository.dart';
+import '../services/static_server.dart';
 
 /// 应用整体阶段。
 enum AppPhase { loading, ready, error, permissionDenied }
@@ -27,6 +28,9 @@ class DisplaySettings {
   bool faceEnabled = true;
   bool handEnabled = true;
   bool identityEnabled = true;
+
+  // 调试模式：开启时显示摄像头的人脸/手势识别画面，关闭时显示虚拟宠物网页。
+  bool debugMode = false;
 
   // 调试可视化
   bool showFaceMesh = true;
@@ -56,6 +60,7 @@ class AppController extends ChangeNotifier {
   final FaceRecognitionService faceRecognition = FaceRecognitionService();
   final PersonRepository personRepository = PersonRepository();
   final DisplaySettings settings = DisplaySettings();
+  final StaticServer staticServer = StaticServer();
 
   CameraController? _camera;
   CameraController? get camera => _camera;
@@ -471,9 +476,43 @@ class AppController extends ChangeNotifier {
   IdentityMatch? findExistingIdentity(List<double> embedding) =>
       faceRecognition.identify(embedding, personRepository.people);
 
+  /// 虚拟宠物 HTTP 服务地址，启动后可用。
+  String? _virtualPetUrl;
+  Future<String>? _virtualPetStarting;
+  String? get virtualPetUrl => _virtualPetUrl;
+
+  /// 启动虚拟宠物静态文件服务，返回可访问的 URL。
+  /// 多次调用会等待同一启动过程，避免重复启动。
+  Future<String> startVirtualPetServer() async {
+    if (_virtualPetUrl != null) return _virtualPetUrl!;
+    _virtualPetStarting ??= _doStartVirtualPetServer();
+    return _virtualPetStarting!;
+  }
+
+  Future<String> _doStartVirtualPetServer() async {
+    _virtualPetUrl = await staticServer.start();
+    _virtualPetStarting = null;
+    notifyListeners();
+    return _virtualPetUrl!;
+  }
+
+  /// 停止虚拟宠物服务。
+  Future<void> stopVirtualPetServer() async {
+    await staticServer.stop();
+    _virtualPetUrl = null;
+    _virtualPetStarting = null;
+  }
+
   /// 修改显示/识别设置后刷新监听者（用于设置页开关）。
   void updateSettings(VoidCallback change) {
     change();
+    // 关闭调试模式（即显示虚拟宠物网页）时按需启动本地服务；
+    // 开启调试模式（即显示摄像头画面）时释放服务资源。
+    if (!settings.debugMode && _virtualPetUrl == null) {
+      startVirtualPetServer();
+    } else if (settings.debugMode && _virtualPetUrl != null) {
+      stopVirtualPetServer();
+    }
     notifyListeners();
   }
 
@@ -513,6 +552,7 @@ class AppController extends ChangeNotifier {
     handEngine.dispose();
     mlkitFaceEngine.dispose();
     faceRecognition.dispose();
+    staticServer.stop();
     super.dispose();
   }
 }
