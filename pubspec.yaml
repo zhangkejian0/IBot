@@ -71,13 +71,13 @@ flutter_launcher_icons:
   remove_alpha_ios: true
 
 flutter_native_splash:
-  # Generate a native splash screen showing the logo centered.
-  color: "#FFFFFF"
+  # Generate a native splash screen showing the logo centered (dark theme).
+  color: "#000000"
   image: "assets/images/logo.png"
   android_12:
     image: "assets/images/logo.png"
-    color: "#FFFFFF"
-    icon_background_color: "#FFFFFF"
+    color: "#000000"
+    icon_background_color: "#000000"
   android: true
   ios: true
 
@@ -94,6 +94,7 @@ flutter:
 
   assets:
     - assets/models/
+    - assets/images/
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

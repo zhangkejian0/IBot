@@ -31,23 +31,51 @@ class LoadingScreen extends StatelessWidget {
   }
 }
 
-class _ProgressView extends StatelessWidget {
+class _ProgressView extends StatefulWidget {
   const _ProgressView({required this.controller});
   final AppController controller;
+
+  @override
+  State<_ProgressView> createState() => _ProgressViewState();
+}
+
+class _ProgressViewState extends State<_ProgressView>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _breath;
+
+  @override
+  void initState() {
+    super.initState();
+    _breath = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1400),
+    )..repeat(reverse: true);
+  }
+
+  @override
+  void dispose() {
+    _breath.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        const _Logo(),
+        ScaleTransition(
+          scale: Tween<double>(begin: 1.0, end: 1.08).animate(
+            CurvedAnimation(parent: _breath, curve: Curves.easeInOut),
+          ),
+          child: const _Logo(),
+        ),
         const SizedBox(height: 36),
         SizedBox(
           width: 280,
           child: ClipRRect(
             borderRadius: BorderRadius.circular(4),
             child: LinearProgressIndicator(
-              value: controller.loadingProgress,
+              value: widget.controller.loadingProgress,
               minHeight: 6,
               backgroundColor: AppTheme.tertiaryBackground,
               valueColor:
@@ -57,7 +85,7 @@ class _ProgressView extends StatelessWidget {
         ),
         const SizedBox(height: 16),
         Text(
-          controller.loadingMessage,
+          widget.controller.loadingMessage,
           style: const TextStyle(
             color: AppTheme.secondaryLabel,
             fontSize: 15,
@@ -65,7 +93,7 @@ class _ProgressView extends StatelessWidget {
         ),
         const SizedBox(height: 6),
         Text(
-          '${(controller.loadingProgress * 100).round()}%',
+          '${(widget.controller.loadingProgress * 100).round()}%',
           style: const TextStyle(
             color: AppTheme.tertiaryLabel,
             fontSize: 13,
@@ -85,25 +113,14 @@ class _Logo extends StatelessWidget {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Container(
-          width: 88,
-          height: 88,
-          decoration: BoxDecoration(
-            gradient: const LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: [AppTheme.accent, AppTheme.accentPurple],
-            ),
-            borderRadius: BorderRadius.circular(22),
-            boxShadow: [
-              BoxShadow(
-                color: AppTheme.accent.withValues(alpha: 0.4),
-                blurRadius: 24,
-                spreadRadius: 2,
-              ),
-            ],
+        ClipRRect(
+          borderRadius: BorderRadius.circular(22),
+          child: Image.asset(
+            'assets/images/logo.png',
+            width: 88,
+            height: 88,
+            fit: BoxFit.cover,
           ),
-          child: const Icon(CupertinoIcons.eye, color: Colors.white, size: 48),
         ),
         const SizedBox(height: 18),
         const Text(

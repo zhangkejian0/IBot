@@ -80,6 +80,9 @@ class AppController extends ChangeNotifier {
   DateTime _stickyIdentityTime = DateTime.fromMillisecondsSinceEpoch(0);
   static const Duration _identityTtl = Duration(seconds: 3);
 
+  /// 模型/相机加载完成后的固定缓冲，确保首帧前各引擎已彻底就绪。
+  static const Duration _readyBuffer = Duration(seconds: 2);
+
   // 录入采样请求
   Completer<EnrollCapture?>? _captureCompleter;
 
@@ -120,6 +123,10 @@ class AppController extends ChangeNotifier {
 
       _setLoading(1.0, '准备就绪');
       await _camera?.startImageStream(_onFrame);
+
+      // 固定额外等待：摄像头首帧与各模型推理管道仍需少量时间稳定，
+      // 缓冲后再进入 ready，避免开场即出现掉帧/未识别。
+      await Future<void>.delayed(_readyBuffer);
 
       _phase = AppPhase.ready;
       notifyListeners();
