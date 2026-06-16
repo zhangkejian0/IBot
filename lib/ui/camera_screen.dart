@@ -6,6 +6,7 @@ import 'package:webview_flutter/webview_flutter.dart';
 
 import '../core/app_controller.dart';
 import '../core/app_scope.dart';
+import '../face/emotion_mapper.dart';
 import '../models/expression.dart';
 import '../theme/app_theme.dart';
 import 'overlay_painter.dart';
@@ -32,7 +33,7 @@ class CameraScreen extends StatelessWidget {
             else
               const ColoredBox(color: Colors.black)
           else
-            const _VirtualPetWebView(),
+            _VirtualPetWebView(controller: controller),
 
           // 识别结果覆盖层（仅调试/摄像头模式显示）
           if (showDebug)
@@ -79,16 +80,25 @@ class CameraScreen extends StatelessWidget {
 }
 
 class _VirtualPetWebView extends StatefulWidget {
-  const _VirtualPetWebView();
+  const _VirtualPetWebView({required this.controller});
+  final AppController controller;
 
   @override
   State<_VirtualPetWebView> createState() => _VirtualPetWebViewState();
 }
 
 class _VirtualPetWebViewState extends State<_VirtualPetWebView> {
+  static const EmotionMapper _mapper = EmotionMapper();
+  // 同一状态至少保持这么久再允许切换，避免表情抖动导致 FSM 频繁跳变。
+  static const Duration _minDwell = Duration(milliseconds: 600);
+
   late final WebViewController _controller;
   bool _loaded = false;
   bool _loading = false;
+
+  // 上一次推给网页的状态及其确认时刻（用于 dwell 判断）。
+  FaceState? _lastSent;
+  DateTime _lastSentAt = DateTime.fromMillisecondsSinceEpoch(0);
 
   @override
   void initState() {
@@ -103,13 +113,60 @@ class _VirtualPetWebViewState extends State<_VirtualPetWebView> {
         },
         onPageFinished: (url) {
           debugPrint('[VirtualPet] onPageFinished: $url');
-          if (mounted) setState(() => _loaded = true);
+          if (mounted) {
+            setState(() => _loaded = true);
+            // 页面就绪后立即把当前状态推一次，避免首屏停留在 idle。
+            _pushCurrentState(force: true);
+          }
         },
         onWebResourceError: (error) {
           debugPrint('[VirtualPet] error: ${error.errorType} ${error.description}');
         },
       ))
       ..enableZoom(false);
+
+    widget.controller.addListener(_onControllerChanged);
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_onControllerChanged);
+    super.dispose();
+  }
+
+  /// 控制器每帧刷新检测结果时触发：映射情绪→FSM 状态并推给网页。
+  void _onControllerChanged() {
+    if (!mounted || !_loaded) return;
+    _pushCurrentState();
+  }
+
+  void _pushCurrentState({bool force = false}) {
+    final face = widget.controller.result.face;
+    // 无人脸：保持上一次状态，不强切（避免一没人脸就回 idle 抖动）。
+    if (face == null) return;
+    final state = _mapper.map(face.expression.expression);
+
+    final now = DateTime.now();
+    if (!force && state == _lastSent) return;
+    if (!force &&
+        _lastSent != null &&
+        now.difference(_lastSentAt) < _minDwell) {
+      return; // dwell 未满，跳过本次切换
+    }
+
+    _lastSent = state;
+    _lastSentAt = now;
+    _sendState(state);
+  }
+
+  Future<void> _sendState(FaceState state) async {
+    final js = "window.__face && window.__face.setState('${state.name}');";
+    try {
+      await _controller.runJavaScript(js);
+      debugPrint('[VirtualPet] setState(${state.name})');
+    } catch (e) {
+      debugPrint('[VirtualPet] setState failed: $e');
+    }
   }
 
   @override
