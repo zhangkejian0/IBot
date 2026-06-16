@@ -7,6 +7,7 @@ import 'package:webview_flutter/webview_flutter.dart';
 import '../core/app_controller.dart';
 import '../core/app_scope.dart';
 import '../face/emotion_mapper.dart';
+import '../face/gaze_smoother.dart';
 import '../models/expression.dart';
 import '../theme/app_theme.dart';
 import 'overlay_painter.dart';
@@ -100,6 +101,17 @@ class _VirtualPetWebViewState extends State<_VirtualPetWebView> {
   FaceState? _lastSent;
   DateTime _lastSentAt = DateTime.fromMillisecondsSinceEpoch(0);
 
+  // 注视方向平滑器：消除 eyeLook blendshape 帧间抖动。
+  final GazeSmoother _gaze = GazeSmoother();
+  // 是否为前置摄像头（决定水平 gaze 是否镜像）。
+  bool _isFrontCamera = true;
+
+  // JS 推送节流：检测每帧（~30fps）都触发监听，但 runJavaScript 是异步且
+  // WebView 单线程串行执行 JS，若每帧都发会堆积排队造成卡顿。用一个时间窗
+  // 合并多帧、且把 setState+setGazeTarget 合成一次 JS 调用，大幅减少 JS 队列。
+  static const Duration _pushInterval = Duration(milliseconds: 50); // ~20fps
+  DateTime _lastPushAt = DateTime.fromMillisecondsSinceEpoch(0);
+
   @override
   void initState() {
     super.initState();
@@ -115,8 +127,9 @@ class _VirtualPetWebViewState extends State<_VirtualPetWebView> {
           debugPrint('[VirtualPet] onPageFinished: $url');
           if (mounted) {
             setState(() => _loaded = true);
-            // 页面就绪后立即把当前状态推一次，避免首屏停留在 idle。
-            _pushCurrentState(force: true);
+            // 页面就绪后立即把当前状态 + 注视推一次，避免首屏停留。
+            _lastPushAt = DateTime.now();
+            _pushAll();
           }
         },
         onWebResourceError: (error) {
@@ -126,6 +139,7 @@ class _VirtualPetWebViewState extends State<_VirtualPetWebView> {
       ..enableZoom(false);
 
     widget.controller.addListener(_onControllerChanged);
+    _isFrontCamera = widget.controller.isFrontCamera;
   }
 
   @override
@@ -134,39 +148,62 @@ class _VirtualPetWebViewState extends State<_VirtualPetWebView> {
     super.dispose();
   }
 
-  /// 控制器每帧刷新检测结果时触发：映射情绪→FSM 状态并推给网页。
+  /// 控制器每帧刷新检测结果时触发：映射情绪→FSM 状态并推给网页，
+  /// 同时把注视方向推给网页驱动瞳孔跟随。
+  ///
+  /// 检测约 30fps，但 runJavaScript 是异步且 WebView JS 单线程串行执行，
+  /// 若每帧都发会堆积排队造成卡顿。这里用一个时间窗（~20fps）合并多帧，
+  /// 并把 setState + setGazeTarget 合成一次 JS 调用，显著减少 JS 队列压力。
   void _onControllerChanged() {
     if (!mounted || !_loaded) return;
-    _pushCurrentState();
-  }
-
-  void _pushCurrentState({bool force = false}) {
-    final face = widget.controller.result.face;
-    // 无人脸：保持上一次状态，不强切（避免一没人脸就回 idle 抖动）。
-    if (face == null) return;
-    final state = _mapper.map(face.expression.expression);
-
     final now = DateTime.now();
-    if (!force && state == _lastSent) return;
-    if (!force &&
-        _lastSent != null &&
-        now.difference(_lastSentAt) < _minDwell) {
-      return; // dwell 未满，跳过本次切换
+    if (now.difference(_lastPushAt) < _pushInterval) {
+      return; // 窗口内跳过，避免每帧堆积 JS 调用
     }
-
-    _lastSent = state;
-    _lastSentAt = now;
-    _sendState(state);
+    _lastPushAt = now;
+    _pushAll();
   }
 
-  Future<void> _sendState(FaceState state) async {
-    final js = "window.__face && window.__face.setState('${state.name}');";
-    try {
-      await _controller.runJavaScript(js);
-      debugPrint('[VirtualPet] setState(${state.name})');
-    } catch (e) {
-      debugPrint('[VirtualPet] setState failed: $e');
+  /// 把情绪状态 + 注视合并成一次 JS 调用推给网页。
+  void _pushAll() {
+    final face = widget.controller.result.face;
+
+    // 注视方向：主脸包围盒中心在画面中的相对位置。
+    String gazeJs = '';
+    if (face != null) {
+      var x = 2 * face.boundingBox.center.dx - 1; // 画面中心→0，右→+1
+      var y = 2 * face.boundingBox.center.dy - 1; // 画面中心→0，下→+1
+      if (_isFrontCamera) x = -x; // 前置水平镜像
+      x = (x * 1.4).clamp(-1.0, 1.0);
+      y = (y * 1.4).clamp(-1.0, 1.0);
+      final smooth = _gaze.update(x, y);
+      gazeJs =
+          'f.setGazeTarget(${smooth.dx.toStringAsFixed(3)},${smooth.dy.toStringAsFixed(3)});';
+    } else {
+      _gaze.reset();
     }
+
+    // 情绪状态（带 dwell 去抖）。
+    String stateJs = '';
+    if (face != null) {
+      final state = _mapper.map(face.expression.expression);
+      final now = DateTime.now();
+      final changed = state != _lastSent;
+      final dwellOk =
+          _lastSent == null || now.difference(_lastSentAt) >= _minDwell;
+      if (changed && dwellOk) {
+        _lastSent = state;
+        _lastSentAt = now;
+        stateJs = "f.setState('${state.name}');";
+      }
+    }
+
+    if (gazeJs.isEmpty && stateJs.isEmpty) return;
+    // 合并成一次 JS 调用：取出 __face 引用，依次 setState / setGazeTarget。
+    final js = 'var f=window.__face;if(f){$stateJs$gazeJs}';
+    _controller.runJavaScript(js).catchError((e) {
+      debugPrint('[VirtualPet] JS push failed: $e');
+    });
   }
 
   @override

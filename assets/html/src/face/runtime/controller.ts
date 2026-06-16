@@ -136,6 +136,13 @@ class FaceController {
     applyOscillators(out, activeOsc, nowMs / 1000);
     applyMicroMotion(out, nowMs, STATE_SPECS[faceMachine.get()].microMotionProfile);
 
+    // 注视(gaze)绕过弹簧：直接用目标值覆盖，避免弹簧过渡造成"看人慢半拍"。
+    // 眉/嘴/脸等其余参数仍走弹簧，保持表情过渡的质感。
+    out.leftEye.pupilX = this.gazeX;
+    out.rightEye.pupilX = this.gazeX;
+    out.leftEye.pupilY = this.gazeY;
+    out.rightEye.pupilY = this.gazeY;
+
     // Listening loudness drives extra mouth open
     if (this.listeningLoudness > 0) {
       const wobble = (Math.sin(nowMs / 50) * 0.5 + 0.5) * this.listeningLoudness * 0.35;

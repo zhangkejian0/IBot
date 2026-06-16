@@ -66,6 +66,8 @@ class AppController extends ChangeNotifier {
   CameraController? get camera => _camera;
   int _sensorOrientation = 90;
   bool _isFrontCamera = true;
+  /// 是否为前置摄像头（用于注视水平镜像判断）。
+  bool get isFrontCamera => _isFrontCamera;
 
   AppPhase _phase = AppPhase.loading;
   AppPhase get phase => _phase;
@@ -271,6 +273,9 @@ class AppController extends ChangeNotifier {
               // 以 MediaPipe 框为准（关键点空间一致），网格更贴合。
               boundingBox: mediapipeFace.boundingBox,
               expression: mediapipeFace.expression,
+              // 注视只主脸（MediaPipe）携带，随嫁接一并保留。
+              gazeX: mediapipeFace.gazeX,
+              gazeY: mediapipeFace.gazeY,
             );
           }
         }
@@ -347,6 +352,8 @@ class AppController extends ChangeNotifier {
                 boundingBox: f.boundingBox,
                 expression: f.expression,
                 identity: identity,
+                gazeX: f.gazeX,
+                gazeY: f.gazeY,
               ));
       }
 

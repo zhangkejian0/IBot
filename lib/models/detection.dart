@@ -29,11 +29,19 @@ class FaceOverlay {
   final ExpressionResult expression;
   final IdentityMatch? identity; // 命中身份则非空
 
+  /// 注视方向（来自 eyeLook blendshape，-1..1）。
+  /// gazeX 正=向右看，gazeY 正=向下看；这里为检测原始值，未做前置镜像。
+  /// 仅主脸（MediaPipe）携带，其余脸为 0。
+  final double gazeX;
+  final double gazeY;
+
   const FaceOverlay({
     required this.landmarks,
     required this.boundingBox,
     required this.expression,
     this.identity,
+    this.gazeX = 0,
+    this.gazeY = 0,
   });
 }
 

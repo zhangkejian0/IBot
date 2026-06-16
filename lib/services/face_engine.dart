@@ -87,10 +87,17 @@ class FaceEngine {
 
     final expression = _classifier.classify(face.blendshapes);
 
+    // 注视方向：复用插件的 FaceResultHelper（来自 8 个 eyeLook blendshape）。
+    // -1..1，正=右/下。主脸携带，供虚拟人物注视跟随使用。
+    final gazeX = face.horizontalGazeDirection;
+    final gazeY = face.verticalGazeDirection;
+
     return FaceOverlay(
       landmarks: points,
       boundingBox: Rect.fromLTRB(minX, minY, maxX, maxY),
       expression: expression,
+      gazeX: gazeX,
+      gazeY: gazeY,
     );
   }
 
