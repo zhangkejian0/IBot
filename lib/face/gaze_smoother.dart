@@ -7,7 +7,7 @@ import 'dart:ui';
 /// 网页侧已让 gaze 绕过弹簧直接应用，k=1.0 即零延迟直接跟随，
 /// 仅由人脸检测本身的稳定性决定平滑度。
 class GazeSmoother {
-  GazeSmoother({this.k = 1.0});
+  GazeSmoother({this.k = 0.4});
 
   /// 平滑系数（0..1），越大越贴近原始值。
   final double k;

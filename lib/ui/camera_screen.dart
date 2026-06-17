@@ -8,7 +8,9 @@ import '../core/app_controller.dart';
 import '../core/app_scope.dart';
 import '../face/emotion_mapper.dart';
 import '../face/gaze_smoother.dart';
+import '../face/gaze_zone_detector.dart';
 import '../models/expression.dart';
+import '../services/voice/voice_state.dart';
 import '../theme/app_theme.dart';
 import 'overlay_painter.dart';
 import 'settings/settings_screen.dart';
@@ -41,10 +43,22 @@ class CameraScreen extends StatelessWidget {
             ListenableBuilder(
               listenable: controller,
               builder: (context, _) {
+                // 调试模式下也更新区域检测器
+                final face = controller.result.face;
+                if (face != null) {
+                  final isFront = controller.isFrontCamera;
+                  var x = 2 * face.boundingBox.center.dx - 1;
+                  var y = 2 * face.boundingBox.center.dy - 1;
+                  if (isFront) x = -x;
+                  controller.gazeZoneDetector.update(x, y);
+                } else {
+                  controller.gazeZoneDetector.reset();
+                }
                 return CustomPaint(
                   painter: DetectionOverlayPainter(
                     result: controller.result,
                     settings: controller.settings,
+                    zoneDetector: controller.gazeZoneDetector,
                   ),
                   size: Size.infinite,
                 );
@@ -106,6 +120,11 @@ class _VirtualPetWebViewState extends State<_VirtualPetWebView> {
   // 是否为前置摄像头（决定水平 gaze 是否镜像）。
   bool _isFrontCamera = true;
 
+  // 区域检测器：使用AppController中的实例，与调试可视化共享。
+  GazeZoneDetector get _zoneDetector => widget.controller.gazeZoneDetector;
+  // 目标区域中心坐标（用于平滑插值）
+  Offset _targetGaze = Offset.zero;
+
   // JS 推送节流：检测每帧（~30fps）都触发监听，但 runJavaScript 是异步且
   // WebView 单线程串行执行 JS，若每帧都发会堆积排队造成卡顿。用一个时间窗
   // 合并多帧、且把 setState+setGazeTarget 合成一次 JS 调用，大幅减少 JS 队列。
@@ -139,11 +158,15 @@ class _VirtualPetWebViewState extends State<_VirtualPetWebView> {
       ..enableZoom(false);
 
     widget.controller.addListener(_onControllerChanged);
+    // 语音助手是独立的 ChangeNotifier:活跃时(聆听/思考/说话)需独立驱动
+    // 虚拟宠物表情与嘴部张合,即使没有摄像头帧也要能刷新。
+    widget.controller.voiceAssistant.addListener(_onControllerChanged);
     _isFrontCamera = widget.controller.isFrontCamera;
   }
 
   @override
   void dispose() {
+    widget.controller.voiceAssistant.removeListener(_onControllerChanged);
     widget.controller.removeListener(_onControllerChanged);
     super.dispose();
   }
@@ -167,20 +190,54 @@ class _VirtualPetWebViewState extends State<_VirtualPetWebView> {
   /// 把情绪状态 + 注视合并成一次 JS 调用推给网页。
   void _pushAll() {
     final face = widget.controller.result.face;
+    final voice = widget.controller.voiceAssistant;
+    final voiceActive = voice.isRunning && voice.state.isActive;
 
-    // 注视方向：主脸包围盒中心在画面中的相对位置。
+    // —— 语音优先级最高:活跃时接管表情 + 嘴部张合,跳过视觉情绪态 ——
+    if (voiceActive) {
+      final fs = voice.state.faceState;
+      String voiceJs = '';
+      if (fs != null) {
+        voiceJs = "f.setState('$fs');";
+      }
+      // 嘴部张合:listening 用麦克风音量,speaking 用 TTS 音量,
+      // 二者都通过 voice.level 暴露(controller.ts:147-150 驱动嘴部)。
+      final lvl = voice.level.value;
+      voiceJs += 'f.setListeningLoudness(${lvl.toStringAsFixed(3)});';
+      final js = 'var f=window.__face;if(f){$voiceJs}';
+      _controller.runJavaScript(js).catchError((e) {
+        debugPrint('[VirtualPet] JS push(voice) failed: $e');
+      });
+      return;
+    }
+
+    // 注视方向：使用区域检测，映射到九宫格极限位置。
     String gazeJs = '';
     if (face != null) {
+      // 计算人脸中心归一化坐标（-1..1，画面中心为原点）
       var x = 2 * face.boundingBox.center.dx - 1; // 画面中心→0，右→+1
       var y = 2 * face.boundingBox.center.dy - 1; // 画面中心→0，下→+1
       if (_isFrontCamera) x = -x; // 前置水平镜像
-      x = (x * 1.4).clamp(-1.0, 1.0);
-      y = (y * 1.4).clamp(-1.0, 1.0);
-      final smooth = _gaze.update(x, y);
+
+      // 使用区域检测器判断是否需要发送JS更新
+      final zoneChanged = _zoneDetector.update(x, y);
+      if (zoneChanged) {
+        // 区域变化，获取对应宫格的极限位置
+        final col = _zoneDetector.currentCol ?? 1;
+        final row = _zoneDetector.currentRow ?? 1;
+        // 九宫格映射到极限位置：col 0,1,2 -> x -1,0,1；row 0,1,2 -> y -1,0,1
+        final targetX = (col - 1).toDouble(); // -1, 0, 1
+        final targetY = (row - 1).toDouble(); // -1, 0, 1
+        _targetGaze = Offset(targetX, targetY);
+        debugPrint('[VirtualPet] 区域变化: ${_zoneDetector.currentZoneName} -> ($targetX, $targetY)');
+      }
+      // 平滑插值：眼睛从当前位置平滑移动到目标极限位置
+      final smooth = _gaze.update(_targetGaze.dx, _targetGaze.dy);
       gazeJs =
           'f.setGazeTarget(${smooth.dx.toStringAsFixed(3)},${smooth.dy.toStringAsFixed(3)});';
     } else {
       _gaze.reset();
+      _zoneDetector.reset();
     }
 
     // 情绪状态（带 dwell 去抖）。

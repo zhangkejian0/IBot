@@ -9,6 +9,7 @@ import 'package:flutter/services.dart' show DeviceOrientation;
 import 'package:image/image.dart' as img;
 import 'package:permission_handler/permission_handler.dart';
 
+import '../face/gaze_zone_detector.dart';
 import '../models/detection.dart';
 import '../models/expression.dart';
 import '../models/person.dart';
@@ -19,6 +20,8 @@ import '../services/hand_engine.dart';
 import '../services/mlkit_face_engine.dart';
 import '../services/person_repository.dart';
 import '../services/static_server.dart';
+import '../services/voice/llm_config.dart';
+import '../services/voice/voice_assistant.dart';
 
 /// 应用整体阶段。
 enum AppPhase { loading, ready, error, permissionDenied }
@@ -41,6 +44,19 @@ class DisplaySettings {
   bool showGesture = true;
   bool showIdentity = true;
   bool mirrorFrontCamera = true;
+
+  // —— 语音助手 ——
+  /// 语音助手总开关。
+  bool voiceEnabled = false;
+  /// 是否启用本地唤醒词监听(关闭则只能手动触发对话)。
+  bool wakeWordEnabled = true;
+  /// 是否启用 TTS 语音播报(关闭则回复仅以文字显示)。
+  bool ttsEnabled = true;
+  /// 唤醒词(可在设置页修改,运行时生效)。
+  String wakeWord = '狗蛋';
+  /// 云端服务 API Key(阿里云 ASR/TTS、LLM;阶段 3+ 使用,首版可留空占位)。
+  String? asrApiKey;
+  String? llmApiKey;
 }
 
 /// 一次人脸采样的结果（用于「认识我」录入）。
@@ -61,6 +77,9 @@ class AppController extends ChangeNotifier {
   final PersonRepository personRepository = PersonRepository();
   final DisplaySettings settings = DisplaySettings();
   final StaticServer staticServer = StaticServer();
+  final VoiceAssistant voiceAssistant = VoiceAssistant();
+  /// LLM 服务配置(DeepSeek 预设,可在设置页修改并持久化)。
+  final LlmConfigStore llmConfigStore = LlmConfigStore();
 
   CameraController? _camera;
   CameraController? get camera => _camera;
@@ -82,6 +101,10 @@ class AppController extends ChangeNotifier {
   DetectionResult _result = const DetectionResult();
   DetectionResult get result => _result;
 
+  // 区域检测器：用于调试可视化
+  final GazeZoneDetector _gazeZoneDetector = GazeZoneDetector();
+  GazeZoneDetector get gazeZoneDetector => _gazeZoneDetector;
+
   bool _processing = false;
   bool _disposed = false;
 
@@ -101,6 +124,10 @@ class AppController extends ChangeNotifier {
 
   /// 模型/相机加载完成后的固定缓冲，确保首帧前各引擎已彻底就绪。
   static const Duration _readyBuffer = Duration(seconds: 2);
+
+  /// LLM 预置 DeepSeek API Key(仅首次写入配置文件时用;之后以设置页为准)。
+  /// 真实生产中应移除此硬编码,改由用户在设置页录入。
+  static const String _kPresetLlmApiKey = 'sk-1f6417c0177249de8b02a2a18207de2d';
 
   // 录入采样请求
   Completer<EnrollCapture?>? _captureCompleter;
@@ -128,6 +155,17 @@ class AppController extends ChangeNotifier {
       _setLoading(0.2, '初始化摄像头…');
       await _initCamera();
 
+      // 麦克风权限(语音助手用)。失败不阻断主流程:仅禁用语音功能。
+      // 这里先请求权限并预热语音子服务,实际 start 延迟到用户在设置页打开总开关。
+      final mic = await Permission.microphone.request();
+      if (mic.isGranted) {
+        voiceAssistant.markAvailable();
+      } else {
+        voiceAssistant.markUnavailable(reason: '未获得麦克风权限');
+      }
+      // 后台初始化(加载唤醒模型/配置凭证),不阻塞 ready。
+      unawaited(voiceAssistant.initialize());
+
       _setLoading(0.5, '加载人脸表情模型…');
       await faceEngine.initialize();
 
@@ -142,6 +180,11 @@ class AppController extends ChangeNotifier {
 
       _setLoading(0.95, '读取已录入人物…');
       await personRepository.load();
+
+      // 加载 LLM 配置(DeepSeek 预设),并注入语音助手的对话服务。
+      // 预置 Key 仅在首次落盘时使用,之后以设置页录入为准。
+      await llmConfigStore.load(defaultApiKey: _kPresetLlmApiKey);
+      voiceAssistant.chat.configure(llmConfigStore.config);
 
       _setLoading(1.0, '准备就绪');
       await _camera?.startImageStream(_onFrame);
@@ -212,6 +255,21 @@ class AppController extends ChangeNotifier {
 
   Future<void> _processFrame(CameraImage image) async {
     try {
+      // 提前判断身份识别是否到期（仅依赖时间与开关，不依赖人脸结果），
+      // 以便决定是否需要摆正图像，并与 MLKit 复用同一张 upright，避免
+      // 同一帧重复做逐像素 YUV→RGB 转换（这是主线程最大的开销之一）。
+      final needCapture = _captureCompleter != null;
+      final identityDue = settings.identityEnabled &&
+          faceRecognition.isAvailable &&
+          DateTime.now().difference(_lastIdentityRun) >= _identityInterval;
+      // MLKit 检测与身份识别/录入都用同一旋转基准(_detectionRotation)摆正图像，
+      // 二者旋转角一致 → 算一次共享。仅当确实需要时才算（惰性）。
+      final needsUpright =
+          settings.faceEnabled || identityDue || needCapture;
+      final upright = needsUpright
+          ? CameraImageUtils.toUprightImage(image, _detectionRotation)
+          : null;
+
       final faceFuture = settings.faceEnabled
           ? faceEngine.process(
               image,
@@ -226,6 +284,7 @@ class AppController extends ChangeNotifier {
               sensorRotation: _detectionRotation,
               isFrontCamera: _isFrontCamera,
               deviceOrientation: _deviceOrientation,
+              upright: upright, // 复用上面算好的摆正图，不再重复 YUV 转换
             )
           : Future<List<Rect>>.value(const []);
       final handFuture = settings.handEnabled
@@ -284,19 +343,14 @@ class AppController extends ChangeNotifier {
         faces.add(mediapipeFace);
       }
 
-      // 身份识别（节流）+ 录入采样
-      final needCapture = _captureCompleter != null;
-      final identityDue = settings.identityEnabled &&
-          faceRecognition.isAvailable &&
-          DateTime.now().difference(_lastIdentityRun) >= _identityInterval;
+      // 身份识别（节流）+ 录入采样。
+      // needCapture / identityDue / upright 已在帧开头算好并复用，
+      // 这里直接用预计算结果，避免重复 YUV 转换。
 
       // 本帧每张脸的位置与识别结果（未识别为 null），用于一次性 slot 分配。
       final frameIdentities = <Rect, IdentityMatch?>{};
-      if (faces.isNotEmpty && (needCapture || identityDue)) {
-        final upright =
-            CameraImageUtils.toUprightImage(image, _detectionRotation);
-        if (upright != null) {
-          if (identityDue) {
+      if (faces.isNotEmpty && (needCapture || identityDue) && upright != null) {
+        if (identityDue) {
             _lastIdentityRun = DateTime.now();
             // 逐脸裁剪 + 识别，先收集不写 slot（避免第一帧两张脸塌缩到同一 slot）。
             for (final f in faces) {
@@ -333,7 +387,6 @@ class AppController extends ChangeNotifier {
             _completeCapture(
                 EnrollCapture(jpgBytes: jpg, embedding: embedding));
           }
-        }
       }
 
       // 附着 slot 身份（TTL 内有效），并把结果写回各脸。
@@ -520,6 +573,35 @@ class AppController extends ChangeNotifier {
     } else if (settings.debugMode && _virtualPetUrl != null) {
       stopVirtualPetServer();
     }
+    // 语音助手总开关 / 唤醒 / TTS 变更时按需启停(仿虚拟宠物服务管理模式)。
+    _syncVoiceAssistant();
+    notifyListeners();
+  }
+
+  /// 根据当前设置同步语音助手运行态。
+  /// voiceEnabled 开则 start,关则 stop;运行中改唤醒/TTS 配置实时生效。
+  void _syncVoiceAssistant() {
+    final v = voiceAssistant;
+    if (!v.isAvailable) return; // 无麦克风权限或未就绪,跳过
+    v.wakeWordEnabled = settings.wakeWordEnabled;
+    v.ttsEnabled = settings.ttsEnabled;
+    // 唤醒词变更即时下发(开放词表支持运行时改词)。
+    if (settings.wakeWord != v.wakeWord.keyword) {
+      v.wakeWord.setKeyword(settings.wakeWord);
+    }
+    if (settings.voiceEnabled && !v.isRunning) {
+      v.start();
+    } else if (!settings.voiceEnabled && v.isRunning) {
+      v.stop();
+    }
+  }
+
+  /// 更新 LLM 配置:持久化到磁盘 + 实时下发到对话服务 + 重置对话历史。
+  /// 由设置页的 AI 服务编辑入口调用。
+  Future<void> updateLlmConfig(LlmConfig config) async {
+    await llmConfigStore.save(config);
+    voiceAssistant.chat.configure(config);
+    voiceAssistant.chat.reset();
     notifyListeners();
   }
 
@@ -559,6 +641,7 @@ class AppController extends ChangeNotifier {
     handEngine.dispose();
     mlkitFaceEngine.dispose();
     faceRecognition.dispose();
+    voiceAssistant.dispose();
     staticServer.stop();
     super.dispose();
   }
