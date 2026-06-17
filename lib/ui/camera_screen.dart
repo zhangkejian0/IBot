@@ -10,6 +10,7 @@ import '../face/emotion_mapper.dart';
 import '../face/gaze_smoother.dart';
 import '../face/gaze_zone_detector.dart';
 import '../models/expression.dart';
+import '../services/camera_image_utils.dart';
 import '../services/voice/voice_state.dart';
 import '../theme/app_theme.dart';
 import 'overlay_painter.dart';
@@ -49,7 +50,10 @@ class CameraScreen extends StatelessWidget {
                   final isFront = controller.isFrontCamera;
                   var x = 2 * face.boundingBox.center.dx - 1;
                   var y = 2 * face.boundingBox.center.dy - 1;
-                  if (isFront) x = -x;
+                  if (isFront &&
+                      CameraImageUtils.shouldFlipFrontCameraHorizontal) {
+                    x = -x;
+                  }
                   controller.gazeZoneDetector.update(x, y);
                 } else {
                   controller.gazeZoneDetector.reset();
@@ -240,7 +244,9 @@ class _VirtualPetWebViewState extends State<_VirtualPetWebView> {
       // 计算人脸中心归一化坐标（-1..1，画面中心为原点）
       var x = 2 * face.boundingBox.center.dx - 1; // 画面中心→0，右→+1
       var y = 2 * face.boundingBox.center.dy - 1; // 画面中心→0，下→+1
-      if (_isFrontCamera) x = -x; // 前置水平镜像
+      if (_isFrontCamera && CameraImageUtils.shouldFlipFrontCameraHorizontal) {
+        x = -x;
+      }
 
       final targetX = _mapGazeAxis(x);
       final targetY = _mapGazeAxis(y);

@@ -230,21 +230,15 @@ class AppController extends ChangeNotifier {
   DeviceOrientation get _deviceOrientation =>
       _camera?.value.deviceOrientation ?? DeviceOrientation.landscapeLeft;
 
+  /// 覆盖层是否水平镜像检测坐标以贴合预览（见 [CameraImageUtils.shouldFlipFrontCameraHorizontal]）。
+  bool _effectiveMirrorOverlay() {
+    if (!_isFrontCamera || !settings.mirrorFrontCamera) return false;
+    return CameraImageUtils.shouldFlipFrontCameraHorizontal;
+  }
+
   /// 与 FaceEngine / HandEngine 完全一致的旋转基准：前置摄像头为
   /// `(sensorOrientation + deviceRotation) % 360`，后置为相减。
   /// 身份识别裁剪必须用同一旋转，否则裁剪框与归一化坐标空间错位。
-  int get _detectionRotation {
-    final deviceRotation = switch (_deviceOrientation) {
-      DeviceOrientation.portraitUp => 0,
-      DeviceOrientation.landscapeLeft => 90,
-      DeviceOrientation.portraitDown => 180,
-      DeviceOrientation.landscapeRight => 270,
-    };
-    return _isFrontCamera
-        ? (_sensorOrientation + deviceRotation) % 360
-        : (_sensorOrientation - deviceRotation + 360) % 360;
-  }
-
   void _onFrame(CameraImage image) {
     if (_disposed || _processing || _phase != AppPhase.ready) return;
     _processing = true;
@@ -255,6 +249,14 @@ class AppController extends ChangeNotifier {
 
   Future<void> _processFrame(CameraImage image) async {
     try {
+      final detectionRotation = CameraImageUtils.detectionRotationDegrees(
+        width: image.width,
+        height: image.height,
+        sensorOrientation: _sensorOrientation,
+        isFrontCamera: _isFrontCamera,
+        deviceOrientation: _deviceOrientation,
+      );
+
       // 提前判断身份识别是否到期（仅依赖时间与开关，不依赖人脸结果），
       // 以便决定是否需要摆正图像，并与 MLKit 复用同一张 upright，避免
       // 同一帧重复做逐像素 YUV→RGB 转换（这是主线程最大的开销之一）。
@@ -266,9 +268,14 @@ class AppController extends ChangeNotifier {
       // 二者旋转角一致 → 算一次共享。仅当确实需要时才算（惰性）。
       final needsUpright =
           settings.faceEnabled || identityDue || needCapture;
-      final upright = needsUpright
-          ? CameraImageUtils.toUprightImage(image, _detectionRotation)
-          : null;
+      img.Image? upright;
+      if (needsUpright) {
+        try {
+          upright = CameraImageUtils.toUprightImage(image, detectionRotation);
+        } catch (e, st) {
+          debugPrint('[Frame] toUprightImage error: $e\n$st');
+        }
+      }
 
       final faceFuture = settings.faceEnabled
           ? faceEngine.process(
@@ -281,7 +288,7 @@ class AppController extends ChangeNotifier {
       final mlkitFuture = settings.faceEnabled
           ? mlkitFaceEngine.process(
               image,
-              sensorRotation: _detectionRotation,
+              sensorRotation: detectionRotation,
               isFrontCamera: _isFrontCamera,
               deviceOrientation: _deviceOrientation,
               upright: upright, // 复用上面算好的摆正图，不再重复 YUV 转换
@@ -410,7 +417,7 @@ class AppController extends ChangeNotifier {
               ));
       }
 
-      final mirror = settings.mirrorFrontCamera && _isFrontCamera;
+      final mirror = _effectiveMirrorOverlay();
       _result =
           DetectionResult(faces: resultFaces, hands: handResult, mirror: mirror);
       if (!_disposed) notifyListeners();
