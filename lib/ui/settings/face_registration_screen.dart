@@ -94,24 +94,31 @@ class _FaceRegistrationScreenState extends State<FaceRegistrationScreen>
 
     final samples = <_Sample>[];
     try {
-      for (var i = 0; i < _requiredSamples; i++) {
+      // 在总时限内尽量采集 _requiredSamples 张样本。
+      //
+      // 关键改动：单帧漏检（如缓慢转头到大角度、运动模糊导致检测器丢脸）
+      // 不再立刻中止整个录入流程，而是在截止时间内继续重试。只有在整个窗口
+      // 内一张都没采到时才判定失败 —— 避免「明明人脸清晰却报未捕获」。
+      final deadline = DateTime.now().add(const Duration(seconds: 20));
+      while (samples.length < _requiredSamples &&
+          DateTime.now().isBefore(deadline)) {
         if (!mounted) return;
         setState(() => _state = _EnrollState.collecting);
 
+        // 单次尝试给足时间：一次请求会被「窗口内首个检测到人脸的帧」满足，
+        // 故较长超时可吸收慢帧（录入页动画 + 主页推送会拖慢单帧处理）。
         final capture = await controller.captureFaceSample(
-          timeout: const Duration(seconds: 5),
+          timeout: const Duration(seconds: 6),
         );
         if (!mounted) return;
 
         if (capture == null || !capture.hasEmbedding) {
-          // 未捕获到人脸或未提取特征。
-          _finish(_EnrollState.failed, '未捕获到清晰人脸，请重试');
-          return;
+          // 本次窗口内没等到清晰人脸：不中止，回到循环继续重试（直到截止时间）。
+          continue;
         }
 
         // 立即判重：若已有人脸库命中，中断并提示。
-        final existing =
-            controller.findExistingIdentity(capture.embedding!);
+        final existing = controller.findExistingIdentity(capture.embedding!);
         if (existing != null) {
           _finish(_EnrollState.duplicate, '这张脸我已经认识啦，不用重复录入～');
           return;
@@ -121,12 +128,19 @@ class _FaceRegistrationScreenState extends State<FaceRegistrationScreen>
         setState(() => _collected = samples.length);
 
         // 采集间隔，引导用户调整角度增加多样性（最后一张不等）。
-        if (i < _requiredSamples - 1) {
-          await Future<void>.delayed(const Duration(milliseconds: 500));
+        if (samples.length < _requiredSamples) {
+          await Future<void>.delayed(const Duration(milliseconds: 350));
         }
       }
 
-      // 全部采集完成：保存头像 + 人物。
+      // 整个窗口一张都没采到才算失败（人脸全程不可见 / 模型异常）。
+      if (samples.isEmpty) {
+        _finish(_EnrollState.failed, '未捕获到清晰人脸，请正对摄像头后重试');
+        return;
+      }
+
+      // 采集到至少 1 张即可保存（多张更稳；不足 5 张也允许，提升成功率）。
+      // 保存头像 + 人物。
       final person = Person(
         id: DateTime.now().microsecondsSinceEpoch.toString(),
         name: name,
