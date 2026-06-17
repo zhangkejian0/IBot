@@ -44,8 +44,9 @@ class CameraImageUtils {
 
   /// 前置摄像头下是否对水平坐标取反（覆盖层镜像 / 注视跟随）。
   ///
-  /// Android 取流未水平镜像，需翻转以贴合自拍预览。
-  /// iOS 横屏取流已由系统摆正，再翻转会左右颠倒。
+  /// Android 取流未水平镜像，需翻转以贴合自拍预览（与 hand_detection 示例一致）。
+  /// iOS 取流已由 `AVCaptureConnection.isVideoMirrored` 镜像，覆盖层不再翻转；
+  /// 人脸 MediaPipe 插件多余的 X 翻转在 [FaceEngine] 中单独撤销。
   static bool get shouldFlipFrontCameraHorizontal => !Platform.isIOS;
 
   /// 转换并按 [rotationDegrees] 摆正为竖直图像。失败返回 null。

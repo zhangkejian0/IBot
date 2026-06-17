@@ -1,3 +1,4 @@
+import 'dart:io' show Platform;
 import 'dart:ui';
 
 import 'package:camera/camera.dart';
@@ -71,8 +72,12 @@ class FaceEngine {
 
     final points = <Offset>[];
     double minX = 1, minY = 1, maxX = 0, maxY = 0;
+    // iOS 原生插件对 X 做了 1-x「镜像补偿」，但 camera_avfoundation 取流
+    // 已通过 isVideoMirrored 水平镜像，再翻一次会与预览左右相反。
+    final undoPluginMirrorX = Platform.isIOS;
     for (final lm in face.landmarks) {
-      final x = lm.x.clamp(0.0, 1.0).toDouble();
+      final rawX = lm.x.clamp(0.0, 1.0).toDouble();
+      final x = undoPluginMirrorX ? (1.0 - rawX) : rawX;
       final y = lm.y.clamp(0.0, 1.0).toDouble();
       points.add(Offset(x, y));
       if (x < minX) minX = x;
