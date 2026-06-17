@@ -41,6 +41,40 @@ post_install do |installer|
     flutter_additional_ios_build_settings(target)
     target.build_configurations.each do |config|
       config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.5'
+      # kwon_mediapipe_landmarker 的 Swift 代码依赖 MediaPipe ObjC / graph 符号。
+      if target.name == 'kwon_mediapipe_landmarker'
+        config.build_settings['OTHER_LDFLAGS'] ||= '$(inherited)'
+        flags = config.build_settings['OTHER_LDFLAGS']
+        flags = [flags] unless flags.is_a?(Array)
+        %w[MediaPipeTasksCommon MediaPipeTasksVision].each do |fw|
+          unless flags.join(' ').include?(fw)
+            flags << '-framework' << fw
+          end
+        end
+        config.build_settings['OTHER_LDFLAGS'] = flags
+        config.build_settings['OTHER_LDFLAGS[sdk=iphoneos*]'] =
+          '$(inherited) -force_load "$(PODS_ROOT)/MediaPipeTasksCommon/frameworks/graph_libraries/libMediaPipeTasksCommon_device_graph.a"'
+        config.build_settings['OTHER_LDFLAGS[sdk=iphonesimulator*]'] =
+          '$(inherited) -force_load "$(PODS_ROOT)/MediaPipeTasksCommon/frameworks/graph_libraries/libMediaPipeTasksCommon_simulator_graph.a"'
+      end
+    end
+  end
+
+  # graph .a 已在 kwon_mediapipe_landmarker 中 force_load，避免 Runner 重复链接。
+  installer.aggregate_targets.each do |aggregate_target|
+    aggregate_target.xcconfigs.each do |config_name, _|
+      xcconfig_path = aggregate_target.xcconfig_path(config_name)
+      next unless File.exist?(xcconfig_path)
+
+      xcconfig = File.read(xcconfig_path)
+      updated = xcconfig.gsub(
+        /^OTHER_LDFLAGS\[sdk=iphoneos\*\].*\n/,
+        ''
+      ).gsub(
+        /^OTHER_LDFLAGS\[sdk=iphonesimulator\*\].*\n/,
+        ''
+      )
+      File.write(xcconfig_path, updated) if updated != xcconfig
     end
   end
 end

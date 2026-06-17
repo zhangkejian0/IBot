@@ -43,7 +43,7 @@ dependencies:
   hand_detection: ^3.1.1
   kwon_mediapipe_landmarker: ^0.0.3
   google_mlkit_face_detection: ^0.13.2
-  tflite_flutter: ^0.12.1
+  flutter_litert: ^2.8.3
   webview_flutter: ^4.13.0
 
 dev_dependencies:
