@@ -289,7 +289,6 @@ class _VirtualPetWebViewState extends State<_VirtualPetWebView> {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    debugPrint('[VirtualPet] didChangeDependencies _loading=$_loading _loaded=$_loaded');
     if (!_loading && !_loaded) {
       _loading = true;
       _loadUrl();

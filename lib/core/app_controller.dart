@@ -307,10 +307,6 @@ class AppController extends ChangeNotifier {
       final mlkitBoxes = await mlkitFuture; // 多脸归一化框（主脸在前）
       final handResult = await handFuture;
 
-      // 临时调试日志：定位「两人入镜只识别一个」。
-      debugPrint('[Frame] mlkitBoxes=${mlkitBoxes.length} '
-          'mediapipe=${mediapipeFace != null}');
-
       // 构建多脸列表：以 ML Kit 框为主，MediaPipe 主脸（网格/表情）按 IoU
       // 嫁接到最匹配的框上；其余脸仅含包围盒。
       final faces = <FaceOverlay>[];
@@ -372,17 +368,9 @@ class AppController extends ChangeNotifier {
                     embedding, personRepository.people);
               }
               frameIdentities[f.boundingBox] = match;
-              // 临时调试：看每张脸各自的识别结果。
-              final b = f.boundingBox;
-              debugPrint('[Ident] box=(${b.left.toStringAsFixed(2)},'
-                  '${b.top.toStringAsFixed(2)},${b.right.toStringAsFixed(2)},'
-                  '${b.bottom.toStringAsFixed(2)}) '
-                  'name=${match?.person.name ?? "未识别"} '
-                  'sim=${match?.similarity.toStringAsFixed(3)}');
             }
             // 用本帧内独占的贪心匹配把识别结果绑定到 slot。
             _assignSlots(frameIdentities);
-            debugPrint('[Ident] faces=${faces.length} slots=${_slots.length}');
           }
 
           if (needCapture) {

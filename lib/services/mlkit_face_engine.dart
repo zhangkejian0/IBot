@@ -97,10 +97,6 @@ class MlKitFaceEngine {
       return const [];
     }
 
-    // 临时调试日志：定位「多人脸只识别一个」问题。
-    debugPrint('[MlKitFace] upright=${w}x$h '
-        'rawFaces=${faces.length}');
-
     final boxes = <_Box>[];
     for (final f in faces) {
       final b = f.boundingBox;
@@ -111,8 +107,6 @@ class MlKitFaceEngine {
       final ny2 = (b.bottom / h).clamp(0.0, 1.0).toDouble();
       final area = (nx2 - nx) * (ny2 - ny);
       if (area <= 0) continue;
-      debugPrint('[MlKitFace] box px=(${b.left.round()},${b.top.round()},'
-          '${b.right.round()},${b.bottom.round()}) norm=$area');
       boxes.add(_Box(Rect.fromLTRB(nx, ny, nx2, ny2), area));
     }
     // 面积降序：主脸（最大）在前。
