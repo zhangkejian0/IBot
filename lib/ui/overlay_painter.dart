@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:hand_detection/hand_detection.dart';
 
 import '../core/app_controller.dart';
+import '../face/gaze_zone_detector.dart';
 import '../models/detection.dart';
 import '../models/expression.dart';
 import '../models/hand_gesture.dart';
@@ -12,8 +13,13 @@ import '../theme/app_theme.dart';
 class DetectionOverlayPainter extends CustomPainter {
   final DetectionResult result;
   final DisplaySettings settings;
+  final GazeZoneDetector? zoneDetector;
 
-  DetectionOverlayPainter({required this.result, required this.settings});
+  DetectionOverlayPainter({
+    required this.result,
+    required this.settings,
+    this.zoneDetector,
+  });
 
   Offset _map(Offset n, Size size) {
     final x = result.mirror ? (1 - n.dx) : n.dx;
@@ -33,11 +39,150 @@ class DetectionOverlayPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    // 绘制区域网格（如果启用了区域检测）
+    if (zoneDetector != null) {
+      _paintZoneGrid(canvas, size);
+    }
+
     for (final face in result.faces) {
       _paintFace(canvas, size, face);
     }
     for (final hand in result.hands) {
       _paintHand(canvas, size, hand);
+    }
+  }
+
+  /// 绘制区域网格
+  void _paintZoneGrid(Canvas canvas, Size size) {
+    final zone = zoneDetector!;
+    final cols = GazeZoneDetector.cols;
+    final rows = GazeZoneDetector.rows;
+
+    // 网格线画笔
+    final gridPaint = Paint()
+      ..color = Colors.white.withValues(alpha: 0.3)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1;
+
+    // 高亮区域画笔
+    final highlightPaint = Paint()
+      ..color = Colors.green.withValues(alpha: 0.3)
+      ..style = PaintingStyle.fill;
+
+    // 当前区域高亮画笔
+    final currentHighlightPaint = Paint()
+      ..color = Colors.red.withValues(alpha: 0.4)
+      ..style = PaintingStyle.fill;
+
+    final cellWidth = size.width / cols;
+    final cellHeight = size.height / rows;
+
+    // 绘制网格线
+    for (var i = 0; i <= cols; i++) {
+      final x = i * cellWidth;
+      canvas.drawLine(Offset(x, 0), Offset(x, size.height), gridPaint);
+    }
+    for (var i = 0; i <= rows; i++) {
+      final y = i * cellHeight;
+      canvas.drawLine(Offset(0, y), Offset(size.width, y), gridPaint);
+    }
+
+    // 高亮当前区域
+    final currentCol = zone.currentCol;
+    final currentRow = zone.currentRow;
+    if (currentCol != null && currentRow != null) {
+      final rect = Rect.fromLTWH(
+        currentCol * cellWidth,
+        currentRow * cellHeight,
+        cellWidth,
+        cellHeight,
+      );
+      canvas.drawRect(rect, currentHighlightPaint);
+
+      // 绘制区域名称
+      final zoneName = zone.currentZoneName ?? '';
+      _paintText(
+        canvas,
+        zoneName,
+        Offset(rect.left + 4, rect.top + 4),
+        color: Colors.white,
+        fontSize: 10,
+      );
+    }
+
+    // 绘制死区边界（半透明红色线条）
+    final deadZonePaint = Paint()
+      ..color = Colors.red.withValues(alpha: 0.5)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2;
+
+    final deadZoneRatio = 0.03; // 与GazeZoneDetector._deadZoneRatio一致
+    for (var col = 0; col < cols; col++) {
+      for (var row = 0; row < rows; row++) {
+        final rect = Rect.fromLTWH(
+          col * cellWidth,
+          row * cellHeight,
+          cellWidth,
+          cellHeight,
+        );
+
+        // 绘制死区边界
+        final deadZoneWidth = cellWidth * deadZoneRatio;
+        final deadZoneHeight = cellHeight * deadZoneRatio;
+
+        // 左边界死区
+        if (col > 0) {
+          canvas.drawLine(
+            Offset(rect.left + deadZoneWidth, rect.top),
+            Offset(rect.left + deadZoneWidth, rect.bottom),
+            deadZonePaint,
+          );
+        }
+        // 右边界死区
+        if (col < cols - 1) {
+          canvas.drawLine(
+            Offset(rect.right - deadZoneWidth, rect.top),
+            Offset(rect.right - deadZoneWidth, rect.bottom),
+            deadZonePaint,
+          );
+        }
+        // 上边界死区
+        if (row > 0) {
+          canvas.drawLine(
+            Offset(rect.left, rect.top + deadZoneHeight),
+            Offset(rect.right, rect.top + deadZoneHeight),
+            deadZonePaint,
+          );
+        }
+        // 下边界死区
+        if (row < rows - 1) {
+          canvas.drawLine(
+            Offset(rect.left, rect.bottom - deadZoneHeight),
+            Offset(rect.right, rect.bottom - deadZoneHeight),
+            deadZonePaint,
+          );
+        }
+      }
+    }
+
+    // 绘制区域编号
+    for (var col = 0; col < cols; col++) {
+      for (var row = 0; row < rows; row++) {
+        final rect = Rect.fromLTWH(
+          col * cellWidth,
+          row * cellHeight,
+          cellWidth,
+          cellHeight,
+        );
+        final center = rect.center;
+        _paintText(
+          canvas,
+          '$col,$row',
+          Offset(center.dx - 10, center.dy - 6),
+          color: Colors.white.withValues(alpha: 0.6),
+          fontSize: 9,
+        );
+      }
     }
   }
 
@@ -186,7 +331,10 @@ class DetectionOverlayPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant DetectionOverlayPainter old) {
-    return old.result != result || old.settings != settings;
+    // 检查result、settings或zoneDetector是否变化
+    return old.result != result ||
+        old.settings != settings ||
+        old.zoneDetector?.changeCount != zoneDetector?.changeCount;
   }
 }
 

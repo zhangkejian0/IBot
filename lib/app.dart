@@ -34,7 +34,7 @@ class _XBotAppState extends State<XBotApp> {
     return AppScope(
       controller: _controller,
       child: MaterialApp(
-        title: 'XBot',
+        title: '狗蛋',
         debugShowCheckedModeBanner: false,
         theme: AppTheme.material(),
         themeMode: ThemeMode.dark,

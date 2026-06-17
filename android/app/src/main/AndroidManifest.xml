@@ -3,8 +3,20 @@
     <uses-feature android:name="android.hardware.camera.any" android:required="true"/>
     <uses-feature android:name="android.hardware.camera.autofocus" android:required="false"/>
 
+    <!-- 语音助手：麦克风录音(本地唤醒 + 云端 ASR 需要) -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <!-- 调节音频源(部分设备 VAD/录音需要) -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
+    <!-- 云端 ASR/LLM/TTS 联网 -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- 后台持续监听唤醒词(前台常驻服务) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
+    <!-- 查询麦克风可用性(部分 Android 版本需声明) -->
+    <uses-feature android:name="android.hardware.microphone" android:required="false"/>
+
     <application
-        android:label="XBot"
+        android:label="狗蛋"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         android:largeHeap="true"

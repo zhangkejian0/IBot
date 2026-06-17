@@ -32,7 +32,9 @@ class MlKitFaceEngine {
     if (_initialized) return;
     _detector = FaceDetector(
       options: FaceDetectorOptions(
-        performanceMode: FaceDetectorMode.accurate,
+        // 仅取人脸框用于身份识别裁剪（landmarks/classification 已关闭），
+        // fast 模式足够且比 accurate 快很多，显著降低每帧 MLKit 开销。
+        performanceMode: FaceDetectorMode.fast,
         minFaceSize: 0.1, // 两人并排时每张脸占比较小，用 ML Kit 默认下限避免漏检。
         // 只需要包围盒做身份识别裁剪；关闭 landmarks/contours/classification
         // 以降低开销。trackingId 在固定单设备场景下意义不大，也关闭。
@@ -45,19 +47,31 @@ class MlKitFaceEngine {
   /// 检测多张人脸，返回归一化（0..1）包围盒列表，按面积降序（主脸在前），
   /// 至多 [maxFaces] 个。[sensorRotation] 为与 [CameraImageUtils.toUprightImage]
   /// 一致的摆正旋转角（度）。
+  ///
+  /// 若调用方已用相同旋转角算好 [upright]（如身份识别路径），可传入复用，
+  /// 避免同一帧重复做逐像素 YUV→RGB 转换。
   Future<List<Rect>> process(
     CameraImage image, {
     required int sensorRotation,
     required bool isFrontCamera,
     required DeviceOrientation deviceOrientation,
+    img.Image? upright,
   }) async {
     final detector = _detector;
     if (detector == null || !_initialized) return const [];
 
-    // toUprightImage 仅按 sensorOrientation 摆正，与本引擎传入的旋转基准保持
-    // 一致：二者都用 sensorOrientation，得到同一张竖直图像。
-    final upright = CameraImageUtils.toUprightImage(image, sensorRotation);
-    if (upright == null) return const [];
+    // 未传入预计算 upright 时自己算（保持向后兼容）。
+    final up =
+        upright ?? CameraImageUtils.toUprightImage(image, sensorRotation);
+    if (up == null) return const [];
+
+    return processUpright(up);
+  }
+
+  /// 对已摆正的图像做人脸检测，返回归一化包围盒（按面积降序，主脸在前）。
+  Future<List<Rect>> processUpright(img.Image upright) async {
+    final detector = _detector;
+    if (detector == null || !_initialized) return const [];
 
     final w = upright.width;
     final h = upright.height;
@@ -84,7 +98,7 @@ class MlKitFaceEngine {
     }
 
     // 临时调试日志：定位「多人脸只识别一个」问题。
-    debugPrint('[MlKitFace] upright=${w}x$h rotate=$sensorRotation '
+    debugPrint('[MlKitFace] upright=${w}x$h '
         'rawFaces=${faces.length}');
 
     final boxes = <_Box>[];
