@@ -60,11 +60,19 @@ post_install do |installer|
             flags << '-framework' << fw
           end
         end
+        # MediaPipe 以静态 .framework 分发；force_load Common 以链入 NSString+cppString。
+        flags << '-framework' << 'AVFoundation' unless flags.join(' ').include?('AVFoundation')
         config.build_settings['OTHER_LDFLAGS'] = flags
-        config.build_settings['OTHER_LDFLAGS[sdk=iphoneos*]'] =
-          '$(inherited) -force_load "$(PODS_ROOT)/MediaPipeTasksCommon/frameworks/graph_libraries/libMediaPipeTasksCommon_device_graph.a"'
-        config.build_settings['OTHER_LDFLAGS[sdk=iphonesimulator*]'] =
-          '$(inherited) -force_load "$(PODS_ROOT)/MediaPipeTasksCommon/frameworks/graph_libraries/libMediaPipeTasksCommon_simulator_graph.a"'
+        config.build_settings['OTHER_LDFLAGS[sdk=iphoneos*]'] = [
+          '$(inherited)',
+          '-force_load', '"$(PODS_XCFRAMEWORKS_BUILD_DIR)/MediaPipeTasksCommon/MediaPipeTasksCommon.framework/MediaPipeTasksCommon"',
+          '-force_load', '"$(PODS_ROOT)/MediaPipeTasksCommon/frameworks/graph_libraries/libMediaPipeTasksCommon_device_graph.a"',
+        ].join(' ')
+        config.build_settings['OTHER_LDFLAGS[sdk=iphonesimulator*]'] = [
+          '$(inherited)',
+          '-force_load', '"$(PODS_XCFRAMEWORKS_BUILD_DIR)/MediaPipeTasksCommon/MediaPipeTasksCommon.framework/MediaPipeTasksCommon"',
+          '-force_load', '"$(PODS_ROOT)/MediaPipeTasksCommon/frameworks/graph_libraries/libMediaPipeTasksCommon_simulator_graph.a"',
+        ].join(' ')
       end
     end
   end
