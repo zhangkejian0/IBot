@@ -3,6 +3,7 @@ import 'package:flutter/material.dart' show MaterialPageRoute;
 
 import '../../core/app_controller.dart';
 import '../../core/app_scope.dart';
+import '../../services/voice/pophie_config.dart';
 import '../../theme/app_theme.dart';
 import 'face_registration_screen.dart';
 import 'friend_list_sheet.dart';
@@ -166,8 +167,8 @@ class SettingsScreen extends StatelessWidget {
                   ],
                 ),
 
-                // AI 服务(LLM)配置分组:DeepSeek 预设,可编辑切换任意 OpenAI 兼容端点。
-                _LlmConfigSection(controller: controller),
+                // Pophie 后端配置分组:语音对话全程走该后端(STT+LLM+TTS 一体化)。
+                _PophieConfigSection(controller: controller),
 
                 CupertinoListSection.insetGrouped(
                   backgroundColor: AppTheme.background,
@@ -468,10 +469,11 @@ class _WakeWordTile extends StatelessWidget {
   }
 }
 
-/// AI 服务(LLM)配置分组。预设 DeepSeek,每一项点击可编辑,
-/// 保存后持久化并实时下发到对话服务。订阅 controller 以反映最新值。
-class _LlmConfigSection extends StatelessWidget {
-  const _LlmConfigSection({required this.controller});
+/// Pophie 后端配置分组。语音对话全程走该后端的 /api/chat
+/// (STT+LLM+TTS 一体化,见 docs/API对接文档.md)。每一项点击可编辑,
+/// 保存后持久化并实时下发到客户端。订阅 controller 以反映最新值。
+class _PophieConfigSection extends StatelessWidget {
+  const _PophieConfigSection({required this.controller});
   final AppController controller;
 
   @override
@@ -479,50 +481,65 @@ class _LlmConfigSection extends StatelessWidget {
     return ListenableBuilder(
       listenable: controller,
       builder: (context, _) {
-        final cfg = controller.llmConfigStore.config;
-        final connected = controller.voiceAssistant.chat.isAvailable;
+        final cfg = controller.pophieConfigStore.config;
         return CupertinoListSection.insetGrouped(
           backgroundColor: AppTheme.background,
           decoration: const BoxDecoration(
             color: AppTheme.groupedBackground,
             borderRadius: BorderRadius.all(Radius.circular(12)),
           ),
-          header: const _Header('AI 服务'),
-          footer: _Footer(connected
-              ? '已配置 ${cfg.model},可语音对话。点击各项可修改,适用于任何 OpenAI 兼容端点。'
-              : '尚未配置有效 API Key,语音对话不可用。点击「API Key」录入。'),
+          header: const _Header('Pophie 服务'),
+          footer: const _Footer(
+              '语音对话走 Pophie 后端,一次完成识别+大模型+合成。'
+              '请填写后端地址(局域网需用电脑 IP,非 127.0.0.1)。'),
           children: [
             _ConfigTile(
               icon: CupertinoIcons.link,
               color: AppTheme.accent,
-              label: '服务地址',
+              label: '后端地址',
               value: cfg.baseUrl,
-              placeholder: 'https://api.deepseek.com',
-              editorLabel: '服务地址 (Base URL)',
-              editorHint: 'https://api.deepseek.com',
-              onTap: (v) => controller.updateLlmConfig(cfg.copyWith(baseUrl: v)),
+              placeholder: PophieConfig.defaultBaseUrl,
+              editorLabel: '后端地址 (Base URL)',
+              editorHint: PophieConfig.defaultBaseUrl,
+              // 去掉结尾斜杠,客户端会自行拼接 /api/chat。
+              onTap: (v) => controller.updatePophieConfig(
+                  cfg.copyWith(baseUrl: _trimSlash(v))),
             ),
             _ConfigTile(
-              icon: CupertinoIcons.lock_fill,
-              color: AppTheme.accentOrange,
-              label: 'API Key',
-              value: _maskKey(cfg.apiKey),
-              placeholder: '未设置',
-              editorLabel: 'API Key (Bearer)',
-              editorHint: 'sk-...',
-              // 编辑时回填明文原值(非脱敏值)。
-              editorInitial: cfg.apiKey,
-              onTap: (v) => controller.updateLlmConfig(cfg.copyWith(apiKey: v)),
-            ),
-            _ConfigTile(
-              icon: CupertinoIcons.cube_box_fill,
+              icon: CupertinoIcons.waveform,
               color: AppTheme.accentPurple,
-              label: '模型',
-              value: cfg.model,
-              placeholder: 'deepseek-chat',
-              editorLabel: '模型名称',
-              editorHint: 'deepseek-chat',
-              onTap: (v) => controller.updateLlmConfig(cfg.copyWith(model: v)),
+              label: 'TTS 音色',
+              value: cfg.voiceId,
+              placeholder: '默认音色',
+              editorLabel: 'TTS 音色 (voice_id)',
+              editorHint: 'zh-CN-XiaoxiaoNeural',
+              onTap: (v) =>
+                  controller.updatePophieConfig(cfg.copyWith(voiceId: v)),
+            ),
+            CupertinoListTile.notched(
+              backgroundColor: AppTheme.groupedBackground,
+              leading: const _LeadingIcon(
+                  CupertinoIcons.device_phone_portrait, AppTheme.secondaryLabel),
+              title: const Text('设备 ID',
+                  style: TextStyle(color: AppTheme.label)),
+              subtitle: Text(
+                cfg.robotId,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: AppTheme.tertiaryLabel),
+              ),
+            ),
+            CupertinoListTile.notched(
+              backgroundColor: AppTheme.groupedBackground,
+              leading: const _LeadingIcon(
+                  CupertinoIcons.antenna_radiowaves_left_right,
+                  AppTheme.accentGreen),
+              title: const Text('测试连接',
+                  style: TextStyle(color: AppTheme.label)),
+              subtitle: const Text('检查后端是否可达',
+                  style: TextStyle(color: AppTheme.secondaryLabel)),
+              trailing: const CupertinoListTileChevron(),
+              onTap: () => _testConnection(context),
             ),
           ],
         );
@@ -530,11 +547,36 @@ class _LlmConfigSection extends StatelessWidget {
     );
   }
 
-  /// API Key 脱敏:只显示前 6 位 + 末 4 位,中间用 ··· 代替。
-  String _maskKey(String key) {
-    if (key.isEmpty) return '';
-    if (key.length <= 10) return '···';
-    return '${key.substring(0, 6)}···${key.substring(key.length - 4)}';
+  static String _trimSlash(String v) {
+    var s = v.trim();
+    while (s.endsWith('/')) {
+      s = s.substring(0, s.length - 1);
+    }
+    return s;
+  }
+
+  Future<void> _testConnection(BuildContext context) async {
+    final ok = await controller.voiceAssistant.pophie.health();
+    if (!context.mounted) return;
+    showCupertinoModalPopup<void>(
+      context: context,
+      builder: (ctx) => CupertinoAlertDialog(
+        title: Text(ok ? '连接成功' : '连接失败'),
+        content: Padding(
+          padding: const EdgeInsets.only(top: 8),
+          child: Text(ok
+              ? '后端可达,语音能力已就绪。'
+              : '无法连接后端,请检查地址与网络(同一局域网、防火墙、端口 8000)。'),
+        ),
+        actions: [
+          CupertinoDialogAction(
+            isDefaultAction: true,
+            child: const Text('好'),
+            onPressed: () => Navigator.of(ctx).pop(),
+          ),
+        ],
+      ),
+    );
   }
 }
 
@@ -550,7 +592,6 @@ class _ConfigTile extends StatelessWidget {
     required this.editorLabel,
     required this.editorHint,
     required this.onTap,
-    this.editorInitial,
   });
 
   final IconData icon;
@@ -561,8 +602,6 @@ class _ConfigTile extends StatelessWidget {
   final String editorLabel;
   final String editorHint;
   final ValueChanged<String> onTap;
-  /// 编辑弹窗里的初始文本(默认取 [value];API Key 用明文原值而非脱敏值)。
-  final String? editorInitial;
 
   @override
   Widget build(BuildContext context) {
@@ -585,7 +624,7 @@ class _ConfigTile extends StatelessWidget {
   }
 
   void _showEditor(BuildContext context) {
-    final tec = TextEditingController(text: editorInitial ?? value);
+    final tec = TextEditingController(text: value);
     showCupertinoModalPopup<void>(
       context: context,
       builder: (ctx) => CupertinoAlertDialog(
