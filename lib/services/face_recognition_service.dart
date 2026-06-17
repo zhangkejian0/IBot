@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:collection/collection.dart';
 import 'package:image/image.dart' as img;
@@ -22,6 +23,12 @@ class FaceRecognitionService {
   bool _available = false;
   String? _statusMessage;
 
+  // 预分配的输入/输出缓冲区，避免每次 embed() 都新建 112*112*3 个嵌套 List
+  // 对象造成 GC 抖动。reshape 为 List 视图供 interpreter.run 使用，不复制数据。
+  late final Float32List _inputBuffer =
+      Float32List(_inputSize * _inputSize * 3);
+  late final Float32List _outputBuffer = Float32List(_embeddingSize);
+
   bool get isAvailable => _available;
   String? get statusMessage => _statusMessage;
   int get embeddingSize => _embeddingSize;
@@ -32,7 +39,12 @@ class FaceRecognitionService {
   Future<void> initialize() async {
     Interpreter interpreter;
     try {
-      interpreter = await Interpreter.fromAsset('assets/$_modelAsset');
+      // threads=4 启用 CPU 多核 + XNNPACK，比默认单线程明显加速。
+      // MobileFaceNet 112x112 是小模型，GPU delegate 启动开销可能反而变慢，
+      // 故先用多线程 CPU（最稳妥），后续可在 Isolate 化时再试 NNAPI。
+      final options = InterpreterOptions()..threads = 4;
+      interpreter =
+          await Interpreter.fromAsset('assets/$_modelAsset', options: options);
     } catch (e) {
       _markUnavailable('未找到身份识别模型 assets/$_modelAsset，身份识别已停用');
       return;
@@ -79,28 +91,40 @@ class FaceRecognitionService {
       faceCrop,
       width: _inputSize,
       height: _inputSize,
+      // 与模型归一化一致使用 8 位 RGB；由后续线性变换映射到 [-1,1]。
     );
 
-    // 输入张量 [1, 112, 112, 3]，归一化到 [-1, 1]
-    final input = List.generate(
-      1,
-      (_) => List.generate(
-        _inputSize,
-        (y) => List.generate(_inputSize, (x) {
+    // 批量取 RGB 字节（顺序 R,G,B），避免逐像素 getPixel 的对象分配。
+    final rgb = resized.getBytes(order: img.ChannelOrder.rgb);
+    final buf = _inputBuffer;
+    final n = _inputSize * _inputSize;
+    // rgb 长度应等于 n*3；若图像通道数与预期不符则回退到逐像素，保证稳健。
+    if (rgb.length >= n * 3) {
+      for (var i = 0; i < n; i++) {
+        final j = i * 3;
+        buf[j] = (rgb[j] - 127.5) / 128.0; // R
+        buf[j + 1] = (rgb[j + 1] - 127.5) / 128.0; // G
+        buf[j + 2] = (rgb[j + 2] - 127.5) / 128.0; // B
+      }
+    } else {
+      // 回退路径：通道数不匹配时逐像素取，仍写入同一扁平 buffer。
+      var k = 0;
+      for (var y = 0; y < _inputSize; y++) {
+        for (var x = 0; x < _inputSize; x++) {
           final px = resized.getPixel(x, y);
-          return [
-            (px.r - 127.5) / 128.0,
-            (px.g - 127.5) / 128.0,
-            (px.b - 127.5) / 128.0,
-          ];
-        }),
-      ),
-    );
+          buf[k++] = (px.r - 127.5) / 128.0;
+          buf[k++] = (px.g - 127.5) / 128.0;
+          buf[k++] = (px.b - 127.5) / 128.0;
+        }
+      }
+    }
 
-    final output = List.generate(1, (_) => List.filled(_embeddingSize, 0.0));
-    interpreter.run(input, output);
+    // 复用预分配输出缓冲。tflite_flutter 内部对输入做 flatten，扁平
+    // Float32List 已是平铺结构，直接传入即可，无需 reshape（reshape 会复制）。
+    _outputBuffer.fillRange(0, _embeddingSize, 0.0);
+    interpreter.run(buf, _outputBuffer);
 
-    return _l2Normalize(output[0]);
+    return _l2Normalize(_outputBuffer);
   }
 
   /// 在已录入人物中寻找最相似者；不足阈值则返回 null。

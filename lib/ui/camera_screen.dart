@@ -115,20 +115,39 @@ class _VirtualPetWebViewState extends State<_VirtualPetWebView> {
   FaceState? _lastSent;
   DateTime _lastSentAt = DateTime.fromMillisecondsSinceEpoch(0);
 
-  // 注视方向平滑器：消除 eyeLook blendshape 帧间抖动。
-  final GazeSmoother _gaze = GazeSmoother();
+  // 注视方向平滑器：消除人脸框帧间抖动。k 偏大→跟手、几乎不拖影。
+  final GazeSmoother _gaze = GazeSmoother(k: 0.85);
   // 是否为前置摄像头（决定水平 gaze 是否镜像）。
   bool _isFrontCamera = true;
 
+  // —— 连续注视映射参数 ——
+  // 增益：人脸中心位移放大到瞳孔位移。桌面场景下人脸通常只在画面中部小幅
+  // 移动（归一化坐标极少触及 ±1），用 >1 的增益让中等幅度即可让眼睛看到边缘，
+  // 显著提升「灵敏度」。最终 clamp 到 [-1,1]。
+  static const double _gazeGain = 2.6;
+  // 中心死区：极小，仅用于消除静止时人脸框微抖导致的瞳孔颤动。
+  static const double _gazeDeadZone = 0.03;
+
+  /// 把单轴归一化人脸位置（-1..1）映射为瞳孔目标（-1..1）。
+  /// 先扣掉中心死区保证静止稳定，再按增益放大并 clamp。
+  double _mapGazeAxis(double v) {
+    final sign = v.isNegative ? -1.0 : 1.0;
+    final mag = v.abs();
+    if (mag <= _gazeDeadZone) return 0.0;
+    final adjusted = (mag - _gazeDeadZone) * _gazeGain;
+    return (sign * adjusted).clamp(-1.0, 1.0);
+  }
+
   // 区域检测器：使用AppController中的实例，与调试可视化共享。
   GazeZoneDetector get _zoneDetector => widget.controller.gazeZoneDetector;
-  // 目标区域中心坐标（用于平滑插值）
-  Offset _targetGaze = Offset.zero;
 
   // JS 推送节流：检测每帧（~30fps）都触发监听，但 runJavaScript 是异步且
   // WebView 单线程串行执行 JS，若每帧都发会堆积排队造成卡顿。用一个时间窗
   // 合并多帧、且把 setState+setGazeTarget 合成一次 JS 调用，大幅减少 JS 队列。
-  static const Duration _pushInterval = Duration(milliseconds: 50); // ~20fps
+  // 合并后的 JS 调用很小（一行 setGazeTarget/setState），把窗口收紧到
+  // ~33ms(~30fps)：在不堆积 JS 队列的前提下，让注视跟随尽量贴近检测帧率，
+  // 降低「慢半拍」的感知延迟。
+  static const Duration _pushInterval = Duration(milliseconds: 33); // ~30fps
   DateTime _lastPushAt = DateTime.fromMillisecondsSinceEpoch(0);
 
   @override
@@ -211,7 +230,11 @@ class _VirtualPetWebViewState extends State<_VirtualPetWebView> {
       return;
     }
 
-    // 注视方向：使用区域检测，映射到九宫格极限位置。
+    // 注视方向：人脸中心 → 瞳孔的「连续比例映射」。
+    //
+    // 旧实现把位置量化到九宫格的 9 个极限位置（-1/0/1），同一格内移动脸
+    // 眼睛完全不动，只在跨越边界时突变 —— 主观上就是「不灵敏 / 迟钝」。
+    // 这里改为连续映射：脸偏离中心越多，瞳孔成比例偏移越多，做到逐帧跟随。
     String gazeJs = '';
     if (face != null) {
       // 计算人脸中心归一化坐标（-1..1，画面中心为原点）
@@ -219,20 +242,14 @@ class _VirtualPetWebViewState extends State<_VirtualPetWebView> {
       var y = 2 * face.boundingBox.center.dy - 1; // 画面中心→0，下→+1
       if (_isFrontCamera) x = -x; // 前置水平镜像
 
-      // 使用区域检测器判断是否需要发送JS更新
-      final zoneChanged = _zoneDetector.update(x, y);
-      if (zoneChanged) {
-        // 区域变化，获取对应宫格的极限位置
-        final col = _zoneDetector.currentCol ?? 1;
-        final row = _zoneDetector.currentRow ?? 1;
-        // 九宫格映射到极限位置：col 0,1,2 -> x -1,0,1；row 0,1,2 -> y -1,0,1
-        final targetX = (col - 1).toDouble(); // -1, 0, 1
-        final targetY = (row - 1).toDouble(); // -1, 0, 1
-        _targetGaze = Offset(targetX, targetY);
-        debugPrint('[VirtualPet] 区域变化: ${_zoneDetector.currentZoneName} -> ($targetX, $targetY)');
-      }
-      // 平滑插值：眼睛从当前位置平滑移动到目标极限位置
-      final smooth = _gaze.update(_targetGaze.dx, _targetGaze.dy);
+      final targetX = _mapGazeAxis(x);
+      final targetY = _mapGazeAxis(y);
+
+      // 区域检测器仍更新，供调试可视化（九宫格高亮）使用。
+      _zoneDetector.update(x, y);
+
+      // 轻度平滑消除人脸框抖动；k 较大保证跟手不拖影。
+      final smooth = _gaze.update(targetX, targetY);
       gazeJs =
           'f.setGazeTarget(${smooth.dx.toStringAsFixed(3)},${smooth.dy.toStringAsFixed(3)});';
     } else {
@@ -279,7 +296,14 @@ class _VirtualPetWebViewState extends State<_VirtualPetWebView> {
     final base = await appController.startVirtualPetServer();
     // 默认显示模式为 ambient（暗背景 + 环境光晕 + 卡哇伊珍珠眼）。
     // 其它可选：?style=neon（霓虹机器人）/ 留空（默认写实脸）。
-    final url = '$base?style=ambient';
+
+    // 开发模式：使用Vite开发服务器（支持热更新）
+    // 正式模式：使用本地静态服务器
+    const useDevServer = false; // 开发时设为true，发布时设为false
+    final url = useDevServer
+        ? 'http://localhost:5174/?style=ambient'
+        : '$base?style=ambient';
+
     debugPrint('[VirtualPet] server url: $url');
     if (mounted) {
       debugPrint('[VirtualPet] loading request...');

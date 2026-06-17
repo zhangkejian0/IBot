@@ -46,6 +46,16 @@ dependencies:
   tflite_flutter: ^0.12.1
   webview_flutter: ^4.13.0
 
+  # —— 语音助手 ——
+  # 麦克风取流(PCM 分片 + 实时音量),用于本地唤醒与云端 ASR。
+  record: ^6.2.0
+  # 本地离线唤醒:开放词表 KWS,可配置唤醒词且无需重新训练。
+  sherpa_onnx: ^1.13.2
+  # 云端 ASR/LLM/TTS 的 HTTP 客户端(项目此前无网络库)。
+  dio: ^5.7.0
+  # 汉字→带声调拼音转换,用于把中文唤醒词转成 sherpa-onnx KWS 的 token 序列。
+  lpinyin: ^2.0.1
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
@@ -101,6 +111,8 @@ flutter:
     # assets/ 子目录单独声明，否则 index-*.js 不会被装入 bundle，
     # 运行时 _prepareAssets 复制不到该文件，WebView 加载 JS 时 404 → 黑屏。
     - assets/html/dist/assets/
+    # 语音助手本地唤醒模型(sherpa-onnx KWS:*.onnx + tokens.txt + 关键词文件)。
+    - assets/models/voice/
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

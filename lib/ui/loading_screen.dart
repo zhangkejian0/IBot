@@ -124,7 +124,7 @@ class _Logo extends StatelessWidget {
         ),
         const SizedBox(height: 18),
         const Text(
-          'XBot',
+          '狗蛋',
           style: TextStyle(
             color: AppTheme.label,
             fontSize: 30,
