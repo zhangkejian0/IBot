@@ -27,6 +27,11 @@ require File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelpe
 
 flutter_ios_podfile_setup
 
+# MediaPipe 以静态 xcframework 分发；允许在 use_frameworks! 下继续 pod install。
+pre_install do |installer|
+  Pod::Installer::Xcode::TargetValidator.send(:define_method, :verify_no_static_framework_transitive_dependencies) {}
+end
+
 target 'Runner' do
   use_frameworks!
 
@@ -65,12 +70,12 @@ post_install do |installer|
         config.build_settings['OTHER_LDFLAGS'] = flags
         config.build_settings['OTHER_LDFLAGS[sdk=iphoneos*]'] = [
           '$(inherited)',
-          '-force_load', '"$(PODS_XCFRAMEWORKS_BUILD_DIR)/MediaPipeTasksCommon/MediaPipeTasksCommon.framework/MediaPipeTasksCommon"',
+          '-force_load', '"$(PODS_ROOT)/MediaPipeTasksCommon/frameworks/MediaPipeTasksCommon.xcframework/ios-arm64/MediaPipeTasksCommon.framework/MediaPipeTasksCommon"',
           '-force_load', '"$(PODS_ROOT)/MediaPipeTasksCommon/frameworks/graph_libraries/libMediaPipeTasksCommon_device_graph.a"',
         ].join(' ')
         config.build_settings['OTHER_LDFLAGS[sdk=iphonesimulator*]'] = [
           '$(inherited)',
-          '-force_load', '"$(PODS_XCFRAMEWORKS_BUILD_DIR)/MediaPipeTasksCommon/MediaPipeTasksCommon.framework/MediaPipeTasksCommon"',
+          '-force_load', '"$(PODS_ROOT)/MediaPipeTasksCommon/frameworks/MediaPipeTasksCommon.xcframework/ios-arm64_x86_64-simulator/MediaPipeTasksCommon.framework/MediaPipeTasksCommon"',
           '-force_load', '"$(PODS_ROOT)/MediaPipeTasksCommon/frameworks/graph_libraries/libMediaPipeTasksCommon_simulator_graph.a"',
         ].join(' ')
       end
