@@ -21,7 +21,10 @@ import '../services/mlkit_face_engine.dart';
 import '../services/person_repository.dart';
 import '../services/static_server.dart';
 import '../services/voice/llm_config.dart';
+import '../services/voice/pophie_client.dart';
+import '../services/voice/pophie_config.dart';
 import '../services/voice/voice_assistant.dart';
+import 'package:hand_detection/hand_detection.dart' show GestureType;
 
 /// 应用整体阶段。
 enum AppPhase { loading, ready, error, permissionDenied }
@@ -81,6 +84,9 @@ class AppController extends ChangeNotifier {
   /// LLM 服务配置(DeepSeek 预设,可在设置页修改并持久化)。
   final LlmConfigStore llmConfigStore = LlmConfigStore();
 
+  /// Pophie 后端配置(地址/robotId/sessionId/音色,可在设置页修改并持久化)。
+  final PophieConfigStore pophieConfigStore = PophieConfigStore();
+
   CameraController? _camera;
   CameraController? get camera => _camera;
   int _sensorOrientation = 90;
@@ -111,6 +117,13 @@ class AppController extends ChangeNotifier {
   // 身份识别节流
   DateTime _lastIdentityRun = DateTime.fromMillisecondsSinceEpoch(0);
   static const Duration _identityInterval = Duration(milliseconds: 1200);
+
+  // 帧级检测节流:人脸(MediaPipe + ML Kit)/手势默认每帧都跑,~30fps 下
+  // 既吃 CPU 又让原生库(TFLite/ML Kit)日志狂刷。这里按时间间隔跳过整帧,
+  // 跳过的帧直接复用上一帧 DetectionResult——UI 注视/表情照常驱动,不会闪烁。
+  // 66ms ≈ 15fps,在流畅度与开销间取衡;身份识别另有 _identityInterval 节流。
+  DateTime _lastDetectRun = DateTime.fromMillisecondsSinceEpoch(0);
+  static const Duration _detectInterval = Duration(milliseconds: 66);
 
   /// 按位置追踪的「身份 slot」：多人脸时为每张脸维持一个稳定身份，避免逐帧
   /// 串脸。每个 slot 记录归一化中心点、命中身份及其最后可见时刻。TTL 内即使
@@ -186,6 +199,11 @@ class AppController extends ChangeNotifier {
       await llmConfigStore.load(defaultApiKey: _kPresetLlmApiKey);
       voiceAssistant.chat.configure(llmConfigStore.config);
 
+      // 加载 Pophie 后端配置并注入。语音对话全程走 /api/chat(STT+LLM+TTS)。
+      await pophieConfigStore.load();
+      voiceAssistant.pophie.configure(pophieConfigStore.config);
+      _wireVoicePerception();
+
       _setLoading(1.0, '准备就绪');
       await _camera?.startImageStream(_onFrame);
 
@@ -241,6 +259,12 @@ class AppController extends ChangeNotifier {
   /// 身份识别裁剪必须用同一旋转，否则裁剪框与归一化坐标空间错位。
   void _onFrame(CameraImage image) {
     if (_disposed || _processing || _phase != AppPhase.ready) return;
+    // 帧级检测节流:未到间隔的帧跳过整帧检测。不重置图像(直接 return),
+    // 上一帧 DetectionResult 保留,UI/虚拟宠物继续用旧值驱动注视与表情,
+    // 视觉上不会闪烁,只是检测频率降到 ~15fps。
+    final now = DateTime.now();
+    if (now.difference(_lastDetectRun) < _detectInterval) return;
+    _lastDetectRun = now;
     _processing = true;
     _processFrame(image).whenComplete(() {
       if (!_disposed) _processing = false;
@@ -570,6 +594,86 @@ class AppController extends ChangeNotifier {
     }
     // 语音助手总开关 / 唤醒 / TTS 变更时按需启停(仿虚拟宠物服务管理模式)。
     _syncVoiceAssistant();
+    notifyListeners();
+  }
+
+  /// 把端侧多模态感知(表情/身份/手势)接到语音助手:每轮对话上传后端,
+  /// 并把后端回传的 session_id 持久化以延续会话记忆(文档 §2.4 / §1.2)。
+  void _wireVoicePerception() {
+    voiceAssistant.perceptionProvider = _buildPerception;
+    voiceAssistant.userIdProvider = _currentUserId;
+    voiceAssistant.onSessionPersist = (sessionId) async {
+      final cfg = pophieConfigStore.config;
+      if (cfg.sessionId == sessionId) return;
+      await pophieConfigStore.save(cfg.copyWith(sessionId: sessionId));
+    };
+  }
+
+  /// 由当前识别结果构造 Pophie 感知上下文(表情/身份/手势)。
+  PophiePerception _buildPerception() {
+    final face = _result.face;
+    final expr = face != null ? _expressionApiKey(face.expression.expression) : null;
+    final identity = face?.identity?.person.name;
+    String? gesture;
+    if (_result.hands.isNotEmpty) {
+      gesture = _gestureApiKey(_result.hands.first.gesture);
+    }
+    return PophiePerception(
+      facialExpression: expr,
+      identity: identity,
+      gestureType: gesture,
+    );
+  }
+
+  /// 当前用户身份(认识我命中的主脸人名),作为 user_id 回显/溯源。
+  String? _currentUserId() => _result.face?.identity?.person.name;
+
+  /// 本端 [Expression] 枚举 → 后端 7 类表情 key(文档 §2.1)。
+  static String _expressionApiKey(Expression e) {
+    switch (e) {
+      case Expression.neutral:
+        return 'neutral';
+      case Expression.happy:
+        return 'happy';
+      case Expression.sad:
+        return 'sad';
+      case Expression.surprised:
+        return 'surprise';
+      case Expression.angry:
+        return 'angry';
+      case Expression.disgusted:
+        return 'disgust';
+      case Expression.fearful:
+        return 'fear';
+    }
+  }
+
+  /// 手势类型 → 后端手势 key(文档 §2.4);无明确对应时返回 null。
+  static String? _gestureApiKey(GestureType? g) {
+    switch (g) {
+      case GestureType.thumbUp:
+        return 'thumbs_up';
+      case GestureType.victory:
+        return 'victory';
+      case GestureType.closedFist:
+        return 'fist';
+      case GestureType.openPalm:
+        return 'open_palm';
+      case GestureType.pointingUp:
+        return 'point';
+      case GestureType.iLoveYou:
+        return 'heart';
+      case GestureType.thumbDown:
+      case GestureType.unknown:
+      case null:
+        return null;
+    }
+  }
+
+  /// 更新 Pophie 后端配置(设置页调用):持久化 + 实时下发到客户端。
+  Future<void> updatePophieConfig(PophieConfig config) async {
+    await pophieConfigStore.save(config);
+    voiceAssistant.pophie.configure(config);
     notifyListeners();
   }
 

@@ -32,8 +32,9 @@ class SpeechService {
     Stream<Uint8List> pcmStream, {
     void Function(String partial)? onPartial,
   }) async {
-    // TODO(阶段3): 建立 WebSocket,逐片发送,拼接最终文本。
-    debugPrint('[Speech] recognize (stub)');
+    // 语音对话现已改走 Pophie 后端 /api/chat(STT+LLM+TTS 一体化),
+    // 本地 SpeechService 暂不参与主流程。保留接口供 /api/stt、/api/tts 单独调用。
+    debugPrint('[Speech] recognize (stub, unused: 走 Pophie /api/chat)');
     return '';
   }
 

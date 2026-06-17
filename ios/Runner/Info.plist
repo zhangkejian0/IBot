@@ -8,6 +8,11 @@
 		<string>狗蛋需要使用麦克风监听唤醒词、识别语音指令并与你对话。</string>
 		<key>NSSpeechRecognitionUsageDescription</key>
 		<string>狗蛋使用语音识别将你的语音转为文字以进行对话。</string>
+		<key>NSAppTransportSecurity</key>
+		<dict>
+			<key>NSAllowsArbitraryLoads</key>
+			<true/>
+		</dict>
 		<key>CADisableMinimumFrameDurationOnPhone</key>
 		<true/>
 		<key>CFBundleDevelopmentRegion</key>

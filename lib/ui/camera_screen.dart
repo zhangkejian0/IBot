@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:camera/camera.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
@@ -11,6 +13,7 @@ import '../face/gaze_smoother.dart';
 import '../face/gaze_zone_detector.dart';
 import '../models/expression.dart';
 import '../services/camera_image_utils.dart';
+import '../services/voice/voice_assistant.dart';
 import '../services/voice/voice_state.dart';
 import '../theme/app_theme.dart';
 import 'overlay_painter.dart';
@@ -69,6 +72,34 @@ class CameraScreen extends StatelessWidget {
               },
             ),
 
+          // —— 双击进入聆听的「App 层」手势捕获层 ——
+          // WebView 在 Android 上是原生平台视图(platform view),会在到达
+          // Flutter GestureDetector 之前吞掉触摸事件,导致包裹整个 Stack 的
+          // 手势识别收不到虚拟人物画面上的双击。把一个不透明的手势层「叠」在
+          // WebView 之上(z 序更高),双击就在 Flutter 层被捕获,不再受加载页面/
+          // WebView 影响。虚拟人物本身不需要触摸交互,故拦截单击不影响功能。
+          Positioned.fill(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onDoubleTap: () async {
+                final v = controller.voiceAssistant;
+                debugPrint('[DoubleTap] running=${v.isRunning} '
+                    'available=${v.isAvailable} state=${v.state.name}');
+                // 无麦克风权限等不可用情况:无法聆听,直接忽略。
+                if (!v.isAvailable) return;
+                // App 层「双击进入聆听」:即使语音总开关未开,只要可用就自动
+                // 启动语音助手,再触发一轮聆听 —— 不依赖设置页的总开关状态。
+                if (!v.isRunning) {
+                  await v.start();
+                }
+                // 仅在 idle 时触发,避免聆听/思考/播报中重复触发。
+                if (v.isRunning && v.state == VoiceState.idle) {
+                  await v.triggerManually();
+                }
+              },
+            ),
+          ),
+
           // 顶部状态面板（仅调试/摄像头模式显示）
           if (showDebug)
             Positioned(
@@ -77,7 +108,7 @@ class CameraScreen extends StatelessWidget {
               child: SafeArea(child: _StatusPanel(controller: controller)),
             ),
 
-          // 右上角设置入口
+          // 右上角设置入口（位于手势层之上,保证可点击）
           Positioned(
             top: 12,
             right: 12,
@@ -90,6 +121,15 @@ class CameraScreen extends StatelessWidget {
                   );
                 },
               ),
+            ),
+          ),
+
+          // —— 聆听态暖色调跑马灯(苹果风格) ——
+          // 仅在进入聆听(waking/listening)时沿屏幕一圈呈现旋转的暖色光晕,
+          // 并随麦克风音量轻微呼吸。IgnorePointer 保证不拦截任何手势。
+          Positioned.fill(
+            child: IgnorePointer(
+              child: _ListeningMarquee(voice: controller.voiceAssistant),
             ),
           ),
         ],
@@ -218,7 +258,9 @@ class _VirtualPetWebViewState extends State<_VirtualPetWebView> {
 
     // —— 语音优先级最高:活跃时接管表情 + 嘴部张合,跳过视觉情绪态 ——
     if (voiceActive) {
-      final fs = voice.state.faceState;
+      // 优先用后端回传的 robot_state(精确 FSM 态,见文档 §2.6);
+      // 缺省(聆听/思考阶段)回退到本地阶段映射。
+      final fs = voice.robotState ?? voice.state.faceState;
       String voiceJs = '';
       if (fs != null) {
         voiceJs = "f.setState('$fs');";
@@ -483,6 +525,155 @@ class _StatusPanel extends StatelessWidget {
       ),
     );
   }
+}
+
+/// 聆听态「暖色调跑马灯」边框(苹果 Siri 风格)。
+///
+/// 进入聆听(waking/listening)时显示:沿全屏一圈绘制一条会旋转的暖色
+/// SweepGradient 描边 + 高斯模糊光晕,并随麦克风音量(voice.level)做轻微的
+/// 亮度/粗细呼吸。idle/thinking/speaking 等非聆听态完全隐藏且停掉动画。
+class _ListeningMarquee extends StatefulWidget {
+  const _ListeningMarquee({required this.voice});
+  final VoiceAssistant voice;
+
+  @override
+  State<_ListeningMarquee> createState() => _ListeningMarqueeState();
+}
+
+class _ListeningMarqueeState extends State<_ListeningMarquee>
+    with TickerProviderStateMixin {
+  late final AnimationController _rotate;
+  // 出现/消失的整体不透明度,做柔和淡入淡出而非生硬切换。
+  late final AnimationController _fade;
+
+  @override
+  void initState() {
+    super.initState();
+    _rotate = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 2600),
+    );
+    _fade = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 280),
+    );
+    widget.voice.addListener(_onVoiceChanged);
+    _onVoiceChanged();
+  }
+
+  /// 是否处于「聆听」可视态:刚唤醒过渡(waking)与正式聆听(listening)。
+  bool get _isListening {
+    final v = widget.voice;
+    if (!v.isRunning) return false;
+    return v.state == VoiceState.waking || v.state == VoiceState.listening;
+  }
+
+  void _onVoiceChanged() {
+    if (!mounted) return;
+    if (_isListening) {
+      if (!_rotate.isAnimating) _rotate.repeat();
+      _fade.forward();
+    } else {
+      _fade.reverse().whenComplete(() {
+        if (!_isListening && _rotate.isAnimating) _rotate.stop();
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.voice.removeListener(_onVoiceChanged);
+    _rotate.dispose();
+    _fade.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: Listenable.merge([_rotate, _fade]),
+      builder: (context, _) {
+        if (_fade.value <= 0.001) return const SizedBox.shrink();
+        return ValueListenableBuilder<double>(
+          valueListenable: widget.voice.level,
+          builder: (context, level, _) {
+            return CustomPaint(
+              size: Size.infinite,
+              painter: _MarqueePainter(
+                rotation: _rotate.value,
+                opacity: Curves.easeOut.transform(_fade.value),
+                level: level.clamp(0.0, 1.0),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+}
+
+class _MarqueePainter extends CustomPainter {
+  _MarqueePainter({
+    required this.rotation,
+    required this.opacity,
+    required this.level,
+  });
+
+  /// 0..1 的归一化旋转相位。
+  final double rotation;
+  /// 整体淡入淡出不透明度。
+  final double opacity;
+  /// 麦克风实时音量 0..1,驱动光晕的「呼吸」。
+  final double level;
+
+  // 暖色调跑马灯配色:琥珀→珊瑚→蜜橘→玫瑰金,首尾相接保证旋转无缝。
+  static const List<Color> _warm = [
+    Color(0xFFFFC078), // 蜜橘
+    Color(0xFFFF8A5B), // 珊瑚
+    Color(0xFFFF6F91), // 玫瑰
+    Color(0xFFFFB26B), // 暖橘
+    Color(0xFFFFD79A), // 浅琥珀
+    Color(0xFFFFC078),
+  ];
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rect = Offset.zero & size;
+    // 音量越大,光晕越亮、越粗,形成 Siri 式呼吸感。
+    final pulse = 0.78 + 0.22 * level;
+    final shader = SweepGradient(
+      colors: _warm,
+      transform: GradientRotation(rotation * 2 * math.pi),
+    ).createShader(rect);
+
+    // 多层描边:外层宽而模糊(光晕)→ 内层细而清晰(亮边),叠出发光质感。
+    void stroke(double width, double blur, double alpha) {
+      final inset = width / 2;
+      final rrect = RRect.fromRectAndRadius(
+        rect.deflate(inset),
+        const Radius.circular(38),
+      );
+      final paint = Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = width
+        ..shader = shader
+        ..color = Colors.white.withValues(alpha: (alpha * opacity).clamp(0.0, 1.0));
+      if (blur > 0) {
+        paint.maskFilter = MaskFilter.blur(BlurStyle.normal, blur);
+      }
+      canvas.drawRRect(rrect, paint);
+    }
+
+    stroke(34 * pulse, 26 * pulse, 0.55); // 外层弥散光晕
+    stroke(16 * pulse, 10, 0.85);         // 中层
+    stroke(5, 1.5, 1.0);                  // 内层亮边
+  }
+
+  @override
+  bool shouldRepaint(covariant _MarqueePainter old) =>
+      old.rotation != rotation ||
+      old.opacity != opacity ||
+      old.level != level;
 }
 
 class _RoundIconButton extends StatelessWidget {

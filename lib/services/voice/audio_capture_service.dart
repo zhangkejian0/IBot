@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:record/record.dart';
@@ -14,6 +15,11 @@ class AudioCaptureService {
 
   bool _running = false;
   bool get isRunning => _running;
+
+  /// 外部接管音量标志:为 true 时麦克风采集不再写入 [level]，
+  /// 交由外部(TTS 播放包络)驱动，避免播报时被麦克风实时音量覆盖。
+  bool _externalLevel = false;
+  set externalLevel(bool v) => _externalLevel = v;
 
   /// 当前实时音量(归一化 0.0..1.0),驱动虚拟宠物嘴部张合。
   /// 用 ValueNotifier 而非 Stream,便于 Widget 直接 ListenableBuilder。
@@ -53,11 +59,13 @@ class AudioCaptureService {
         if (!_running) return;
         // 计算这一片的 RMS 音量,归一化到 0..1 并轻微放大(便于嘴部可见)。
         // PCM16 的满幅是 32767;用 8000 作分母做经验放大,再 clamp。
-        final level01 = _rmsLevel(bytes);
-        // 平滑:与上一帧 EMA,避免嘴部张合抖动。
-        final prev = level.value;
-        final smoothed = prev * 0.6 + level01 * 0.4;
-        level.value = smoothed;
+        if (!_externalLevel) {
+          final level01 = _rmsLevel(bytes);
+          // 平滑:与上一帧 EMA,避免嘴部张合抖动。
+          final prev = level.value;
+          final smoothed = prev * 0.6 + level01 * 0.4;
+          level.value = smoothed;
+        }
         _audioStream.add(bytes);
       },
       onError: (e) => debugPrint('[AudioCapture] stream error: $e'),
@@ -76,6 +84,68 @@ class AudioCaptureService {
     } catch (_) {}
     level.value = 0.0;
     debugPrint('[AudioCapture] stopped');
+  }
+
+  /// 采集一段完整语音(简易 VAD):从 [audioStream] 累积 PCM，
+  /// 检测到语音起始后，若持续 [silenceTimeout] 静音则结束并返回整段裸 PCM16
+  /// (16kHz/mono)。一直无人说话超过 [onsetTimeout] 返回 null。
+  ///
+  /// 用于「双击/唤醒后聆听一句话 → 整段上传 Pophie /api/chat」的流程。
+  /// 必须在 [start] 之后调用(录音管线已在跑)。
+  Future<Uint8List?> captureUtterance({
+    Duration maxDuration = const Duration(seconds: 12),
+    Duration silenceTimeout = const Duration(milliseconds: 1500),
+    Duration onsetTimeout = const Duration(seconds: 6),
+    double speechThreshold = 0.12,
+    double silenceThreshold = 0.07,
+  }) async {
+    if (!_running) return null;
+    final completer = Completer<Uint8List?>();
+    final buffer = BytesBuilder();
+    var speechStarted = false;
+    DateTime? lastVoiceAt;
+    final startAt = DateTime.now();
+    StreamSubscription<Uint8List>? sub;
+    Timer? ticker;
+
+    void finish(Uint8List? result) {
+      if (completer.isCompleted) return;
+      ticker?.cancel();
+      sub?.cancel();
+      completer.complete(result);
+    }
+
+    sub = audioStream.listen(
+      (bytes) {
+        final lvl = _rmsLevel(bytes);
+        if (lvl >= speechThreshold) speechStarted = true;
+        if (lvl >= silenceThreshold) lastVoiceAt = DateTime.now();
+        // 起始后才累积，避免把前导静音也发给后端。
+        if (speechStarted) buffer.add(bytes);
+      },
+      onError: (e) {
+        debugPrint('[AudioCapture] utterance stream error: $e');
+        finish(speechStarted ? buffer.toBytes() : null);
+      },
+    );
+
+    ticker = Timer.periodic(const Duration(milliseconds: 100), (_) {
+      final now = DateTime.now();
+      if (now.difference(startAt) >= maxDuration) {
+        finish(speechStarted ? buffer.toBytes() : null);
+        return;
+      }
+      if (!speechStarted) {
+        if (now.difference(startAt) >= onsetTimeout) finish(null);
+        return;
+      }
+      if (lastVoiceAt != null &&
+          now.difference(lastVoiceAt!) >= silenceTimeout) {
+        finish(buffer.toBytes());
+      }
+    });
+
+    return completer.future;
   }
 
   /// 由一段 16-bit PCM 字节计算 RMS 音量,归一化到 0..1。

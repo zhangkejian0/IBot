@@ -55,6 +55,8 @@ dependencies:
   dio: ^5.7.0
   # 汉字→带声调拼音转换,用于把中文唤醒词转成 sherpa-onnx KWS 的 token 序列。
   lpinyin: ^2.0.1
+  audioplayers: ^6.7.1
+  uuid: ^4.5.3
 
 dev_dependencies:
   flutter_test:
