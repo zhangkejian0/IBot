@@ -41,7 +41,16 @@ post_install do |installer|
     flutter_additional_ios_build_settings(target)
     target.build_configurations.each do |config|
       config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.5'
-      # kwon_mediapipe_landmarker 的 Swift 代码依赖 MediaPipe ObjC / graph 符号。
+
+      # permission_handler 默认 PERMISSION_CAMERA=0，不编译相机策略，request() 不会弹系统授权框。
+      if target.name == 'permission_handler_apple'
+        definitions = config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] || ['$(inherited)']
+        definitions = [definitions] if definitions.is_a?(String)
+        definitions << 'PERMISSION_CAMERA=1' unless definitions.any? { |d| d.to_s.include?('PERMISSION_CAMERA') }
+        config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] = definitions
+      end
+
+      # MediaPipe graph 符号只由插件链接一次；Runner 不再直接链 MediaPipeTasks*。
       if target.name == 'kwon_mediapipe_landmarker'
         config.build_settings['OTHER_LDFLAGS'] ||= '$(inherited)'
         flags = config.build_settings['OTHER_LDFLAGS']
@@ -60,20 +69,21 @@ post_install do |installer|
     end
   end
 
-  # graph .a 已在 kwon_mediapipe_landmarker 中 force_load，避免 Runner 重复链接。
+  # Runner 通过 CocoaPods 聚合时会再链一份 MediaPipeTasks*，与插件内嵌的
+  # MediaPipe 重复，启动时触发 fiber_thread_exit_handler 等 C++ 初始化崩溃。
   installer.aggregate_targets.each do |aggregate_target|
+    next unless aggregate_target.name == 'Pods-Runner'
+
     aggregate_target.xcconfigs.each do |config_name, _|
       xcconfig_path = aggregate_target.xcconfig_path(config_name)
       next unless File.exist?(xcconfig_path)
 
       xcconfig = File.read(xcconfig_path)
-      updated = xcconfig.gsub(
-        /^OTHER_LDFLAGS\[sdk=iphoneos\*\].*\n/,
-        ''
-      ).gsub(
-        /^OTHER_LDFLAGS\[sdk=iphonesimulator\*\].*\n/,
-        ''
-      )
+      updated = xcconfig
+        .gsub(/-framework "MediaPipeTasksCommon" /, '')
+        .gsub(/-framework "MediaPipeTasksVision" /, '')
+        .gsub(/^OTHER_LDFLAGS\[sdk=iphoneos\*\].*\n/, '')
+        .gsub(/^OTHER_LDFLAGS\[sdk=iphonesimulator\*\].*\n/, '')
       File.write(xcconfig_path, updated) if updated != xcconfig
     end
   end
