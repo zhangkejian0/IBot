@@ -108,11 +108,16 @@ flutter:
   assets:
     - assets/models/
     - assets/images/
-    - assets/html/dist/
-    # Flutter 的目录声明不会递归打包子目录，必须把 vite 产物所在的
-    # assets/ 子目录单独声明，否则 index-*.js 不会被装入 bundle，
-    # 运行时 _prepareAssets 复制不到该文件，WebView 加载 JS 时 404 → 黑屏。
-    - assets/html/dist/assets/
+    # 默认虚拟桌面（Vite 构建产物 → assets/desktop/default/）
+    - assets/desktop/default/
+    - assets/desktop/default/assets/
+    # Live2D 魔女桌面（Flutter assets 不递归，子目录需显式声明）
+    - assets/desktop/monv/index.html
+    - assets/desktop/monv/css/
+    - assets/desktop/monv/js/
+    - assets/desktop/monv/libs/
+    - assets/desktop/monv/models/monv/
+    - assets/desktop/monv/models/monv/魔女.8192/
     # 语音助手本地唤醒模型(sherpa-onnx KWS:*.onnx + tokens.txt + 关键词文件)。
     # 注意:Flutter assets 声明不递归,必须把模型实际所在的子目录显式声明,
     # 否则 *.onnx / tokens.txt 不会被打包,运行时 _prepareModelFiles 复制不到

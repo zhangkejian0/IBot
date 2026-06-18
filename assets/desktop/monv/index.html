@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>Live2D Demo</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body class="theme-dark">
+    <div class="app">
+        <main class="stage">
+            <div class="stage-bg"></div>
+            <canvas id="live2d-canvas"></canvas>
+
+            <div id="loading-overlay" class="loading-overlay" hidden>
+                <div class="loading-spinner"></div>
+                <p>加载模型中…</p>
+            </div>
+
+            <div id="error-container" class="error-container" hidden></div>
+        </main>
+    </div>
+
+    <button id="panel-toggle" class="panel-fab" type="button" aria-label="打开控制面板" aria-expanded="false">
+        <svg class="fab-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M3 6h18v2H3V6zm0 5h18v2H3v-2zm0 5h18v2H3v-2z"/>
+        </svg>
+    </button>
+
+    <div id="panel-backdrop" class="panel-backdrop" hidden></div>
+
+    <aside id="control-panel" class="control-panel" aria-hidden="true">
+            <div class="panel-toolbar">
+                <span class="panel-title">控制面板</span>
+                <button id="panel-close" class="panel-close" type="button" aria-label="收起面板">
+                    <svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12 19 6.41z"/></svg>
+                </button>
+            </div>
+
+            <div class="panel-body">
+                <section class="panel-section">
+                    <h3 class="section-label">背景</h3>
+                    <div class="theme-switch">
+                        <button id="theme-light" class="theme-btn" type="button" data-theme="light">白色</button>
+                        <button id="theme-dark" class="theme-btn" type="button" data-theme="dark">黑色</button>
+                    </div>
+                </section>
+
+                <section class="panel-section">
+                    <h3 class="section-label">缩放</h3>
+                    <div class="zoom-controls">
+                        <button id="zoom-out" class="icon-btn" type="button" aria-label="缩小">
+                            <svg viewBox="0 0 24 24"><path d="M19 13H5v-2h14v2z"/></svg>
+                        </button>
+                        <span id="zoom-value" class="zoom-value">38%</span>
+                        <button id="zoom-in" class="icon-btn" type="button" aria-label="放大">
+                            <svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+                        </button>
+                        <button id="zoom-reset" class="text-btn" type="button">重置</button>
+                    </div>
+                </section>
+
+                <section class="panel-section">
+                    <h3 class="section-label">表情</h3>
+                    <div id="emotion-buttons" class="emotion-buttons"></div>
+                </section>
+            </div>
+        </aside>
+
+    <script src="libs/live2dcubismcore.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/pixi.js@7.3.2/dist/pixi.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/gh/RaSan147/pixi-live2d-display@v0.5.0-ls-8/dist/cubism4.min.js"></script>
+    <script src="js/config.js"></script>
+    <script src="js/live2d.js"></script>
+    <script src="js/bridge.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>

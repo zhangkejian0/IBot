@@ -4,6 +4,8 @@ import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter/services.dart' show AssetManifest, rootBundle;
 import 'package:path_provider/path_provider.dart';
 
+import '../core/desktop_config.dart';
+
 /// 本地静态文件服务器，用于托管 Flutter assets 中的 HTML 页面。
 ///
 /// 因为 WebView 无法直接解析 assets 中的相对路径 JS/CSS，
@@ -11,19 +13,29 @@ import 'package:path_provider/path_provider.dart';
 class StaticServer {
   HttpServer? _server;
   Directory? _distDir;
+  VirtualDesktop? _servingDesktop;
 
   /// 服务端口，启动后可用。
   int? get port => _server?.port;
 
+  VirtualDesktop? get servingDesktop => _servingDesktop;
+
   /// 启动服务器，返回可访问的 URL。
-  Future<String> start() async {
-    if (_server != null) return 'http://localhost:${_server!.port}';
+  ///
+  /// [desktop] 决定从哪套 assets 复制静态文件；切换桌面时需先 [stop] 再重新 start。
+  Future<String> start({required VirtualDesktop desktop}) async {
+    if (_server != null && _servingDesktop == desktop) {
+      return 'http://localhost:${_server!.port}';
+    }
+    if (_server != null) {
+      await stop();
+    }
 
-    // 复制 assets 到临时目录
-    _distDir = await _prepareAssets();
-    debugPrint('[StaticServer] dist dir: ${_distDir!.path}');
+    final info = desktopInfo(desktop);
+    _distDir = await _prepareAssets(info);
+    _servingDesktop = desktop;
+    debugPrint('[StaticServer] dist dir: ${_distDir!.path} (${info.label})');
 
-    // 启动 HTTP 服务
     _server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     _server!.listen(_handleRequest);
 
@@ -36,6 +48,7 @@ class StaticServer {
   Future<void> stop() async {
     await _server?.close(force: true);
     _server = null;
+    _servingDesktop = null;
     if (_distDir != null) {
       try {
         await _distDir!.delete(recursive: true);
@@ -44,88 +57,107 @@ class StaticServer {
     }
   }
 
-  /// 将 assets/html/dist/ 下的文件复制到临时目录。
-  Future<Directory> _prepareAssets() async {
+  /// 将指定桌面的 assets 复制到临时目录。
+  Future<Directory> _prepareAssets(VirtualDesktopInfo info) async {
     final temp = await getTemporaryDirectory();
-    final dist = Directory('${temp.path}/xbot_html_dist');
+    final dist = Directory('${temp.path}/${info.tempDirName}');
 
-    // 清理旧文件后重建
     if (await dist.exists()) {
       await dist.delete(recursive: true);
     }
     await dist.create(recursive: true);
 
-    // 列出所有 assets，找到 html/dist 相关的
     final manifest = await AssetManifest.loadFromAssetBundle(rootBundle);
     final allAssets = manifest.listAssets();
-    final htmlAssets = allAssets.where((a) => a.contains('html/dist')).toList();
-    debugPrint('[StaticServer] html assets found: $htmlAssets');
+    final prefix = info.assetPrefix;
+    final desktopAssets = allAssets
+        .where((a) => a.startsWith(prefix))
+        .where(_isCopyableAsset)
+        .toList();
+    debugPrint(
+        '[StaticServer] ${info.label} assets found: ${desktopAssets.length}');
 
-    // 复制每个 asset 到临时目录，保持相对路径
-    for (final assetPath in htmlAssets) {
-      // assetPath 形如 "assets/html/dist/index.html" 或 "assets/html/dist/assets/xxx.js"
-      // 去掉 "assets/html/dist/" 前缀得到相对路径
-      final relativePath = assetPath.replaceFirst('assets/html/dist/', '');
+    var copied = 0;
+    for (final assetPath in desktopAssets) {
+      final relativePath = assetPath.replaceFirst(prefix, '');
       final destPath = '${dist.path}/$relativePath';
-
-      // 确保目标目录存在
-      final destFile = File(destPath);
-      await destFile.parent.create(recursive: true);
-
-      await _copyAsset(assetPath, destPath);
+      await File(destPath).parent.create(recursive: true);
+      if (await _copyAsset(assetPath, destPath)) {
+        copied++;
+      }
     }
+    debugPrint('[StaticServer] ${info.label} assets copied: $copied');
 
-    // 验证关键文件：index.html 必在，且至少应有一个 index-*.js（vite 产物）。
-    // 若 js 缺失，通常是 pubspec.yaml 未声明 dist/assets/ 子目录导致打包遗漏，
-    // 此时即使服务起来，WebView 也会因 JS 404 而黑屏，故在此显式告警。
     final htmlFile = File('${dist.path}/index.html');
     debugPrint('[StaticServer] index.html exists: ${htmlFile.existsSync()}');
-    final jsDir = Directory('${dist.path}/assets');
-    final jsFiles = jsDir.existsSync()
-        ? jsDir
-            .listSync()
-            .whereType<File>()
-            .where((f) => f.path.endsWith('.js'))
-            .toList()
-        : const <File>[];
-    debugPrint('[StaticServer] assets/*.js count: ${jsFiles.length}');
-    for (final f in jsFiles) {
-      debugPrint('[StaticServer]   ${f.path} (${f.lengthSync()} bytes)');
+
+    if (info.id == VirtualDesktop.defaultSvg) {
+      final jsDir = Directory('${dist.path}/assets');
+      final jsFiles = jsDir.existsSync()
+          ? jsDir
+              .listSync()
+              .whereType<File>()
+              .where((f) => f.path.endsWith('.js'))
+              .toList()
+          : const <File>[];
+      debugPrint('[StaticServer] assets/*.js count: ${jsFiles.length}');
+      if (jsFiles.isEmpty) {
+        debugPrint('[StaticServer] WARNING: no JS bundle found. '
+            'Check pubspec.yaml includes assets/desktop/default/assets/');
+      }
     }
-    if (jsFiles.isEmpty) {
-      debugPrint('[StaticServer] WARNING: no JS bundle found. '
-          'Check pubspec.yaml includes assets/html/dist/assets/');
+
+    if (info.id == VirtualDesktop.monv) {
+      final modelJson = File('${dist.path}/models/monv/魔女.model3.json');
+      debugPrint(
+          '[StaticServer] monv model3.json exists: ${modelJson.existsSync()}');
+      if (!modelJson.existsSync()) {
+        debugPrint('[StaticServer] WARNING: monv model missing. '
+            'Check pubspec.yaml includes assets/desktop/monv/models/monv/');
+      }
     }
 
     return dist;
   }
 
-  /// 从 Flutter asset bundle 复制文件到文件系统。
-  Future<void> _copyAsset(String assetPath, String destPath) async {
+  /// 跳过 macOS 元数据等隐藏文件；manifest 可能列出它们但实际无法 load。
+  bool _isCopyableAsset(String assetPath) {
+    final segments = assetPath.split('/');
+    return segments.every((s) => s.isNotEmpty && !s.startsWith('.'));
+  }
+
+  /// 返回是否复制成功。单文件失败不阻断整桌面的启动。
+  Future<bool> _copyAsset(String assetPath, String destPath) async {
     try {
       final data = await rootBundle.load(assetPath);
       final bytes = data.buffer.asUint8List();
+      if (bytes.isEmpty) {
+        debugPrint('[StaticServer] skip empty asset: $assetPath');
+        return false;
+      }
       await File(destPath).writeAsBytes(bytes);
-      debugPrint('[StaticServer] copied $assetPath -> $destPath (${bytes.length} bytes)');
+      return true;
     } catch (e) {
-      debugPrint('[StaticServer] FAILED to copy $assetPath: $e');
-      rethrow;
+      debugPrint('[StaticServer] skip $assetPath: $e');
+      return false;
     }
   }
 
-  /// 处理 HTTP 请求，返回对应的静态文件。
-  /// 根路径 "/" 返回 index.html，其他路径直接映射到临时目录中的文件。
-  ///
-  /// 注意：必须 `await` [IOSink.addStream] 完成后再 [IOSink.close]。
-  /// 旧实现用级联 `..addStream()..close()` 丢弃了 addStream 返回的 Future，
-  /// 导致 close 与流写入并发，响应体经常被截断——WebView 永远收不到完整的
-  /// index.html / JS，onPageFinished 不触发，前端一直停留在加载动画。
+  /// HTTP 请求 path 常为百分号编码（如 %E9%AD%94%E5%A5%B3），
+  /// 复制到磁盘的 assets 则是 UTF-8 中文路径，需解码后再查找文件。
+  String _resolveRelativePath(String uriPath) {
+    if (uriPath == '/' || uriPath.isEmpty) return 'index.html';
+    return uriPath
+        .substring(1)
+        .split('/')
+        .map(Uri.decodeComponent)
+        .join('/');
+  }
+
   Future<void> _handleRequest(HttpRequest request) async {
     final uriPath = request.uri.path;
-    // "/" -> "index.html", "/assets/xxx.js" -> "assets/xxx.js"
-    final relativePath = uriPath == '/' ? 'index.html' : uriPath.substring(1);
+    final relativePath = _resolveRelativePath(uriPath);
     final file = File('${_distDir!.path}/$relativePath');
-    debugPrint('[StaticServer] request: $uriPath -> ${file.path}');
 
     if (file.existsSync() && !FileSystemEntity.isDirectorySync(file.path)) {
       final ext = file.uri.pathSegments.last.split('.').last.toLowerCase();
@@ -140,16 +172,15 @@ class StaticServer {
         'jpg' || 'jpeg' => 'image/jpeg',
         'svg' => 'image/svg+xml',
         'ico' => 'image/x-icon',
+        'moc3' => 'application/octet-stream',
         _ => 'application/octet-stream',
       };
       try {
         final response = request.response;
         response.headers.contentType = ContentType.parse(contentType);
         response.contentLength = await file.length();
-        // 必须等待流写完再 close，否则 close 与写入竞态会截断响应体。
         await response.addStream(file.openRead());
         await response.close();
-        debugPrint('[StaticServer] 200 $uriPath');
       } catch (e) {
         debugPrint('[StaticServer] write failed $uriPath: $e');
         try {
@@ -161,7 +192,7 @@ class StaticServer {
         ..statusCode = HttpStatus.notFound
         ..write('404 Not Found')
         ..close();
-      debugPrint('[StaticServer] 404 $uriPath');
+      debugPrint('[StaticServer] 404 $uriPath -> $relativePath');
     }
   }
 }

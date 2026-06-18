@@ -1,0 +1,601 @@
+:root,
+body.theme-light {
+    --bg: #f7f7f8;
+    --stage-bg: linear-gradient(180deg, #ffffff 0%, #f7f7f8 100%);
+    --stage-glow: rgba(37, 99, 235, 0.07);
+    --surface: rgba(255, 255, 255, 0.92);
+    --surface-strong: #ffffff;
+    --surface-item: rgba(255, 255, 255, 0.72);
+    --border: rgba(15, 23, 42, 0.08);
+    --text: #111827;
+    --text-muted: #6b7280;
+    --accent: #2563eb;
+    --accent-soft: rgba(37, 99, 235, 0.1);
+    --shadow: 0 12px 40px rgba(15, 23, 42, 0.12);
+    --overlay-bg: rgba(247, 247, 248, 0.72);
+    --hint-bg: rgba(255, 255, 255, 0.8);
+    --hover-bg: rgba(15, 23, 42, 0.06);
+}
+
+body.theme-dark {
+    --bg: #0a0a0b;
+    --stage-bg: linear-gradient(180deg, #141416 0%, #0a0a0b 100%);
+    --stage-glow: rgba(96, 165, 250, 0.06);
+    --surface: rgba(24, 24, 27, 0.96);
+    --surface-strong: #18181b;
+    --surface-item: rgba(39, 39, 42, 0.72);
+    --border: rgba(255, 255, 255, 0.1);
+    --text: #f4f4f5;
+    --text-muted: #a1a1aa;
+    --accent: #60a5fa;
+    --accent-soft: rgba(96, 165, 250, 0.15);
+    --shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+    --overlay-bg: rgba(10, 10, 11, 0.78);
+    --hint-bg: rgba(39, 39, 42, 0.8);
+    --hover-bg: rgba(255, 255, 255, 0.08);
+}
+
+:root {
+    --radius: 16px;
+    --panel-width: min(300px, 88vw);
+    --fab-size: 48px;
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-right: env(safe-area-inset-right, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+html,
+body {
+    height: 100%;
+}
+
+body {
+    font-family: "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    overflow: hidden;
+}
+
+button {
+    font: inherit;
+}
+
+.app {
+    position: relative;
+    width: 100%;
+    height: 100vh;
+    height: 100dvh;
+}
+
+.stage {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+}
+
+.stage-bg {
+    position: absolute;
+    inset: 0;
+    background:
+        radial-gradient(circle at 50% 40%, var(--stage-glow), transparent 45%),
+        var(--stage-bg);
+    transition: background 0.3s ease;
+}
+
+#live2d-canvas {
+    position: relative;
+    z-index: 1;
+    width: 100%;
+    height: 100%;
+    display: block;
+    cursor: default;
+    touch-action: none;
+}
+
+/* 浮动按钮 */
+.panel-fab {
+    position: fixed;
+    right: calc(16px + var(--safe-right));
+    bottom: calc(16px + var(--safe-bottom));
+    z-index: 100003;
+    width: var(--fab-size);
+    height: var(--fab-size);
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    background: var(--surface-strong);
+    color: var(--text);
+    box-shadow: var(--shadow);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: auto;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+    transition: transform 0.2s ease, opacity 0.2s ease, background 0.2s ease, visibility 0.2s ease;
+}
+
+.panel-fab:hover {
+    background: var(--surface-item);
+}
+
+.panel-fab:active {
+    transform: scale(0.94);
+}
+
+.panel-fab.is-hidden {
+    visibility: hidden;
+    opacity: 0;
+    pointer-events: none;
+    transform: scale(0.85);
+}
+
+.panel-fab svg {
+    width: 22px;
+    height: 22px;
+    fill: currentColor;
+    pointer-events: none;
+}
+
+/* 遮罩 */
+.panel-backdrop {
+    position: fixed;
+    inset: 0;
+    /* z-index: 100001;
+    background: rgba(15, 23, 42, 0.35);
+    backdrop-filter: blur(2px); */
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.25s ease, visibility 0.25s ease;
+    pointer-events: none;
+}
+
+.panel-backdrop.is-visible {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+}
+
+/* 控制面板 */
+.control-panel {
+    position: fixed;
+    top: var(--safe-top);
+    right: var(--safe-right);
+    bottom: var(--safe-bottom);
+    width: var(--panel-width);
+    max-width: 92vw;
+    z-index: 100002;
+    display: flex;
+    flex-direction: column;
+    background: var(--surface);
+    border-left: 1px solid var(--border);
+    box-shadow: var(--shadow);
+    backdrop-filter: blur(20px);
+    visibility: hidden;
+    opacity: 0;
+    transform: translateX(100%);
+    transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.28s ease, visibility 0.28s ease;
+    pointer-events: none;
+}
+
+.control-panel.is-open {
+    visibility: visible;
+    opacity: 1;
+    transform: translateX(0);
+    pointer-events: auto;
+}
+
+.panel-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+
+.panel-title {
+    font-size: 15px;
+    font-weight: 600;
+}
+
+.panel-close {
+    width: 36px;
+    height: 36px;
+    border: none;
+    border-radius: 10px;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s ease;
+}
+
+.panel-close svg {
+    width: 20px;
+    height: 20px;
+    fill: currentColor;
+}
+
+.panel-body {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 12px 16px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    -webkit-overflow-scrolling: touch;
+}
+
+.panel-section {
+    padding: 8px 0;
+}
+
+.section-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    margin-bottom: 10px;
+}
+
+/* 角色列表 */
+.model-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.model-option {
+    display: grid;
+    gap: 2px;
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--surface-item);
+    color: var(--text);
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.model-option:hover {
+    background: var(--surface-strong);
+    border-color: rgba(15, 23, 42, 0.14);
+}
+
+.model-option.active {
+    background: var(--accent-soft);
+    border-color: rgba(37, 99, 235, 0.3);
+}
+
+.model-option-name {
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.model-option-desc {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+/* 缩放 */
+.zoom-controls {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: var(--surface-item);
+}
+
+.icon-btn,
+.text-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    background: transparent;
+    color: var(--text);
+    border-radius: 10px;
+    cursor: pointer;
+    transition: background 0.15s ease;
+}
+
+.icon-btn {
+    width: 36px;
+    height: 36px;
+}
+
+.icon-btn:hover,
+.text-btn:hover {
+    background: var(--hover-bg);
+}
+
+.icon-btn svg {
+    width: 18px;
+    height: 18px;
+    fill: currentColor;
+}
+
+.text-btn {
+    padding: 8px 12px;
+    font-size: 12px;
+    font-weight: 500;
+    margin-left: auto;
+}
+
+.zoom-value {
+    min-width: 44px;
+    text-align: center;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-muted);
+}
+
+/* 表情 */
+.emotion-buttons {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    align-content: start;
+}
+
+.emotion-btn {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--surface-item);
+    color: var(--text);
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.emotion-btn:hover {
+    background: var(--surface-strong);
+    border-color: rgba(15, 23, 42, 0.14);
+}
+
+.emotion-btn.active {
+    background: var(--accent-soft);
+    border-color: rgba(37, 99, 235, 0.28);
+    color: var(--accent);
+}
+
+.emotion-icon {
+    font-size: 16px;
+    line-height: 1;
+    flex-shrink: 0;
+}
+
+.emotion-label {
+    font-size: 13px;
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.panel-hint {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding-top: 8px;
+    font-size: 11px;
+    color: var(--text-muted);
+    flex-shrink: 0;
+}
+
+.panel-hint span {
+    padding: 4px 8px;
+    border-radius: 999px;
+    background: var(--hint-bg);
+    border: 1px solid var(--border);
+}
+
+/* 背景切换 */
+.theme-switch {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+}
+
+.theme-btn {
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--surface-item);
+    color: var(--text);
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    transition: all 0.15s ease;
+}
+
+.theme-btn:hover {
+    background: var(--surface-strong);
+}
+
+.theme-btn.active {
+    background: var(--accent-soft);
+    border-color: rgba(37, 99, 235, 0.3);
+    color: var(--accent);
+}
+
+body.theme-dark .theme-btn.active {
+    border-color: rgba(96, 165, 250, 0.35);
+}
+
+.panel-close:hover {
+    background: var(--hover-bg);
+}
+
+/* 加载 / 错误 */
+.loading-overlay[hidden],
+.error-container[hidden] {
+    display: none !important;
+}
+
+.loading-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    background: var(--overlay-bg);
+    backdrop-filter: blur(8px);
+    z-index: 15;
+    color: var(--text-muted);
+    font-size: 14px;
+}
+
+.loading-spinner {
+    width: 28px;
+    height: 28px;
+    border: 2px solid rgba(37, 99, 235, 0.15);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+}
+
+.error-container {
+    position: absolute;
+    top: calc(16px + var(--safe-top));
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 10px 16px;
+    border-radius: 12px;
+    background: #fff1f2;
+    border: 1px solid #fecdd3;
+    color: #be123c;
+    font-size: 13px;
+    z-index: 20;
+    max-width: calc(100vw - 32px);
+}
+
+@keyframes spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+/* 手机横屏 */
+@media (orientation: landscape) and (max-height: 520px) {
+    :root {
+        --panel-width: min(280px, 42vw);
+        --fab-size: 44px;
+    }
+
+    .panel-toolbar {
+        padding: 10px 12px;
+    }
+
+    .panel-body {
+        padding: 8px 12px 12px;
+        gap: 2px;
+    }
+
+    .panel-section {
+        padding: 6px 0;
+    }
+
+    .section-label {
+        margin-bottom: 6px;
+    }
+
+    .model-option {
+        padding: 8px 10px;
+    }
+
+    .model-option-desc {
+        display: none;
+    }
+
+    .model-list {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 6px;
+    }
+
+    .emotion-buttons {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 6px;
+    }
+
+    .emotion-btn {
+        flex-direction: column;
+        gap: 2px;
+        padding: 8px 4px;
+        text-align: center;
+    }
+
+    .emotion-label {
+        font-size: 11px;
+    }
+
+    .panel-hint {
+        display: none;
+    }
+
+    .panel-fab {
+        right: calc(12px + var(--safe-right));
+        bottom: calc(12px + var(--safe-bottom));
+    }
+}
+
+/* 手机竖屏 */
+@media (orientation: portrait) and (max-width: 768px) {
+    :root {
+        --panel-width: min(320px, 92vw);
+    }
+
+    .panel-backdrop.is-visible {
+        display: block;
+    }
+
+    .emotion-buttons {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .emotion-btn {
+        flex-direction: column;
+        gap: 4px;
+        padding: 10px 6px;
+        justify-content: center;
+    }
+
+    .emotion-label {
+        font-size: 11px;
+    }
+}
+
+/* 桌面宽屏也显示遮罩，点击可关闭 */
+@media (min-width: 769px) {
+    .panel-backdrop.is-visible {
+        display: block;
+    }
+}
+
+/* Flutter 内嵌模式：隐藏调试控制面板 */
+html.embedded .panel-fab,
+html.embedded .control-panel,
+html.embedded .panel-backdrop {
+    display: none !important;
+}

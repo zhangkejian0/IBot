@@ -8,6 +8,7 @@ import 'package:webview_flutter/webview_flutter.dart';
 
 import '../core/app_controller.dart';
 import '../core/app_scope.dart';
+import '../core/desktop_config.dart';
 import '../face/emotion_mapper.dart';
 import '../face/gaze_smoother.dart';
 import '../face/gaze_zone_detector.dart';
@@ -154,6 +155,7 @@ class _VirtualPetWebViewState extends State<_VirtualPetWebView> {
   late final WebViewController _controller;
   bool _loaded = false;
   bool _loading = false;
+  int _desktopGeneration = 0;
 
   // 上一次推给网页的状态及其确认时刻（用于 dwell 判断）。
   FaceState? _lastSent;
@@ -225,6 +227,7 @@ class _VirtualPetWebViewState extends State<_VirtualPetWebView> {
     // 虚拟宠物表情与嘴部张合,即使没有摄像头帧也要能刷新。
     widget.controller.voiceAssistant.addListener(_onControllerChanged);
     _isFrontCamera = widget.controller.isFrontCamera;
+    _desktopGeneration = widget.controller.desktopGeneration;
   }
 
   @override
@@ -241,7 +244,14 @@ class _VirtualPetWebViewState extends State<_VirtualPetWebView> {
   /// 若每帧都发会堆积排队造成卡顿。这里用一个时间窗（~20fps）合并多帧，
   /// 并把 setState + setGazeTarget 合成一次 JS 调用，显著减少 JS 队列压力。
   void _onControllerChanged() {
-    if (!mounted || !_loaded) return;
+    if (!mounted) return;
+    final gen = widget.controller.desktopGeneration;
+    if (gen != _desktopGeneration) {
+      _desktopGeneration = gen;
+      _reloadForDesktop();
+      return;
+    }
+    if (!_loaded) return;
     final now = DateTime.now();
     if (now.difference(_lastPushAt) < _pushInterval) {
       return; // 窗口内跳过，避免每帧堆积 JS 调用
@@ -337,19 +347,34 @@ class _VirtualPetWebViewState extends State<_VirtualPetWebView> {
     }
   }
 
+  Future<void> _reloadForDesktop() async {
+    setState(() {
+      _loaded = false;
+      _loading = true;
+      _lastSent = null;
+      _lastSentAt = DateTime.fromMillisecondsSinceEpoch(0);
+      _gaze.reset();
+      _zoneDetector.reset();
+    });
+    await _loadUrl();
+  }
+
   Future<void> _loadUrl() async {
     final appController = AppScope.of(context);
-    debugPrint('[VirtualPet] starting server...');
-    final base = await appController.startVirtualPetServer();
-    // 默认显示模式为 ambient（暗背景 + 环境光晕 + 卡哇伊珍珠眼）。
-    // 其它可选：?style=neon（霓虹机器人）/ 留空（默认写实脸）。
+    final desktop = appController.desktopConfigStore.config.desktop;
+    final info = desktopInfo(desktop);
+    debugPrint('[VirtualPet] starting server (${info.label})...');
+    final base = await appController.startVirtualPetServer(desktop);
 
-    // 开发模式：使用Vite开发服务器（支持热更新）
-    // 正式模式：使用本地静态服务器
-    const useDevServer = false; // 开发时设为true，发布时设为false
-    final url = useDevServer
-        ? 'http://localhost:5174/?style=ambient'
-        : '$base?style=ambient';
+    const useDevServer = false;
+    final String url;
+    if (useDevServer) {
+      url = 'http://localhost:5174/?style=ambient';
+    } else if (desktop == VirtualDesktop.monv) {
+      url = '$base?embedded=1';
+    } else {
+      url = '$base${info.styleQuery ?? ''}';
+    }
 
     debugPrint('[VirtualPet] server url: $url');
     if (mounted) {

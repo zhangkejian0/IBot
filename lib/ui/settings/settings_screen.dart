@@ -3,6 +3,7 @@ import 'package:flutter/material.dart' show MaterialPageRoute;
 
 import '../../core/app_controller.dart';
 import '../../core/app_scope.dart';
+import '../../core/desktop_config.dart';
 import '../../services/voice/pophie_config.dart';
 import '../../theme/app_theme.dart';
 import 'face_registration_screen.dart';
@@ -29,6 +30,29 @@ class SettingsScreen extends StatelessWidget {
             child: ListView(
               padding: const EdgeInsets.symmetric(vertical: 16),
               children: [
+                CupertinoListSection.insetGrouped(
+                  backgroundColor: AppTheme.background,
+                  decoration: const BoxDecoration(
+                    color: AppTheme.groupedBackground,
+                    borderRadius: BorderRadius.all(Radius.circular(12)),
+                  ),
+                  header: const _Header('虚拟桌面'),
+                  footer: const _Footer(
+                      '选择虚拟宠物的外观。切换后会重新加载桌面画面。'),
+                  children: [
+                    for (final info in kVirtualDesktops.values)
+                      _DesktopTile(
+                        label: info.label,
+                        subtitle: info.id == VirtualDesktop.defaultSvg
+                            ? 'SVG 表情 · 环境光风格'
+                            : 'Live2D · 魔女模型',
+                        selected: controller.desktopConfigStore.config.desktop ==
+                            info.id,
+                        onTap: () => controller.updateDesktop(info.id),
+                      ),
+                  ],
+                ),
+
                 CupertinoListSection.insetGrouped(
                   backgroundColor: AppTheme.background,
                   decoration: const BoxDecoration(
@@ -341,6 +365,43 @@ class _AboutSection extends StatelessWidget {
               style: TextStyle(color: AppTheme.secondaryLabel, fontSize: 14, decoration: TextDecoration.none)),
         ),
       ],
+    );
+  }
+}
+
+class _DesktopTile extends StatelessWidget {
+  const _DesktopTile({
+    required this.label,
+    required this.subtitle,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String label;
+  final String subtitle;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return CupertinoListTile.notched(
+      backgroundColor: AppTheme.groupedBackground,
+      leading: _LeadingIcon(
+        label == '魔女'
+            ? CupertinoIcons.sparkles
+            : CupertinoIcons.rectangle_on_rectangle_angled,
+        label == '魔女' ? AppTheme.accentPurple : AppTheme.accent,
+      ),
+      title: Text(label, style: const TextStyle(color: AppTheme.label)),
+      subtitle: Text(
+        subtitle,
+        style: const TextStyle(color: AppTheme.secondaryLabel),
+      ),
+      trailing: selected
+          ? const Icon(CupertinoIcons.checkmark_alt,
+              color: AppTheme.accentGreen, size: 22)
+          : null,
+      onTap: selected ? null : onTap,
     );
   }
 }

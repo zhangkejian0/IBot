@@ -74,5 +74,6 @@ app.*.map.json
 # Frontend (assets/html) - Node/Vite 产物，不入库
 assets/html/node_modules/
 assets/html/dist/
+assets/desktop/default/
 assets/html/tsconfig.tsbuildinfo
 assets/html/package-lock.json

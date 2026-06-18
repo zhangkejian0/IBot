@@ -13,6 +13,7 @@ import '../face/gaze_zone_detector.dart';
 import '../models/detection.dart';
 import '../models/expression.dart';
 import '../models/person.dart';
+import 'desktop_config.dart';
 import '../services/camera_image_utils.dart';
 import '../services/face_engine.dart';
 import '../services/face_recognition_service.dart';
@@ -86,6 +87,9 @@ class AppController extends ChangeNotifier {
 
   /// Pophie 后端配置(地址/robotId/sessionId/音色,可在设置页修改并持久化)。
   final PophieConfigStore pophieConfigStore = PophieConfigStore();
+
+  /// 虚拟桌面选择(默认 SVG / Live2D 魔女,可在设置页切换并持久化)。
+  final DesktopConfigStore desktopConfigStore = DesktopConfigStore();
 
   CameraController? _camera;
   CameraController? get camera => _camera;
@@ -205,6 +209,8 @@ class AppController extends ChangeNotifier {
 
       _setLoading(0.95, '读取已录入人物…');
       await personRepository.load();
+
+      await desktopConfigStore.load();
 
       // 加载 LLM 配置(DeepSeek 预设),并注入语音助手的对话服务。
       // 预置 Key 仅在首次落盘时使用,之后以设置页录入为准。
@@ -570,18 +576,31 @@ class AppController extends ChangeNotifier {
   /// 虚拟宠物 HTTP 服务地址，启动后可用。
   String? _virtualPetUrl;
   Future<String>? _virtualPetStarting;
+  VirtualDesktop? _virtualPetDesktop;
   String? get virtualPetUrl => _virtualPetUrl;
+  VirtualDesktop? get virtualPetDesktop => _virtualPetDesktop;
+
+  /// 桌面切换代次：WebView 监听此值变化以重新加载。
+  int _desktopGeneration = 0;
+  int get desktopGeneration => _desktopGeneration;
 
   /// 启动虚拟宠物静态文件服务，返回可访问的 URL。
   /// 多次调用会等待同一启动过程，避免重复启动。
-  Future<String> startVirtualPetServer() async {
-    if (_virtualPetUrl != null) return _virtualPetUrl!;
-    _virtualPetStarting ??= _doStartVirtualPetServer();
+  Future<String> startVirtualPetServer([VirtualDesktop? desktop]) async {
+    final target = desktop ?? desktopConfigStore.config.desktop;
+    if (_virtualPetUrl != null && _virtualPetDesktop == target) {
+      return _virtualPetUrl!;
+    }
+    _virtualPetStarting ??= _doStartVirtualPetServer(target);
     return _virtualPetStarting!;
   }
 
-  Future<String> _doStartVirtualPetServer() async {
-    _virtualPetUrl = await staticServer.start();
+  Future<String> _doStartVirtualPetServer(VirtualDesktop desktop) async {
+    if (_virtualPetUrl != null && _virtualPetDesktop != desktop) {
+      await stopVirtualPetServer();
+    }
+    _virtualPetUrl = await staticServer.start(desktop: desktop);
+    _virtualPetDesktop = desktop;
     _virtualPetStarting = null;
     notifyListeners();
     return _virtualPetUrl!;
@@ -591,7 +610,22 @@ class AppController extends ChangeNotifier {
   Future<void> stopVirtualPetServer() async {
     await staticServer.stop();
     _virtualPetUrl = null;
+    _virtualPetDesktop = null;
     _virtualPetStarting = null;
+  }
+
+  /// 切换虚拟桌面：持久化并在非调试模式下重启静态服务。
+  Future<void> updateDesktop(VirtualDesktop desktop) async {
+    if (desktopConfigStore.config.desktop == desktop) return;
+    await desktopConfigStore.save(
+      desktopConfigStore.config.copyWith(desktop: desktop),
+    );
+    _desktopGeneration++;
+    if (!settings.debugMode) {
+      await stopVirtualPetServer();
+      await startVirtualPetServer(desktop);
+    }
+    notifyListeners();
   }
 
   /// 修改显示/识别设置后刷新监听者（用于设置页开关）。
@@ -600,7 +634,7 @@ class AppController extends ChangeNotifier {
     // 关闭调试模式（即显示虚拟宠物网页）时按需启动本地服务；
     // 开启调试模式（即显示摄像头画面）时释放服务资源。
     if (!settings.debugMode && _virtualPetUrl == null) {
-      startVirtualPetServer();
+      startVirtualPetServer(desktopConfigStore.config.desktop);
     } else if (settings.debugMode && _virtualPetUrl != null) {
       stopVirtualPetServer();
     }
