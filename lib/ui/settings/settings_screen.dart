@@ -137,9 +137,11 @@ class SettingsScreen extends StatelessWidget {
                       color: AppTheme.accentGreen,
                       label: '语音唤醒',
                       value: s.wakeWordEnabled,
-                      // 仅在语音助手启用时才有意义。
+                      // 仅在语音助手启用且唤醒模型加载成功时才有意义。
+                      // 模型未就绪时禁用此开关(但整体语音助手仍可用——双击触发)。
                       onChanged: (s.voiceEnabled &&
-                              controller.voiceAssistant.isAvailable)
+                              controller.voiceAssistant.isAvailable &&
+                              controller.voiceAssistant.wakeWord.isAvailable)
                           ? (v) => controller
                               .updateSettings(() => s.wakeWordEnabled = v)
                           : null,
@@ -444,7 +446,7 @@ class _WakeWordTile extends StatelessWidget {
           child: CupertinoTextField(
             controller: controller,
             autofocus: true,
-            placeholder: '如：狗蛋',
+            placeholder: '如：你好',
             textAlign: TextAlign.center,
             maxLength: 16,
           ),

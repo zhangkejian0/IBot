@@ -94,18 +94,22 @@ class VoiceAssistant extends ChangeNotifier {
   }
 
   /// 初始化子服务(加载唤醒模型、配置云端凭证)。幂等。
-  /// 在后台逐个初始化,失败不阻断;最终可用性取决于各子服务的 available 标志。
+  /// 在后台逐个初始化,失败不阻断;唤醒模型缺失只禁用"语音唤醒"子能力,
+  /// 不影响整体可用性(麦克风权限才是可用性闸门,双击触发不依赖唤醒词)。
+  /// 因此这里**不覆盖** [_available]——它已由 [markAvailable]/[markUnavailable]
+  /// 按麦克风权限设置,这里仅记录各子服务就绪情况供诊断。
   Future<void> initialize() async {
     await Future.wait([
       wakeWord.initialize(),
       speech.initialize(),
       chat.initialize(),
     ]);
-    // 唤醒模型就绪即视为可用(至少能监听唤醒词);ASR/TTS/LLM 缺失时各流程会降级。
-    _available = wakeWord.isAvailable || true; // 阶段1:先放行骨架
     debugPrint('[VoiceAssistant] initialized '
         'wake=${wakeWord.isAvailable} asr=${speech.asrAvailable} '
         'tts=${speech.ttsAvailable} llm=${chat.isAvailable}');
+    // 唤醒模型是后台异步加载的,加载结果会影响设置页"语音唤醒"子开关的
+    // 启用状态,故加载完成后需通知 UI 重建。
+    notifyListeners();
   }
 
   /// 开始运行:启动麦克风 + 唤醒监听。仅在总开关打开时调用。

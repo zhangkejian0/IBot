@@ -114,7 +114,10 @@ flutter:
     # 运行时 _prepareAssets 复制不到该文件，WebView 加载 JS 时 404 → 黑屏。
     - assets/html/dist/assets/
     # 语音助手本地唤醒模型(sherpa-onnx KWS:*.onnx + tokens.txt + 关键词文件)。
-    - assets/models/voice/
+    # 注意:Flutter assets 声明不递归,必须把模型实际所在的子目录显式声明,
+    # 否则 *.onnx / tokens.txt 不会被打包,运行时 _prepareModelFiles 复制不到
+    # → KeywordSpotter 构造时报 "Failed to create kws"(文件不存在)。
+    - assets/models/voice/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

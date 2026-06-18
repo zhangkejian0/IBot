@@ -56,7 +56,7 @@ class DisplaySettings {
   /// 是否启用 TTS 语音播报(关闭则回复仅以文字显示)。
   bool ttsEnabled = true;
   /// 唤醒词(可在设置页修改,运行时生效)。
-  String wakeWord = '狗蛋';
+  String wakeWord = '你好';
   /// 云端服务 API Key(阿里云 ASR/TTS、LLM;阶段 3+ 使用,首版可留空占位)。
   String? asrApiKey;
   String? llmApiKey;
@@ -96,6 +96,18 @@ class AppController extends ChangeNotifier {
 
   AppPhase _phase = AppPhase.loading;
   AppPhase get phase => _phase;
+
+  AppController() {
+    // 转发 voiceAssistant 的变化:唤醒模型后台加载完成等子事件会改变
+    // 设置页各语音开关的启用状态,需冒泡到 AppController 才能让 ListenableBuilder
+    // 重建(设置页只监听 AppController)。
+    voiceAssistant.addListener(_onVoiceAssistantChanged);
+  }
+
+  void _onVoiceAssistantChanged() {
+    if (_disposed) return;
+    notifyListeners();
+  }
 
   double _loadingProgress = 0;
   double get loadingProgress => _loadingProgress;
@@ -740,6 +752,7 @@ class AppController extends ChangeNotifier {
     handEngine.dispose();
     mlkitFaceEngine.dispose();
     faceRecognition.dispose();
+    voiceAssistant.removeListener(_onVoiceAssistantChanged);
     voiceAssistant.dispose();
     staticServer.stop();
     super.dispose();
