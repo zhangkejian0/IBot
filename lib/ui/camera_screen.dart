@@ -159,6 +159,11 @@ class _VirtualPetWebViewState extends State<_VirtualPetWebView> {
   FaceState? _lastSent;
   DateTime _lastSentAt = DateTime.fromMillisecondsSinceEpoch(0);
 
+  // 上一帧语音是否活跃:用于检测"语音刚结束"的过渡,强制把前端表情
+  // 切回 idle。否则当对话结束且摄像头没检测到人脸时,_pushAll 的视觉态
+  // 分支会直接 return,前端表情卡在 listening(无人通知它切回)。
+  bool _lastVoiceActive = false;
+
   // 注视方向平滑器：消除人脸框帧间抖动。k 偏大→跟手、几乎不拖影。
   final GazeSmoother _gaze = GazeSmoother(k: 0.85);
   // 是否为前置摄像头（决定水平 gaze 是否镜像）。
@@ -255,6 +260,22 @@ class _VirtualPetWebViewState extends State<_VirtualPetWebView> {
     final face = widget.controller.result.face;
     final voice = widget.controller.voiceAssistant;
     final voiceActive = voice.isRunning && voice.state.isActive;
+
+    // —— 语音刚结束的过渡:强制把前端表情切回 idle + 嘴部归零 ——
+    // 对话结束时 voice_assistant 的 finally 会置 idle,voiceActive 变 false。
+    // 若此时摄像头没检测到人脸,下方的视觉态分支会 return 不推送任何指令,
+    // 导致前端表情卡在 listening。这里在过渡瞬间强制推一次清空。
+    final justEnded = _lastVoiceActive && !voiceActive;
+    _lastVoiceActive = voiceActive;
+    if (justEnded) {
+      const js = 'var f=window.__face;if(f){f.setState(\'idle\');'
+          'f.setListeningLoudness(0);}';
+      _controller.runJavaScript(js).catchError((e) {
+        debugPrint('[VirtualPet] JS push(voice-end) failed: $e');
+      });
+      // 重置视觉态去抖缓存,让下一帧能正常驱动。
+      _lastSent = null;
+    }
 
     // —— 语音优先级最高:活跃时接管表情 + 嘴部张合,跳过视觉情绪态 ——
     if (voiceActive) {

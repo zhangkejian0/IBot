@@ -33,11 +33,15 @@ enum VoiceState {
 /// 虚拟宠物 React 端(window.__face.setState)接受的 FaceState 取值见
 /// assets/html/src/face/types.ts,与本项目 [VoiceState] 一一对应。
 extension VoiceStateFaceMapping on VoiceState {
-  /// 对应虚拟宠物前端的 FaceState 名称;idle 返回 null(不覆盖视觉态)。
+  /// 对应虚拟宠物前端的 FaceState 名称。
+  ///
+  /// 注意:idle 返回 'idle'(而非 null),用于在对话结束时把前端表情
+  /// 明确切回 neutral。是否据此推送由 camera_screen 的 _pushAll 决定
+  /// (它会在语音刚结束时强制推一次,避免表情卡在 listening)。
   String? get faceState {
     switch (this) {
       case VoiceState.idle:
-        return null; // 不干预:交回人脸表情驱动
+        return 'idle';
       case VoiceState.waking:
       case VoiceState.listening:
         return 'listening';

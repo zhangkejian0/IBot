@@ -92,12 +92,18 @@ class AudioCaptureService {
   ///
   /// 用于「双击/唤醒后聆听一句话 → 整段上传 Pophie /api/chat」的流程。
   /// 必须在 [start] 之后调用(录音管线已在跑)。
+  ///
+  /// 阈值说明(均为 RMS 归一化到 0..1,分母 6000):
+  /// - [speechThreshold] 起说话门槛。原 0.12 偏高,声音小/离麦远时达不到
+  ///   → 偶发"未采集到语音"。降到 0.06 让正常说话能稳定触发。
+  /// - [silenceThreshold] 续说话门槛。降到 0.04。
+  /// - [onsetTimeout] 起始超时。原 6s 偏短(唤醒后停顿一下就超时),延到 10s。
   Future<Uint8List?> captureUtterance({
     Duration maxDuration = const Duration(seconds: 12),
     Duration silenceTimeout = const Duration(milliseconds: 1500),
-    Duration onsetTimeout = const Duration(seconds: 6),
-    double speechThreshold = 0.12,
-    double silenceThreshold = 0.07,
+    Duration onsetTimeout = const Duration(seconds: 10),
+    double speechThreshold = 0.06,
+    double silenceThreshold = 0.04,
   }) async {
     if (!_running) return null;
     final completer = Completer<Uint8List?>();
@@ -107,17 +113,27 @@ class AudioCaptureService {
     final startAt = DateTime.now();
     StreamSubscription<Uint8List>? sub;
     Timer? ticker;
+    // 诊断:跟踪采样到的最大音量,结束时打印,便于排查"采不到语音"是
+    // 阈值问题(音量低)还是真的没声音(音量为 0)。
+    var maxObservedLevel = 0.0;
+    var sampleCount = 0;
 
     void finish(Uint8List? result) {
       if (completer.isCompleted) return;
       ticker?.cancel();
       sub?.cancel();
+      debugPrint('[AudioCapture] utterance finished: '
+          'speechStarted=$speechStarted bytes=${result?.length ?? 0} '
+          'maxLevel=${maxObservedLevel.toStringAsFixed(3)} '
+          'samples=$sampleCount threshold=$speechThreshold');
       completer.complete(result);
     }
 
     sub = audioStream.listen(
       (bytes) {
         final lvl = _rmsLevel(bytes);
+        sampleCount++;
+        if (lvl > maxObservedLevel) maxObservedLevel = lvl;
         if (lvl >= speechThreshold) speechStarted = true;
         if (lvl >= silenceThreshold) lastVoiceAt = DateTime.now();
         // 起始后才累积，避免把前导静音也发给后端。

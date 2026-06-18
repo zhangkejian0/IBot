@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 
 import 'audio_capture_service.dart';
 import 'chat_service.dart';
+import 'conversation_logger.dart';
 import 'pophie_client.dart';
 import 'speech_service.dart';
 import 'voice_state.dart';
@@ -29,6 +30,10 @@ class VoiceAssistant extends ChangeNotifier {
 
   /// Pophie 后端客户端:一次完成 STT + LLM + TTS(见 docs/API对接文档.md)。
   final PophieClient pophie = PophieClient();
+
+  /// 对话交互日志(各阶段埋点),供设置页「交互日志」查看。
+  /// 对象在 AppController 持有,设置页订阅它实时刷新。
+  final ConversationLogger conversationLog = ConversationLogger();
 
   /// TTS 音频播放器(audioplayers，Android/iOS 通用)。
   final AudioPlayer _player = AudioPlayer();
@@ -160,6 +165,7 @@ class VoiceAssistant extends ChangeNotifier {
   /// idle → waking → listening → thinking → speaking → idle
   void _onWake(String keyword) {
     debugPrint('[VoiceAssistant] wake word: $keyword');
+    conversationLog.log('wake', '唤醒词: $keyword');
     _runConversation();
   }
 
@@ -183,14 +189,20 @@ class VoiceAssistant extends ChangeNotifier {
       final pcm = await audio.captureUtterance();
       if (pcm == null || pcm.isEmpty) {
         debugPrint('[VoiceAssistant] no speech captured');
+        conversationLog.log('listen', '未采集到语音(VAD 无输入或超时)',
+            error: true);
         return; // finally 会回到 idle 并恢复唤醒监听
       }
       final wav = PophieClient.pcm16ToWav(pcm);
+      conversationLog.log('listen',
+          '已采集语音 ${pcm.length} 字节 (PCM) → WAV ${wav.length} 字节');
 
       // thinking:整段上传后端,等待 STT+LLM+TTS 一体化结果。
       _setState(VoiceState.thinking);
       final perception = perceptionProvider?.call();
       final userId = userIdProvider?.call();
+      conversationLog.log('think',
+          '上传 Pophie /api/chat (skipTts=${!ttsEnabled})…');
       PophieChatResult result;
       try {
         result = await pophie.chat(
@@ -201,6 +213,7 @@ class VoiceAssistant extends ChangeNotifier {
         );
       } catch (e) {
         debugPrint('[VoiceAssistant] chat request failed: $e');
+        conversationLog.log('think', 'Pophie 请求失败: $e', error: true);
         return; // finally 会回到 idle 并恢复唤醒监听
       }
 
@@ -212,9 +225,19 @@ class VoiceAssistant extends ChangeNotifier {
       _robotState = result.robotState;
       notifyListeners();
 
+      // 记录后端返回详情:STT 文本、LLM 回复、robot_state、音频字节数。
+      final audioInfo = result.audioBytes != null
+          ? '音频 ${result.audioBytes!.length} 字节 (${result.audioFormat ?? 'wav'})'
+          : '无音频';
+      conversationLog.log('think',
+          '后端返回: STT="${result.sttText}" | LLM="${result.text}" | '
+          'robotState=${result.robotState} | $audioInfo');
+
       // STT 空 / LLM 失败:后端返回静默(空 text),端侧保持安静,不播报。
       if (result.isSilent) {
         debugPrint('[VoiceAssistant] silent reply (empty STT or LLM fail)');
+        conversationLog.log('think',
+            '静默回复(STT 空或 LLM 失败),不播报', error: true);
         return; // finally 会回到 idle 并恢复唤醒监听
       }
 
@@ -224,10 +247,21 @@ class VoiceAssistant extends ChangeNotifier {
       // speaking:播放后端合成的 TTS 音频,音量包络驱动虚拟宠物嘴部张合。
       if (ttsEnabled && result.audioBytes != null) {
         _setState(VoiceState.speaking);
+        conversationLog.log('speak', '开始播报 TTS…');
+        // 播放前停麦克风:Android 上 AudioRecord active 时与播放器抢占
+        // AEC/SCO 通路,偶发导致"有音频但没声音"。播报期间唤醒已关闭,
+        // 麦克风可安全暂停,播放完 finally 里 _resumeWakeListening 前会重启。
+        await audio.stop();
         await _playTts(result.audioBytes!, result.audioFormat ?? 'wav');
+        // 播放完重启麦克风采集,供 finally 恢复唤醒监听用。
+        await audio.start();
+      } else if (ttsEnabled && result.audioBytes == null) {
+        conversationLog.log('speak', 'TTS 开启但后端未返回音频,跳过播报',
+            error: true);
       }
     } catch (e) {
       debugPrint('[VoiceAssistant] conversation error: $e');
+      conversationLog.log('error', '对话异常: $e', error: true);
     } finally {
       _userText = '';
       _replyText = '';
@@ -235,6 +269,7 @@ class VoiceAssistant extends ChangeNotifier {
       audio.externalLevel = false;
       audio.level.value = 0.0;
       _setState(VoiceState.idle);
+      conversationLog.log('end', '一轮对话结束,回到 idle');
       // 恢复唤醒监听,等待下一次唤醒。
       await _resumeWakeListening();
     }
@@ -243,6 +278,11 @@ class VoiceAssistant extends ChangeNotifier {
   /// 播放 TTS 音频(WAV/MP3 字节)。播放期间用音频自身的音量包络驱动
   /// [audio.level],让虚拟宠物嘴部随语音张合。WAV 可精确计算包络,
   /// 其它格式退化为轻微的合成张合。
+  ///
+  /// 关键:播放前先停麦克风采集,播放完再恢复。否则 AudioRecord 处于
+  /// active 时启动播放器,Android 的 AEC(回声消除)/蓝牙 SCO 路由会与
+  /// 播放器抢占音频通路,偶发导致"有音频但没声音"。录音停了不影响功能:
+  /// 播报期间唤醒本就处于关闭态(见 _runConversation 开头 wakeWord.stop)。
   Future<void> _playTts(Uint8List bytes, String format) async {
     // 接管 level,避免被麦克风采集的实时音量覆盖。
     audio.externalLevel = true;
@@ -255,20 +295,56 @@ class VoiceAssistant extends ChangeNotifier {
         idx++;
       });
     }
+    // 监听播放器状态/日志,便于排查"收到音频但没播放"。
+    StreamSubscription? stateSub;
+    StreamSubscription? logSub;
+    stateSub = _player.onPlayerStateChanged.listen((st) {
+      debugPrint('[VoiceAssistant] player state: $st');
+    });
+    logSub = _player.onLog.listen((msg) {
+      debugPrint('[VoiceAssistant] player log: $msg');
+    });
     try {
       await _player.stop();
+      debugPrint('[VoiceAssistant] playing tts ${bytes.length} bytes '
+          'format=$format envelope=${envelope.length}');
+      await _player.setReleaseMode(ReleaseMode.stop);
+      await _player.setVolume(1.0);
       await _player.play(BytesSource(
         bytes,
         mimeType: format == 'mp3' ? 'audio/mpeg' : 'audio/wav',
       ));
-      // 等播放结束;以包络时长(或固定上限)兜底,避免回调缺失时卡死。
+      // 等播放结束;用包络时长(或固定上限)兜底,避免回调缺失时卡死。
+      // 注意:不用 .first.timeout —— broadcast stream 的 first 在二次调用时
+      // 类型推断会出错(Null 不是 FutureOr<AudioEvent>),改用 Completer+Timer
+      // 显式管理,类型安全且可控。
       final fallback = envelope.isNotEmpty
           ? Duration(milliseconds: envelope.length * 60 + 800)
           : const Duration(seconds: 20);
-      await _player.onPlayerComplete.first.timeout(fallback, onTimeout: () {});
+      final done = Completer<void>();
+      final completeSub = _player.onPlayerComplete.listen((_) {
+        if (!done.isCompleted) done.complete();
+      });
+      final timer = Timer(fallback, () {
+        if (!done.isCompleted) {
+          debugPrint('[VoiceAssistant] player onPlayerComplete timeout '
+              '(${fallback.inSeconds}s) — 回调未触发');
+          conversationLog.log('speak',
+              '播放完成回调超时(${fallback.inSeconds}s),可能未正常播放',
+              error: true);
+          done.complete();
+        }
+      });
+      await done.future;
+      timer.cancel();
+      completeSub.cancel();
+      conversationLog.log('speak', '播报完成');
     } catch (e) {
       debugPrint('[VoiceAssistant] tts play failed: $e');
+      conversationLog.log('speak', '播放异常: $e', error: true);
     } finally {
+      stateSub.cancel();
+      logSub.cancel();
       ticker?.cancel();
       audio.level.value = 0.0;
     }

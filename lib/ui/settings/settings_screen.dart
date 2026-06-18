@@ -543,6 +543,19 @@ class _PophieConfigSection extends StatelessWidget {
               trailing: const CupertinoListTileChevron(),
               onTap: () => _testConnection(context),
             ),
+            // 交互日志:查看每一轮对话的唤醒/STT/LLM/TTS 详情与错误,
+            // 排查"说了话没反应""表情卡住"等问题。
+            CupertinoListTile.notched(
+              backgroundColor: AppTheme.groupedBackground,
+              leading: _LeadingIcon(
+                  CupertinoIcons.list_bullet, AppTheme.accent),
+              title: const Text('交互日志',
+                  style: TextStyle(color: AppTheme.label)),
+              subtitle: const Text('查看语音对话各阶段记录',
+                  style: TextStyle(color: AppTheme.secondaryLabel)),
+              trailing: const CupertinoListTileChevron(),
+              onTap: () => _showConversationLog(context),
+            ),
           ],
         );
       },
@@ -577,6 +590,166 @@ class _PophieConfigSection extends StatelessWidget {
             onPressed: () => Navigator.of(ctx).pop(),
           ),
         ],
+      ),
+    );
+  }
+
+  /// 打开交互日志弹窗:全屏模态,展示最近若干轮对话的各阶段记录。
+  /// 错误记录用红色标记;支持清空。订阅 ConversationLogger 实时刷新。
+  Future<void> _showConversationLog(BuildContext context) async {
+    await Navigator.of(context).push(
+      CupertinoPageRoute<void>(
+        builder: (_) => _ConversationLogScreen(
+          logger: controller.voiceAssistant.conversationLog,
+        ),
+      ),
+    );
+  }
+}
+
+/// 交互日志全屏页:列表展示 [ConversationLogger] 的记录,实时刷新。
+/// 每条记录显示阶段徽标 + 详情 + 相对时间;错误记录红色高亮。
+class _ConversationLogScreen extends StatefulWidget {
+  const _ConversationLogScreen({required this.logger});
+  final dynamic logger; // ConversationLogger(避免此处再 import,用 dynamic)
+
+  @override
+  State<_ConversationLogScreen> createState() => _ConversationLogScreenState();
+}
+
+class _ConversationLogScreenState extends State<_ConversationLogScreen> {
+  @override
+  void initState() {
+    super.initState();
+    widget.logger.addListener(_onChanged);
+  }
+
+  @override
+  void dispose() {
+    widget.logger.removeListener(_onChanged);
+    super.dispose();
+  }
+
+  void _onChanged() {
+    if (mounted) setState(() {});
+  }
+
+  /// 阶段标识 → 显示色。
+  Color _stageColor(String stage, bool error) {
+    if (error) return const Color(0xFFFF453A); // 红
+    switch (stage) {
+      case 'wake':
+        return const Color(0xFFFFD60A); // 黄
+      case 'listen':
+        return const Color(0xFF64D2FF); // 青
+      case 'think':
+        return const Color(0xFFBF5AF2); // 紫
+      case 'speak':
+        return const Color(0xFF30D158); // 绿
+      case 'end':
+        return AppTheme.tertiaryLabel;
+      default:
+        return AppTheme.secondaryLabel;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final entries = widget.logger.entries as List;
+    return CupertinoPageScaffold(
+      backgroundColor: AppTheme.background,
+      navigationBar: CupertinoNavigationBar(
+        middle: const Text('交互日志'),
+        backgroundColor: AppTheme.background,
+        trailing: GestureDetector(
+          onTap: () => widget.logger.clear(),
+          child: const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            child: Text('清空',
+                style: TextStyle(color: AppTheme.accent, fontSize: 16)),
+          ),
+        ),
+      ),
+      child: SafeArea(
+        child: entries.isEmpty
+            ? const Center(
+                child: Text('暂无记录\n唤醒「你好」开始一轮对话即可看到日志',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: AppTheme.secondaryLabel)),
+              )
+            // 倒序展示:最新在最上,便于查看最近一轮对话。
+            : ListView.builder(
+                reverse: true,
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                itemCount: entries.length,
+                itemBuilder: (context, i) {
+                  final e = entries[entries.length - 1 - i];
+                  final ts = e.timestamp as DateTime;
+                  final dur = DateTime.now().difference(ts);
+                  final ago = dur.inMinutes < 1
+                      ? '${dur.inSeconds}秒前'
+                      : dur.inHours < 1
+                          ? '${dur.inMinutes}分前'
+                          : '${dur.inHours}时前';
+                  final color = _stageColor(e.stage as String, e.error as bool);
+                  return Container(
+                    margin: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 4),
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: AppTheme.groupedBackground,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        // 阶段徽标(彩色圆点)
+                        Container(
+                          margin: const EdgeInsets.only(top: 4, right: 8),
+                          width: 8,
+                          height: 8,
+                          decoration: BoxDecoration(
+                            color: color,
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Text(e.stage as String,
+                                      style: TextStyle(
+                                        color: color,
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w600,
+                                      )),
+                                  const SizedBox(width: 8),
+                                  Text(ago,
+                                      style: const TextStyle(
+                                        color: AppTheme.tertiaryLabel,
+                                        fontSize: 11,
+                                      )),
+                                ],
+                              ),
+                              const SizedBox(height: 4),
+                              Text(e.message as String,
+                                  style: TextStyle(
+                                    color: e.error as bool
+                                        ? const Color(0xFFFF9D8A)
+                                        : AppTheme.label,
+                                    fontSize: 13,
+                                    height: 1.4,
+                                  )),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
       ),
     );
   }
