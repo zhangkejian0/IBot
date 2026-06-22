@@ -6,6 +6,7 @@ import '../../core/app_scope.dart';
 import '../../services/voice/pophie_client.dart';
 import '../../services/voice/pophie_config.dart';
 import '../../theme/app_theme.dart';
+import 'base_debug_screen.dart';
 import 'face_registration_screen.dart';
 import 'friend_list_sheet.dart';
 
@@ -273,6 +274,42 @@ class SettingsScreen extends StatelessWidget {
                       value: s.mirrorFrontCamera,
                       onChanged: (v) => controller
                           .updateSettings(() => s.mirrorFrontCamera = v),
+                    ),
+                  ],
+                ),
+
+                // 底座控制分组
+                CupertinoListSection.insetGrouped(
+                  backgroundColor: AppTheme.background,
+                  decoration: const BoxDecoration(
+                    color: AppTheme.groupedBackground,
+                    borderRadius: BorderRadius.all(Radius.circular(12)),
+                  ),
+                  header: const _Header('底座控制'),
+                  footer: const _Footer('连接物理旋转底座，进行调试和控制。'),
+                  children: [
+                    _SwitchTile(
+                      icon: CupertinoIcons.gear_alt_fill,
+                      color: AppTheme.accentTeal,
+                      label: '启用底座控制',
+                      value: s.baseControlEnabled,
+                      onChanged: (v) => controller.updateSettings(
+                          () => s.baseControlEnabled = v),
+                    ),
+                    CupertinoListTile.notched(
+                      backgroundColor: AppTheme.groupedBackground,
+                      leading: const _LeadingIcon(
+                          CupertinoIcons.wrench_fill, AppTheme.accentOrange),
+                      title: const Text('调试面板',
+                          style: TextStyle(color: AppTheme.label)),
+                      subtitle: const Text('连接、手动控制、指令日志',
+                          style:
+                              TextStyle(color: AppTheme.secondaryLabel)),
+                      trailing: const CupertinoListTileChevron(),
+                      onTap: () => Navigator.of(context).push(
+                        MaterialPageRoute(
+                            builder: (_) => const BaseDebugScreen()),
+                      ),
                     ),
                   ],
                 ),

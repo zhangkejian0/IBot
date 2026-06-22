@@ -48,6 +48,12 @@ class DisplaySettings {
   bool showIdentity = true;
   bool mirrorFrontCamera = true;
 
+  // —— 底座控制 ——
+  /// 底座控制总开关。
+  bool baseControlEnabled = false;
+  /// 底座控制模式：manual(手动) / faceFollow(人脸跟随) / demo(演示)。
+  String baseControlMode = 'manual';
+
   // —— 语音助手 ——
   /// 语音助手总开关。
   bool voiceEnabled = false;
