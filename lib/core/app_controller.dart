@@ -247,8 +247,13 @@ class AppController extends ChangeNotifier {
 
     final controller = CameraController(
       selected,
-      ResolutionPreset.medium,
+      ResolutionPreset.low,
       enableAudio: false,
+      // 从源头限定 5fps 采集,与 _detectInterval=200ms 检测节流对齐:
+      // 硬件不再以 30fps 回调再被丢弃 25 次,而是直接只产 5 帧/秒,
+      // 省掉冗余的 _onFrame 回调与 YUV 缓冲分配/释放开销。
+      // 虚拟宠物场景不显示摄像头预览,5fps 不会影响观感。
+      fps: 5,
       imageFormatGroup: ImageFormatGroup.yuv420,
     );
     await controller.initialize();
