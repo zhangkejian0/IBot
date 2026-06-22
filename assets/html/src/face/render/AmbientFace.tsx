@@ -80,8 +80,8 @@ export function AmbientFace() {
 
   const lOp = Math.max(0.04, params.leftEye.openness);
   const rOp = Math.max(0.04, params.rightEye.openness);
-  const gx = (s: 'left' | 'right') => (s === 'left' ? params.leftEye.pupilX : params.rightEye.pupilX) * 22;
-  const gy = (s: 'left' | 'right') => (s === 'left' ? params.leftEye.pupilY : params.rightEye.pupilY) * 18;
+  const gx = (s: 'left' | 'right') => (s === 'left' ? params.leftEye.pupilX : params.rightEye.pupilX) * 27;
+  const gy = (s: 'left' | 'right') => (s === 'left' ? params.leftEye.pupilY : params.rightEye.pupilY) * 24;
 
   // wink：左眼弯笑，右眼睁睛
   const leftEyeStyle: EyeStyle = desc.eye === 'wink' ? 'closedSmile' : desc.eye;

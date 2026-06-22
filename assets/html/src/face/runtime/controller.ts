@@ -20,14 +20,17 @@ import {
  * FaceState → 氛围表情预设。让 setState 自动驱动渲染器的眼形/嘴形/光晕/道具，
  * Flutter 只需调 setState 即可，无需额外调 setAmbientExpression。
  *
- * 设计取舍：listening/thinking/happy 三个语音高频态都映射到 calm（统一"微笑"
- * 基调），避免对话过程中眼睛在不同预设间频繁跳变造成视觉抖动；confused 才用
- * doubt（带问号道具），因为人脸表情检测触发频率低，偶尔蹦问号是合适反馈。
+ * 设计取舍：
+ * - listening（聆听用户说话）用 doubt（问号），表现"在听/疑问"的专注感；
+ * - thinking/happy/sleeping 保持 calm（微笑），避免等回复/说话/睡眠时表情
+ *   过于激动；
+ * - confused（人脸检测到的惊讶/厌恶/恐惧）也用 doubt，与 listening 同预设
+ *   （场景不同不会混淆，用户已确认接受）。
  */
 const STATE_TO_AMBIENT: Record<FaceState, AmbientExpressionId> = {
   idle: 'idle',
   gazing: 'idle',
-  listening: 'calm',
+  listening: 'doubt',
   thinking: 'calm',
   happy: 'calm',
   confused: 'doubt',

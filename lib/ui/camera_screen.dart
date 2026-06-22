@@ -9,7 +9,6 @@ import 'package:webview_flutter/webview_flutter.dart';
 import '../core/app_controller.dart';
 import '../core/app_scope.dart';
 import '../face/emotion_mapper.dart';
-import '../face/gaze_smoother.dart';
 import '../face/gaze_zone_detector.dart';
 import '../models/expression.dart';
 import '../services/camera_image_utils.dart';
@@ -164,28 +163,8 @@ class _VirtualPetWebViewState extends State<_VirtualPetWebView> {
   // 分支会直接 return,前端表情卡在 listening(无人通知它切回)。
   bool _lastVoiceActive = false;
 
-  // 注视方向平滑器：消除人脸框帧间抖动。k 偏大→跟手、几乎不拖影。
-  final GazeSmoother _gaze = GazeSmoother(k: 0.85);
   // 是否为前置摄像头（决定水平 gaze 是否镜像）。
   bool _isFrontCamera = true;
-
-  // —— 连续注视映射参数 ——
-  // 增益：人脸中心位移放大到瞳孔位移。桌面场景下人脸通常只在画面中部小幅
-  // 移动（归一化坐标极少触及 ±1），用 >1 的增益让中等幅度即可让眼睛看到边缘，
-  // 显著提升「灵敏度」。最终 clamp 到 [-1,1]。
-  static const double _gazeGain = 2.6;
-  // 中心死区：极小，仅用于消除静止时人脸框微抖导致的瞳孔颤动。
-  static const double _gazeDeadZone = 0.03;
-
-  /// 把单轴归一化人脸位置（-1..1）映射为瞳孔目标（-1..1）。
-  /// 先扣掉中心死区保证静止稳定，再按增益放大并 clamp。
-  double _mapGazeAxis(double v) {
-    final sign = v.isNegative ? -1.0 : 1.0;
-    final mag = v.abs();
-    if (mag <= _gazeDeadZone) return 0.0;
-    final adjusted = (mag - _gazeDeadZone) * _gazeGain;
-    return (sign * adjusted).clamp(-1.0, 1.0);
-  }
 
   // 区域检测器：使用AppController中的实例，与调试可视化共享。
   GazeZoneDetector get _zoneDetector => widget.controller.gazeZoneDetector;
@@ -297,11 +276,12 @@ class _VirtualPetWebViewState extends State<_VirtualPetWebView> {
       return;
     }
 
-    // 注视方向：人脸中心 → 瞳孔的「连续比例映射」。
+    // 注视方向：人脸中心 → 九宫格量化 → 瞳孔极限位置。
     //
-    // 旧实现把位置量化到九宫格的 9 个极限位置（-1/0/1），同一格内移动脸
-    // 眼睛完全不动，只在跨越边界时突变 —— 主观上就是「不灵敏 / 迟钝」。
-    // 这里改为连续映射：脸偏离中心越多，瞳孔成比例偏移越多，做到逐帧跟随。
+    // 把人脸中心归一化坐标量化到 3×3 九宫格之一，推送该格中心(-1/0/1 的组合)
+    // 作为瞳孔目标。格内移动脸眼睛不动(只跨格才变),配合 JS 侧 spring 平滑过渡,
+    // 避免了连续映射在低帧率(5fps)下的抖动。GazeZoneDetector 自带死区(边界±5%)
+    // 防止人脸在格边界抖动时反复跳格。
     String gazeJs = '';
     if (face != null) {
       // 计算人脸中心归一化坐标（-1..1，画面中心为原点）
@@ -311,18 +291,14 @@ class _VirtualPetWebViewState extends State<_VirtualPetWebView> {
         x = -x;
       }
 
-      final targetX = _mapGazeAxis(x);
-      final targetY = _mapGazeAxis(y);
-
-      // 区域检测器仍更新，供调试可视化（九宫格高亮）使用。
+      // 量化到九宫格:跨格时推送新格中心(-1/0/1),JS 侧 spring 自然过渡。
       _zoneDetector.update(x, y);
-
-      // 轻度平滑消除人脸框抖动；k 较大保证跟手不拖影。
-      final smooth = _gaze.update(targetX, targetY);
-      gazeJs =
-          'f.setGazeTarget(${smooth.dx.toStringAsFixed(3)},${smooth.dy.toStringAsFixed(3)});';
+      final zone = _zoneDetector.currentZoneCenter;
+      if (zone != null) {
+        gazeJs =
+            'f.setGazeTarget(${zone.dx.toStringAsFixed(1)},${zone.dy.toStringAsFixed(1)});';
+      }
     } else {
-      _gaze.reset();
       _zoneDetector.reset();
     }
 

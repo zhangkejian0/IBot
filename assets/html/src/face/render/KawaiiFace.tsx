@@ -69,8 +69,8 @@ export function KawaiiFace() {
 
   const lOp = Math.max(0.06, params.leftEye.openness);
   const rOp = Math.max(0.06, params.rightEye.openness);
-  const gx = (s: 'left' | 'right') => (s === 'left' ? params.leftEye.pupilX : params.rightEye.pupilX) * 10;
-  const gy = (s: 'left' | 'right') => (s === 'left' ? params.leftEye.pupilY : params.rightEye.pupilY) * 8;
+  const gx = (s: 'left' | 'right') => (s === 'left' ? params.leftEye.pupilX : params.rightEye.pupilX) * 8;
+  const gy = (s: 'left' | 'right') => (s === 'left' ? params.leftEye.pupilY : params.rightEye.pupilY) * 6;
 
   // Q 弹挤压呼吸：横向胀一点、纵向压一点（来回）
   const squash = Math.sin(t / 620) * 0.035;

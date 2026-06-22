@@ -89,8 +89,8 @@ export function LineFace() {
   const t = clock;
   const lOp = Math.max(0.05, params.leftEye.openness);
   const rOp = Math.max(0.05, params.rightEye.openness);
-  const gx = (s: 'left' | 'right') => (s === 'left' ? params.leftEye.pupilX : params.rightEye.pupilX) * 16;
-  const gy = (s: 'left' | 'right') => (s === 'left' ? params.leftEye.pupilY : params.rightEye.pupilY) * 12;
+  const gx = (s: 'left' | 'right') => (s === 'left' ? params.leftEye.pupilX : params.rightEye.pupilX) * 35;
+  const gy = (s: 'left' | 'right') => (s === 'left' ? params.leftEye.pupilY : params.rightEye.pupilY) * 28;
 
   // wink：左眼弯笑，右眼睁睛
   const baseEye = EYE_MAP[desc.eye];

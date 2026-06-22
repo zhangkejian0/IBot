@@ -133,9 +133,10 @@ class AppController extends ChangeNotifier {
   // 帧级检测节流:人脸(MediaPipe + ML Kit)/手势默认每帧都跑,~30fps 下
   // 既吃 CPU 又让原生库(TFLite/ML Kit)日志狂刷。这里按时间间隔跳过整帧,
   // 跳过的帧直接复用上一帧 DetectionResult——UI 注视/表情照常驱动,不会闪烁。
-  // 66ms ≈ 15fps,在流畅度与开销间取衡;身份识别另有 _identityInterval 节流。
+  // 200ms ≈ 5fps,显著降低 CPU 负载;注视/表情靠 JS 侧 spring/EMA 平滑补偿,
+  // 身份识别另有 _identityInterval 节流。
   DateTime _lastDetectRun = DateTime.fromMillisecondsSinceEpoch(0);
-  static const Duration _detectInterval = Duration(milliseconds: 66);
+  static const Duration _detectInterval = Duration(milliseconds: 200);
 
   /// 按位置追踪的「身份 slot」：多人脸时为每张脸维持一个稳定身份，避免逐帧
   /// 串脸。每个 slot 记录归一化中心点、命中身份及其最后可见时刻。TTL 内即使
