@@ -18,6 +18,7 @@ const STATE_COLOR: Record<FaceState, string> = {
   thinking:  '#C040FF', // 紫
   happy:     '#FFD000', // 金黄
   confused:  '#20FF80', // 绿
+  angry:     '#FF3030', // 红
   sleepy:    '#4080FF', // 蓝
   sleeping:  '#1A3680',
   waking:    '#4080FF',

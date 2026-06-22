@@ -3,6 +3,7 @@ import 'package:flutter/material.dart' show MaterialPageRoute;
 
 import '../../core/app_controller.dart';
 import '../../core/app_scope.dart';
+import '../../services/voice/pophie_client.dart';
 import '../../services/voice/pophie_config.dart';
 import '../../theme/app_theme.dart';
 import 'face_registration_screen.dart';
@@ -507,15 +508,11 @@ class _PophieConfigSection extends StatelessWidget {
               onTap: (v) => controller.updatePophieConfig(
                   cfg.copyWith(baseUrl: _trimSlash(v))),
             ),
-            _ConfigTile(
-              icon: CupertinoIcons.waveform,
-              color: AppTheme.accentPurple,
-              label: 'TTS 音色',
-              value: cfg.voiceId,
-              placeholder: '默认音色',
-              editorLabel: 'TTS 音色 (voice_id)',
-              editorHint: 'zh-CN-XiaoxiaoNeural',
-              onTap: (v) =>
+            // TTS 音色:从 /api/schema 拉取列表做选择(不让手输,避免填错 id)。
+            _TtsVoiceTile(
+              voiceId: cfg.voiceId,
+              pophie: controller.voiceAssistant.pophie,
+              onChanged: (v) =>
                   controller.updatePophieConfig(cfg.copyWith(voiceId: v)),
             ),
             CupertinoListTile.notched(
@@ -646,6 +643,8 @@ class _ConversationLogScreenState extends State<_ConversationLogScreen> {
         return const Color(0xFFBF5AF2); // 紫
       case 'speak':
         return const Color(0xFF30D158); // 绿
+      case 'proactive':
+        return const Color(0xFFFF9F0A); // 橙(主动提醒,与对话各阶段区分)
       case 'end':
         return AppTheme.tertiaryLabel;
       default:
@@ -834,10 +833,225 @@ class _ConfigTile extends StatelessWidget {
   }
 }
 
+/// TTS 音色选择项:点击从 /api/schema 拉取音色列表,以底部选择器展示。
+/// 不让用户手输,避免填错 voice_id。空字符串表示用服务端默认音色。
+/// 拉取失败时回退为"默认音色"单选,并提示错误。
+class _TtsVoiceTile extends StatefulWidget {
+  const _TtsVoiceTile({
+    required this.voiceId,
+    required this.pophie,
+    required this.onChanged,
+  });
+
+  final String voiceId;
+  final PophieClient pophie;
+  final ValueChanged<String> onChanged;
+
+  @override
+  State<_TtsVoiceTile> createState() => _TtsVoiceTileState();
+}
+
+class _TtsVoiceTileState extends State<_TtsVoiceTile> {
+  @override
+  Widget build(BuildContext context) {
+    return CupertinoListTile.notched(
+      backgroundColor: AppTheme.groupedBackground,
+      leading: const _LeadingIcon(CupertinoIcons.waveform, AppTheme.accentPurple),
+      title: const Text('TTS 音色', style: TextStyle(color: AppTheme.label)),
+      subtitle: Text(
+        _displayLabel(widget.voiceId),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          color: widget.voiceId.isEmpty
+              ? AppTheme.tertiaryLabel
+              : AppTheme.secondaryLabel,
+        ),
+      ),
+      trailing: const CupertinoListTileChevron(),
+      onTap: () => _pickVoice(context),
+    );
+  }
+
+  /// 根据当前 voiceId 给出展示文本。空 → "默认音色"。
+  String _displayLabel(String id) =>
+      id.isEmpty ? '默认音色' : id;
+
+  /// 拉取 schema 后弹出底部选择器。拉取期间显示 loading。
+  Future<void> _pickVoice(BuildContext context) async {
+    List<TtsVoice> voices;
+    String? errMsg;
+    try {
+      final schema = await widget.pophie.fetchSchema();
+      voices = schema.ttsVoices;
+    } catch (e) {
+      errMsg = e.toString();
+      voices = const [];
+    }
+    if (!mounted) return;
+    if (!context.mounted) return;
+    showCupertinoModalPopup<void>(
+      context: context,
+      // 用半屏 sheet 让长列表可滚动。
+      builder: (ctx) => _VoicePickerSheet(
+        voices: voices,
+        currentId: widget.voiceId,
+        errMsg: errMsg,
+        onSelected: (id) {
+          widget.onChanged(id);
+          Navigator.of(ctx).pop();
+        },
+      ),
+    );
+  }
+}
+
+/// 音色选择底部弹层:列表展示音色,首项固定为"默认音色"。
+class _VoicePickerSheet extends StatelessWidget {
+  const _VoicePickerSheet({
+    required this.voices,
+    required this.currentId,
+    required this.errMsg,
+    required this.onSelected,
+  });
+
+  final List<TtsVoice> voices;
+  final String currentId;
+  final String? errMsg;
+  final ValueChanged<String> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    final height = MediaQuery.of(context).size.height * 0.6;
+    return CupertinoPopupSurface(
+      isSurfacePainted: true,
+      child: SizedBox(
+        height: height,
+        child: Column(
+          children: [
+            // 顶部标题栏
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              decoration: const BoxDecoration(
+                border: Border(
+                  bottom: BorderSide(color: AppTheme.separator, width: 0.5),
+                ),
+              ),
+              child: Row(
+                children: [
+                  const Text('选择 TTS 音色',
+                      style: TextStyle(
+                          color: AppTheme.label,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600)),
+                  const Spacer(),
+                  GestureDetector(
+                    onTap: () => Navigator.of(context).pop(),
+                    child: const Text('关闭',
+                        style: TextStyle(color: AppTheme.accent, fontSize: 15)),
+                  ),
+                ],
+              ),
+            ),
+            if (errMsg != null)
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                color: const Color(0x33FF453A),
+                child: Text('拉取音色列表失败,可选默认音色\n$errMsg',
+                    style: const TextStyle(color: Color(0xFFFF9D8A), fontSize: 12)),
+              ),
+            Expanded(
+              child: ListView(
+                padding: EdgeInsets.zero,
+                children: [
+                  // 首项固定为"默认音色"(空 voice_id)
+                  _voiceRow('', '默认音色',
+                      subtitle: '使用服务端配置的默认音色',
+                      isDefault: true),
+                  for (final v in voices)
+                    _voiceRow(v.id, v.label,
+                        subtitle: v.id, isDefault: v.isDefault),
+                  if (voices.isEmpty && errMsg == null)
+                    const Padding(
+                      padding: EdgeInsets.all(24),
+                      child: Center(
+                        child: Text('服务端未返回音色列表',
+                            style: TextStyle(
+                                color: AppTheme.tertiaryLabel, fontSize: 13)),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _voiceRow(String id, String label,
+      {String? subtitle, bool isDefault = false}) {
+    final selected = id == currentId;
+    return GestureDetector(
+      onTap: () => onSelected(id),
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        decoration: const BoxDecoration(
+          border: Border(
+            bottom: BorderSide(color: AppTheme.separator, width: 0.3),
+          ),
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Text(label,
+                          style: const TextStyle(
+                              color: AppTheme.label, fontSize: 15)),
+                      if (isDefault) ...[
+                        const SizedBox(width: 6),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 5, vertical: 1),
+                          decoration: BoxDecoration(
+                            color: const Color(0x33FFD60A),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: const Text('默认',
+                              style: TextStyle(
+                                  color: Color(0xFFFFD60A), fontSize: 10)),
+                        ),
+                      ],
+                    ],
+                  ),
+                  if (subtitle != null && subtitle.isNotEmpty) ...[
+                    const SizedBox(height: 2),
+                    Text(subtitle,
+                        style: const TextStyle(
+                            color: AppTheme.tertiaryLabel, fontSize: 11)),
+                  ],
+                ],
+              ),
+            ),
+            if (selected)
+              const Icon(CupertinoIcons.check_mark,
+                  color: AppTheme.accent, size: 20),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _Header extends StatelessWidget {
   const _Header(this.text);
   final String text;
-
   @override
   Widget build(BuildContext context) {
     return Text(

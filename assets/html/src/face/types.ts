@@ -73,7 +73,7 @@ export type ExpressionName =
 
 export type FaceState =
   | 'idle' | 'gazing' | 'listening' | 'thinking'
-  | 'happy' | 'confused' | 'sleepy' | 'sleeping' | 'waking';
+  | 'happy' | 'confused' | 'angry' | 'sleepy' | 'sleeping' | 'waking';
 
 export type MicroMotionProfile = {
   blinkPeriodMs: number;

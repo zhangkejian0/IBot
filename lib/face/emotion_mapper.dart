@@ -11,6 +11,7 @@ enum FaceState {
   thinking, // 思考
   happy, // 高兴（大笑）
   confused, // 困惑
+  angry, // 愤怒
   sleepy, // 困倦
   sleeping, // 睡眠
   waking, // 苏醒
@@ -23,8 +24,8 @@ enum FaceState {
 ///   neutral     -> idle      无情绪即待机
 ///   happy       -> happy     大笑（1:1）
 ///   sad         -> sleepy    低落 -> 耷拉半闭眼
-///   angry       -> confused  负面 -> 歪头困惑
-///   disgusted   -> confused
+///   angry       -> angry     愤怒 -> 生气脸（上挑眼+青筋）
+///   disgusted   -> confused  负面 -> 歪头困惑
 ///   fearful     -> confused  异常 -> 困惑
 ///   surprised   -> confused
 class EmotionMapper {
@@ -39,6 +40,7 @@ class EmotionMapper {
       case Expression.sad:
         return FaceState.sleepy;
       case Expression.angry:
+        return FaceState.angry;
       case Expression.disgusted:
       case Expression.fearful:
       case Expression.surprised:

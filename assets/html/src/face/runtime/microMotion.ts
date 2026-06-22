@@ -35,6 +35,13 @@ export const PROFILE_CONFUSED: MicroMotionProfile = {
   saccadeAmp: 0,
 };
 
+export const PROFILE_ANGRY: MicroMotionProfile = {
+  blinkPeriodMs: 6000,
+  blinkDurationMs: 140,
+  breathAmp: 1.8,
+  saccadeAmp: 0,
+};
+
 export const PROFILE_SLEEPY: MicroMotionProfile = {
   blinkPeriodMs: 2000,
   blinkDurationMs: 380,

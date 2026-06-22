@@ -1,27 +1,34 @@
 import { useEffect, useRef, useState } from 'react';
 import { faceController } from '../runtime/controller';
-import { eventBus } from '../runtime/eventBus';
-import type { ExpressionName, FaceState } from '../types';
-
-const STATES: FaceState[] = [
-  'idle', 'gazing', 'listening', 'thinking',
-  'happy', 'confused', 'sleepy', 'sleeping', 'waking',
-];
-
-const OVERLAY_EXPRESSIONS: ExpressionName[] = [
-  'happy', 'confused', 'sleepy', 'thinking',
-];
+import {
+  AMBIENT_PRESETS, getAmbientExpression, setAmbientExpression,
+  type AmbientExpressionId,
+} from '../render/ambientExpression';
+import { AMBIENT_SKINS, getAmbientSkinId, setAmbientSkin } from '../render/ambientSkin';
+import { FACE_STYLES, getFaceStyle, setFaceStyle, type FaceStyleId } from '../render/faceStyle';
 
 export function DebugPanel({ onClose }: { onClose?: () => void }) {
-  const [state, setState] = useState<FaceState>(faceController.getState());
-  const [overlays, setOverlays] = useState<Record<ExpressionName, number>>({} as any);
   const [gazeMode, setGazeMode] = useState(false);
   const [listening, setListening] = useState(0);
+  const [faceStyle, setFaceStyleState] = useState<FaceStyleId>(() => getFaceStyle());
+  const [ambExpr, setAmbExpr] = useState<AmbientExpressionId>(() => getAmbientExpression());
+  const [ambSkin, setAmbSkin] = useState<string>(() => getAmbientSkinId());
   const listeningRef = useRef(0);
 
-  useEffect(() => {
-    return eventBus.on('state:change', ({ state }) => setState(state));
-  }, []);
+  const onFaceStyle = (id: FaceStyleId) => {
+    setFaceStyle(id);
+    setFaceStyleState(id);
+  };
+
+  const onAmbExpr = (id: AmbientExpressionId) => {
+    setAmbientExpression(id);
+    setAmbExpr(id);
+  };
+
+  const onAmbSkin = (id: string) => {
+    setAmbientSkin(id);
+    setAmbSkin(id);
+  };
 
   useEffect(() => {
     if (!gazeMode) {
@@ -58,52 +65,58 @@ export function DebugPanel({ onClose }: { onClose?: () => void }) {
     };
   }, [listening]);
 
-  const onStateClick = (s: FaceState) => {
-    faceController.setState(s);
-    setState(s);
-  };
-
-  const onOverlayChange = (name: ExpressionName, v: number) => {
-    setOverlays((prev) => ({ ...prev, [name]: v }));
-    faceController.setExpression(name, v);
-  };
-
   const reset = () => {
-    OVERLAY_EXPRESSIONS.forEach((n) => faceController.setExpression(n, 0));
-    setOverlays({} as any);
     setGazeMode(false);
     setListening(0);
-    faceController.setState('idle');
-    setState('idle');
+    setAmbientExpression('idle');
+    setAmbExpr('idle');
   };
 
   return (
     <div style={s.root}>
-      <Section title="FSM 状态">
+      <Section title="风格">
         <div style={s.grid}>
-          {STATES.map((st) => (
+          {FACE_STYLES.map((st) => (
             <button
-              key={st}
-              style={state === st ? s.btnActive : s.btn}
-              onClick={() => onStateClick(st)}
+              key={st.id}
+              style={faceStyle === st.id ? s.btnActive : s.btn}
+              onClick={() => onFaceStyle(st.id)}
             >
-              {st}
+              {st.label}
             </button>
           ))}
         </div>
       </Section>
 
-      <Section title="表情叠加（强度 0–100）">
-        {OVERLAY_EXPRESSIONS.map((name) => (
-          <SliderRow
-            key={name}
-            label={name}
-            value={overlays[name] ?? 0}
-            min={0} max={100} step={1}
-            onChange={(v) => onOverlayChange(name, v)}
-          />
-        ))}
+      <Section title="表情">
+        <div style={s.grid}>
+          {AMBIENT_PRESETS.map((p) => (
+            <button
+              key={p.id}
+              style={ambExpr === p.id ? s.btnActive : s.btn}
+              onClick={() => onAmbExpr(p.id)}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
       </Section>
+
+      {faceStyle === 'ambient' && (
+        <Section title="皮肤">
+          <div style={s.grid}>
+            {AMBIENT_SKINS.map((sk) => (
+              <button
+                key={sk.id}
+                style={ambSkin === sk.id ? s.btnActive : s.btn}
+                onClick={() => onAmbSkin(sk.id)}
+              >
+                {sk.label}
+              </button>
+            ))}
+          </div>
+        </Section>
+      )}
 
       <Section title="感知信号模拟">
         <label style={s.checkbox}>

@@ -32,8 +32,8 @@ export function ReferenceEyeGraphic({ cx, cy, isLeft, eye, scale = 1, clipId }: 
   const tear = Math.max(0, Math.min(1, eye.tearAmount));
   const lidOp = Math.max(0, Math.min(1, eye.openness * 1.3));
   const scleraD = refScleraPath(cx, cy, isLeft, scale);
-  const gazeDx = eye.pupilX * ic.rx * 0.6;
-  const gazeDy = eye.pupilY * ic.ry * 0.5;
+  const gazeDx = eye.pupilX * ic.rx * 0.35;
+  const gazeDy = eye.pupilY * ic.ry * 0.25;
 
   // 眼皮闭合量：openness=1 完全睁开，openness=0 全闭；curve 控制上睑下沿的弧度（happy 时下凹形成⌣笑眼）
   const closeAmt = Math.max(0, Math.min(1, 1 - eye.openness));

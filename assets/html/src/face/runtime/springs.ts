@@ -9,8 +9,7 @@ type Field = { key: string; getTarget: (p: FaceParams) => number; setOut: (p: Fa
 const FIELDS: Field[] = [];
 
 (['leftEye', 'rightEye'] as const).forEach((side) => {
-  // pupilX/pupilY 由 gaze 直接覆盖（绕过弹簧），不纳入弹簧计算
-  (['openness', 'upperLidCurve', 'lowerLidCurve', 'lidTilt', 'pupilScale', 'highlightOn', 'tearAmount'] as const).forEach((k) => {
+  (['openness', 'upperLidCurve', 'lowerLidCurve', 'lidTilt', 'pupilX', 'pupilY', 'pupilScale', 'highlightOn', 'tearAmount'] as const).forEach((k) => {
     FIELDS.push({
       key: `${side}.${k}`,
       getTarget: (p) => p[side][k],

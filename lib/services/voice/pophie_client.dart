@@ -83,6 +83,95 @@ class PophieChatResult {
   bool get isSilent => text.trim().isEmpty;
 }
 
+/// TTS 音色项(文档 §3.2 tts_voices)。
+class TtsVoice {
+  const TtsVoice({
+    required this.id,
+    required this.label,
+    required this.isDefault,
+    required this.instruct,
+  });
+
+  /// 音色 ID(写入 ChatInput.voice_id)。
+  final String id;
+  /// 中文展示名(如「呆萌机器人」)。
+  final String label;
+  /// 是否为服务端默认音色。
+  final bool isDefault;
+  /// 是否支持 instruct(指令式音色)。
+  final bool instruct;
+
+  factory TtsVoice.fromJson(Map<String, dynamic> json) => TtsVoice(
+        id: json['id'] as String? ?? '',
+        label: json['label'] as String? ?? '',
+        isDefault: json['default'] as bool? ?? false,
+        instruct: json['instruct'] as bool? ?? false,
+      );
+}
+
+/// `/api/schema` 的解析结果(文档 §3.2)。当前只取 tts_voices;
+/// 其余字段(表情/手势/robot_states 等)暂不暴露,按需再扩。
+class PophieSchema {
+  const PophieSchema({required this.ttsVoices});
+
+  /// 服务端可用 TTS 音色列表(顺序同服务端返回)。
+  final List<TtsVoice> ttsVoices;
+
+  bool get isEmpty => ttsVoices.isEmpty;
+
+  factory PophieSchema.fromJson(Map<String, dynamic> json) {
+    final voices = (json['tts_voices'] as List?)
+            ?.map((e) => TtsVoice.fromJson(e as Map<String, dynamic>))
+            .toList(growable: false) ??
+        const <TtsVoice>[];
+    return PophieSchema(ttsVoices: voices);
+  }
+}
+
+/// 主动消息(文档 §3.8 items[] 里的一条)。服务端到点提醒/tick 决策产生,
+/// 客户端轮询拉取后,用 content 文本调 /api/tts 合成播放。
+class ProactiveMessage {
+  const ProactiveMessage({
+    required this.id,
+    required this.content,
+    this.createdAt,
+  });
+
+  /// 消息唯一 id(增量轮询游标,下次 since_id 用)。
+  final int id;
+  /// 主动消息正文(TTS 文本)。
+  final String content;
+  /// 创建时间(服务端 created_at)。
+  final DateTime? createdAt;
+
+  factory ProactiveMessage.fromJson(Map<String, dynamic> json) {
+    DateTime? createdAt;
+    final raw = json['created_at'] as String?;
+    if (raw != null) {
+      try {
+        createdAt = DateTime.parse(raw);
+      } catch (_) {}
+    }
+    return ProactiveMessage(
+      id: (json['id'] as num?)?.toInt() ?? 0,
+      content: json['content'] as String? ?? '',
+      createdAt: createdAt,
+    );
+  }
+}
+
+/// `/api/proactive_messages` 的轮询结果(文档 §3.8)。
+class ProactiveResult {
+  const ProactiveResult({required this.items, required this.lastId});
+
+  /// 本次拉到的新消息列表(按 id 升序)。
+  final List<ProactiveMessage> items;
+  /// 本次结果的最大 id(下次 since_id 用)。空列表时为入参 sinceId。
+  final int lastId;
+
+  bool get isEmpty => items.isEmpty;
+}
+
 /// Pophie 后端 HTTP 客户端(见 docs/API对接文档.md)。
 ///
 /// 核心是 [chat]：把整段录音(16k 单声道 WAV)或文字发给 `/api/chat`，
@@ -126,6 +215,84 @@ class PophieClient {
       debugPrint('[Pophie] health failed: $e');
       return false;
     }
+  }
+
+  /// 拉取 Schema 元数据(文档 §3.2)。用于构建 TTS 音色选择 UI。
+  /// 失败抛异常,调用方捕获降级(回退到本地空列表)。
+  Future<PophieSchema> fetchSchema() async {
+    final r = await _dio.get<Map<String, dynamic>>(
+      '${_config.baseUrl}/api/schema',
+    );
+    final data = r.data ?? const {};
+    debugPrint('[Pophie] schema fetched: '
+        'tts_voices=${(data['tts_voices'] as List?)?.length ?? 0}');
+    return PophieSchema.fromJson(data);
+  }
+
+  /// 轮询主动消息(文档 §3.8)。返回 id > [sinceId] 的新消息。
+  /// 失败不抛异常,返回空列表(避免 5s 轮询抖动刷屏);真正要播放时调用方
+  /// 再自行处理。robot_id 必传(隔离设备);session_id 可选(按会话过滤)。
+  Future<ProactiveResult> fetchProactiveMessages({
+    int sinceId = 0,
+    int limit = 50,
+  }) async {
+    try {
+      final r = await _dio.get<Map<String, dynamic>>(
+        '${_config.baseUrl}/api/proactive_messages',
+        queryParameters: {
+          'robot_id': _config.robotId,
+          if (_config.sessionId != null && _config.sessionId!.isNotEmpty)
+            'session_id': _config.sessionId,
+          'since_id': sinceId,
+          'limit': limit,
+        },
+      );
+      final data = r.data ?? const {};
+      final items = (data['items'] as List?)
+              ?.map((e) => ProactiveMessage.fromJson(e as Map<String, dynamic>))
+              .where((m) => m.content.isNotEmpty) // 跳过空内容
+              .toList(growable: false) ??
+          const <ProactiveMessage>[];
+      final lastId = items.isEmpty
+          ? sinceId
+          : items.map((m) => m.id).reduce((a, b) => a > b ? a : b);
+      return ProactiveResult(items: items, lastId: lastId);
+    } catch (e) {
+      debugPrint('[Pophie] proactive poll failed: $e');
+      return ProactiveResult(items: const [], lastId: sinceId);
+    }
+  }
+
+  /// 单独 TTS 合成(文档 §3.6)。主动消息等场景:proactive_messages 只回文本,
+  /// 需用本方法把文本合成成音频再播放。失败抛异常,调用方 catch 降级。
+  ///
+  /// 返回 (音频字节, 格式)。voiceId 省略时用配置中的音色。
+  Future<({Uint8List bytes, String format})> tts(
+    String text, {
+    String? voiceId,
+  }) async {
+    final body = <String, dynamic>{
+      'text': text,
+      if ((voiceId ?? _config.voiceId).isNotEmpty)
+        'voice_id': voiceId ?? _config.voiceId,
+    };
+    final r = await _dio.post<Map<String, dynamic>>(
+      '${_config.baseUrl}/api/tts',
+      data: body,
+      // TTS 合成可能较慢,但不应占用 chat 的 40s;给单独超时。
+      options: Options(
+        contentType: Headers.jsonContentType,
+        receiveTimeout: const Duration(seconds: 20),
+      ),
+    );
+    final data = r.data ?? const {};
+    final audio = (data['audio'] as Map?)?.cast<String, dynamic>();
+    if (audio == null || audio['data'] is! String) {
+      throw Exception('TTS response has no audio.data');
+    }
+    final bytes = base64Decode(audio['data'] as String);
+    final format = audio['format'] as String? ?? 'wav';
+    return (bytes: bytes, format: format);
   }
 
   /// 主对话(文档 §3.4)。[wavBytes] 为 16k 单声道 WAV，与 [text] 至少一个非空。
@@ -179,6 +346,22 @@ class PophieClient {
     Uint8List? audioBytes;
     String? audioFormat;
     final audio = (output['audio'] as Map?)?.cast<String, dynamic>();
+
+    // 诊断:打印 output 完整结构(audio.data 截断),定位"无音频"根因。
+    // 确认稳定后删掉。
+    {
+      final safeOutput = Map<String, dynamic>.from(output);
+      if (safeOutput['audio'] is Map) {
+        final a = Map<String, dynamic>.from(safeOutput['audio'] as Map);
+        if (a['data'] is String) {
+          a['data'] = '<base64 ${(a['data'] as String).length} chars>';
+        }
+        safeOutput['audio'] = a;
+      }
+      debugPrint('[Pophie] response data.keys: ${data.keys.toList()}');
+      debugPrint('[Pophie] response output: ${jsonEncode(safeOutput)}');
+    }
+
     if (audio != null && audio['data'] is String) {
       try {
         audioBytes = base64Decode(audio['data'] as String);

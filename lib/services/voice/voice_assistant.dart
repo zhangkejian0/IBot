@@ -77,6 +77,14 @@ class VoiceAssistant extends ChangeNotifier {
 
   StreamSubscription<String>? _wakeSub;
 
+  // —— 主动消息轮询(文档 §3.8)——
+  /// 轮询定时器:总开关开启期间每 5s 拉一次 /api/proactive_messages。
+  Timer? _proactiveTimer;
+  /// 上次拉到的最大消息 id(增量游标,作为下次 since_id)。
+  int _lastProactiveId = 0;
+  /// 对话进行中收到的主动消息暂存队列,idle 后补播(不打断当前对话)。
+  final List<ProactiveMessage> _proactiveQueue = [];
+
   /// 是否启用语音唤醒(true 时 idle 态持续监听唤醒词)。
   bool wakeWordEnabled = true;
   /// 是否启用语音播报(TTS)。关闭时回复仅以文字显示。
@@ -132,6 +140,9 @@ class VoiceAssistant extends ChangeNotifier {
       await wakeWord.start(audio.audioStream);
     }
     debugPrint('[VoiceAssistant] started (wakeWord=$wakeWordEnabled)');
+    // 启动主动消息轮询(文档 §3.8):每 5s 拉取服务端到点的提醒/tick 决策。
+    // 跟随 start/stop 生命周期,关闭总开关即停止轮询。
+    _startProactivePolling();
     notifyListeners();
   }
 
@@ -139,6 +150,9 @@ class VoiceAssistant extends ChangeNotifier {
   Future<void> stop() async {
     if (!_running) return;
     _running = false;
+    // 停止主动消息轮询,清空待播队列(关闭总开关即不再主动播报)。
+    _stopProactivePolling();
+    _proactiveQueue.clear();
     await _wakeSub?.cancel();
     _wakeSub = null;
     await wakeWord.stop();
@@ -187,28 +201,40 @@ class VoiceAssistant extends ChangeNotifier {
       _robotState = null;
       notifyListeners();
       final pcm = await audio.captureUtterance();
+      Uint8List? wav;
       if (pcm == null || pcm.isEmpty) {
         debugPrint('[VoiceAssistant] no speech captured');
-        conversationLog.log('listen', '未采集到语音(VAD 无输入或超时)',
-            error: true);
-        return; // finally 会回到 idle 并恢复唤醒监听
+        conversationLog.log('listen', '未采集到语音(VAD 无输入或超时)');
+        // 不直接 return:即使没语音,表情/手势等感知数据仍可能是重要输入
+        // (文档 §2.5:纯表情/抚摸也是合法输入)。在下方判断是否有感知要发。
+      } else {
+        wav = PophieClient.pcm16ToWav(pcm);
+        conversationLog.log('listen',
+            '已采集语音 ${pcm.length} 字节 (PCM) → WAV ${wav.length} 字节');
       }
-      final wav = PophieClient.pcm16ToWav(pcm);
-      conversationLog.log('listen',
-          '已采集语音 ${pcm.length} 字节 (PCM) → WAV ${wav.length} 字节');
 
-      // thinking:整段上传后端,等待 STT+LLM+TTS 一体化结果。
-      _setState(VoiceState.thinking);
+      // thinking:整段上传后端。有语音带 wavBytes,无语音但有感知仍发送。
+      // 既无语音也无感知 → 跳过(没有有效输入)。
       final perception = perceptionProvider?.call();
       final userId = userIdProvider?.call();
+      final hasPerception = perception != null && !perception.isEmpty;
+      if (wav == null && !hasPerception) {
+        conversationLog.log('think', '无语音且无感知数据,跳过请求');
+        return;
+      }
+
+      _setState(VoiceState.thinking);
       conversationLog.log('think',
-          '上传 Pophie /api/chat (skipTts=${!ttsEnabled})…');
+          '上传 Pophie /api/chat (skipTts=${!ttsEnabled}'
+          '${wav == null ? ', 纯感知无语音' : ''})…');
       PophieChatResult result;
       try {
         result = await pophie.chat(
           wavBytes: wav,
           perception: perception,
           userId: userId,
+          // 优先请求内嵌 TTS(省一次网络请求);后端 inline_tts=false 或合成
+          // 失败时 audio 为 null,下方兜底再调 /api/tts。
           skipTts: !ttsEnabled,
         );
       } catch (e) {
@@ -226,9 +252,10 @@ class VoiceAssistant extends ChangeNotifier {
       notifyListeners();
 
       // 记录后端返回详情:STT 文本、LLM 回复、robot_state、音频字节数。
+      // 带 skipTts 实际值,便于区分"无音频"是请求跳过了还是后端没返回。
       final audioInfo = result.audioBytes != null
           ? '音频 ${result.audioBytes!.length} 字节 (${result.audioFormat ?? 'wav'})'
-          : '无音频';
+          : '无音频 (skipTts=${!ttsEnabled})';
       conversationLog.log('think',
           '后端返回: STT="${result.sttText}" | LLM="${result.text}" | '
           'robotState=${result.robotState} | $audioInfo');
@@ -244,20 +271,38 @@ class VoiceAssistant extends ChangeNotifier {
       _replyText = result.text;
       notifyListeners();
 
-      // speaking:播放后端合成的 TTS 音频,音量包络驱动虚拟宠物嘴部张合。
-      if (ttsEnabled && result.audioBytes != null) {
+      // speaking:优先用内嵌音频(省一次请求);没有时兜底调 /api/tts。
+      Uint8List? ttsBytes = result.audioBytes;
+      String ttsFormat = result.audioFormat ?? 'wav';
+      if (ttsEnabled && result.text.isNotEmpty) {
+        if (ttsBytes != null) {
+          conversationLog.log('speak',
+              '使用内嵌音频: ${ttsBytes.length} 字节 ($ttsFormat)');
+        } else {
+          // 后端未内嵌音频(inline_tts=false 或合成失败),兜底调 /api/tts。
+          conversationLog.log('speak', '内嵌音频为空,兜底调 /api/tts…');
+          try {
+            final t = await pophie.tts(result.text);
+            ttsBytes = t.bytes;
+            ttsFormat = t.format;
+            conversationLog.log('speak',
+                '/api/tts 成功: ${ttsBytes.length} 字节 ($ttsFormat)');
+          } catch (e) {
+            debugPrint('[VoiceAssistant] /api/tts failed: $e');
+            conversationLog.log('speak', '/api/tts 失败: $e', error: true);
+          }
+        }
+      }
+      if (ttsEnabled && ttsBytes != null) {
         _setState(VoiceState.speaking);
-        conversationLog.log('speak', '开始播报 TTS…');
+        conversationLog.log('speak', '开始播报…');
         // 播放前停麦克风:Android 上 AudioRecord active 时与播放器抢占
-        // AEC/SCO 通路,偶发导致"有音频但没声音"。播报期间唤醒已关闭,
-        // 麦克风可安全暂停,播放完 finally 里 _resumeWakeListening 前会重启。
+        // AEC/SCO 通路,偶发导致"有音频但没声音"。
         await audio.stop();
-        await _playTts(result.audioBytes!, result.audioFormat ?? 'wav');
-        // 播放完重启麦克风采集,供 finally 恢复唤醒监听用。
+        await playTts(ttsBytes, ttsFormat);
         await audio.start();
-      } else if (ttsEnabled && result.audioBytes == null) {
-        conversationLog.log('speak', 'TTS 开启但后端未返回音频,跳过播报',
-            error: true);
+      } else if (ttsEnabled && ttsBytes == null) {
+        conversationLog.log('speak', '无音频可播(合成失败)', error: true);
       }
     } catch (e) {
       debugPrint('[VoiceAssistant] conversation error: $e');
@@ -270,6 +315,12 @@ class VoiceAssistant extends ChangeNotifier {
       audio.level.value = 0.0;
       _setState(VoiceState.idle);
       conversationLog.log('end', '一轮对话结束,回到 idle');
+      // 一轮对话结束回到 idle:若有排队的主动消息(对话期间收到的),补播。
+      // 不 await,放后台播;它自己会再次回到 idle,触发下一条。
+      if (_proactiveQueue.isNotEmpty) {
+        final next = _proactiveQueue.removeAt(0);
+        _playProactive(next);
+      }
       // 恢复唤醒监听,等待下一次唤醒。
       await _resumeWakeListening();
     }
@@ -283,7 +334,10 @@ class VoiceAssistant extends ChangeNotifier {
   /// active 时启动播放器,Android 的 AEC(回声消除)/蓝牙 SCO 路由会与
   /// 播放器抢占音频通路,偶发导致"有音频但没声音"。录音停了不影响功能:
   /// 播报期间唤醒本就处于关闭态(见 _runConversation 开头 wakeWord.stop)。
-  Future<void> _playTts(Uint8List bytes, String format) async {
+  ///
+  /// public 以便主动消息播报路径复用(同一播放器/包络/嘴型/日志)。
+  /// 调用方负责停麦(audio.stop)与启麦(audio.start),本方法只管播放。
+  Future<void> playTts(Uint8List bytes, String format) async {
     // 接管 level,避免被麦克风采集的实时音量覆盖。
     audio.externalLevel = true;
     final envelope = format == 'wav' ? _wavEnvelope(bytes) : const <double>[];
@@ -395,8 +449,89 @@ class VoiceAssistant extends ChangeNotifier {
     notifyListeners();
   }
 
+  // ============== 主动消息轮询 + 播报(文档 §3.8 + §3.6) ==============
+  //
+  // 场景:用户说"1分钟后提醒我喝水",后端后台登记提醒(defer_side_tasks,
+  // /api/chat 的 scheduled_reminders 恒为空)。到点后服务端把提醒写入
+  // /api/proactive_messages,客户端轮询拉到 content,调 /api/tts 合成播放。
+  // 冲突处理:对话中(idle 外)收到 → 入队,对话结束 finally 补播。
+
+  void _startProactivePolling() {
+    _proactiveTimer?.cancel();
+    // 文档 §3.8 建议每 3-10s 一次;5s 平衡及时性与服务器压力。
+    _proactiveTimer =
+        Timer.periodic(const Duration(seconds: 5), (_) => _pollProactive());
+    debugPrint('[VoiceAssistant] proactive polling started');
+  }
+
+  void _stopProactivePolling() {
+    _proactiveTimer?.cancel();
+    _proactiveTimer = null;
+  }
+
+  /// 轮询一次主动消息。失败静默(5s 一次的网络抖动不刷屏),只在真正播放时记日志。
+  Future<void> _pollProactive() async {
+    if (!_running) return;
+    try {
+      final result = await pophie.fetchProactiveMessages(sinceId: _lastProactiveId);
+      if (result.items.isEmpty) return;
+      _lastProactiveId = result.lastId;
+      for (final msg in result.items) {
+        _enqueueOrPlay(msg);
+      }
+    } catch (e) {
+      debugPrint('[VoiceAssistant] proactive poll error: $e');
+    }
+  }
+
+  /// 收到一条主动消息:空闲立即播,对话中入队等空闲。
+  void _enqueueOrPlay(ProactiveMessage msg) {
+    if (!_running) return;
+    if (_state == VoiceState.idle) {
+      _playProactive(msg); // 空闲,立即播(不 await,放后台)
+    } else {
+      _proactiveQueue.add(msg);
+      conversationLog.log('proactive',
+          '收到提醒(等待对话结束): ${msg.content}');
+    }
+  }
+
+  /// 播报一条主动消息:合成 TTS → 停麦 → 播放 → 启麦 → 回 idle。
+  /// 仅应在 idle 态调用(由 _enqueueOrPlay 或 _runConversation 的 finally 保证)。
+  Future<void> _playProactive(ProactiveMessage msg) async {
+    if (!_running) return;
+    try {
+      _setState(VoiceState.speaking); // 复用 speaking 态驱动虚拟宠物嘴型
+      _replyText = msg.content; // 复用气泡字幕字段,UI 无需改
+      notifyListeners();
+      conversationLog.log('proactive', '主动提醒: ${msg.content}');
+
+      // proactive_messages 只回文本,必须单独调 /api/tts 合成。
+      final t = await pophie.tts(msg.content);
+
+      // 停麦 → 播放 → 启麦(消除 AEC/SCO 竞态,同 _runConversation 范式)。
+      await audio.stop();
+      await playTts(t.bytes, t.format);
+      await audio.start();
+    } catch (e) {
+      debugPrint('[VoiceAssistant] proactive play failed: $e');
+      conversationLog.log('proactive', '主动提醒播放失败: $e', error: true);
+    } finally {
+      _replyText = '';
+      audio.level.value = 0.0;
+      _setState(VoiceState.idle);
+      // 恢复唤醒监听(主动播报期间唤醒被停了,见 _playProactive 没有显式
+      // stop 唤醒,但 _runConversation 开头会 stop;主动播报走的是独立路径,
+      // 唤醒监听此刻应仍在跑 —— 若被中断这里也会重建)。
+      await _resumeWakeListening();
+    }
+  }
+
   @override
   void dispose() {
+    // stop() 是异步的,这里同步取消轮询,确保 dispose 后不会再触发回调。
+    _proactiveTimer?.cancel();
+    _proactiveTimer = null;
     stop();
     _player.dispose();
     pophie.dispose();

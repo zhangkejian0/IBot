@@ -10,6 +10,32 @@ import { startTicker } from './ticker';
 import { faceMachine } from '../fsm/machine';
 import { STATE_SPECS } from '../fsm/stateToExpression';
 import { eventBus } from './eventBus';
+import {
+  setAmbientExpression,
+  getAmbientExpression,
+  type AmbientExpressionId,
+} from '../render/ambientExpression';
+
+/**
+ * FaceState → 氛围表情预设。让 setState 自动驱动渲染器的眼形/嘴形/光晕/道具，
+ * Flutter 只需调 setState 即可，无需额外调 setAmbientExpression。
+ *
+ * 设计取舍：listening/thinking/happy 三个语音高频态都映射到 calm（统一"微笑"
+ * 基调），避免对话过程中眼睛在不同预设间频繁跳变造成视觉抖动；confused 才用
+ * doubt（带问号道具），因为人脸表情检测触发频率低，偶尔蹦问号是合适反馈。
+ */
+const STATE_TO_AMBIENT: Record<FaceState, AmbientExpressionId> = {
+  idle: 'idle',
+  gazing: 'idle',
+  listening: 'calm',
+  thinking: 'calm',
+  happy: 'calm',
+  confused: 'doubt',
+  angry: 'angry',
+  sleepy: 'squint',
+  sleeping: 'calm',
+  waking: 'squint',
+};
 
 const RECIPE_CACHE = new Map<ExpressionName, CompiledExpression>();
 function getCompiled(name: ExpressionName): CompiledExpression {
@@ -57,6 +83,7 @@ class FaceController {
     faceMachine.set(state);
     const spec = STATE_SPECS[state];
     this.spring.setSlow(!!spec.slowSpring);
+    setAmbientExpression(STATE_TO_AMBIENT[state]);
     eventBus.emit('state:change', { state });
   }
 
@@ -84,6 +111,19 @@ class FaceController {
 
   setListeningLoudness(v: number) {
     this.listeningLoudness = Math.max(0, Math.min(1, v));
+  }
+
+  /**
+   * 氛围表情预设（驱动 AmbientFace/LineFace/KawaiiFace 的眼形/嘴形/光晕色/道具）。
+   * setState 只改底层 FaceParams（眨眼/呼吸/注视/嘴部 curve），不影响渲染器
+   * 实际读取的「表情语义」—— 那一层由 ambientExpression store 控制。
+   * 通过 window.__face 暴露给 Flutter，由宿主自行决定调哪个预设。
+   */
+  getAmbientExpression(): AmbientExpressionId {
+    return getAmbientExpression();
+  }
+  setAmbientExpression(id: AmbientExpressionId) {
+    setAmbientExpression(id);
   }
 
   private buildTarget(): { target: FaceParams; activeOsc: ActiveOscillator[] } {
@@ -135,13 +175,6 @@ class FaceController {
 
     applyOscillators(out, activeOsc, nowMs / 1000);
     applyMicroMotion(out, nowMs, STATE_SPECS[faceMachine.get()].microMotionProfile);
-
-    // 注视(gaze)绕过弹簧：直接用目标值覆盖，避免弹簧过渡造成"看人慢半拍"。
-    // 眉/嘴/脸等其余参数仍走弹簧，保持表情过渡的质感。
-    out.leftEye.pupilX = this.gazeX;
-    out.rightEye.pupilX = this.gazeX;
-    out.leftEye.pupilY = this.gazeY;
-    out.rightEye.pupilY = this.gazeY;
 
     // Listening loudness drives extra mouth open
     if (this.listeningLoudness > 0) {
