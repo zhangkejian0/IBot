@@ -108,6 +108,7 @@ flutter:
   assets:
     - assets/models/
     - assets/images/
+    - assets/sounds/
     - assets/html/dist/
     # Flutter 的目录声明不会递归打包子目录，必须把 vite 产物所在的
     # assets/ 子目录单独声明，否则 index-*.js 不会被装入 bundle，

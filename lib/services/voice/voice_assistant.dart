@@ -38,6 +38,12 @@ class VoiceAssistant extends ChangeNotifier {
   /// TTS 音频播放器(audioplayers，Android/iOS 通用)。
   final AudioPlayer _player = AudioPlayer();
 
+  /// 本地即时反馈音播放器(独立实例,避免与 TTS 播放器抢占)。
+  /// 用户说完话进入 thinking 时立即播放一个短促的"嗯/好的",
+  /// 填补 STT+LLM 的等待空白;后端 TTS 就绪前会被 stopFeedback() 抢占停掉。
+  final AudioPlayer _feedbackPlayer = AudioPlayer();
+  bool _feedbackPlaying = false;
+
   /// 端侧感知上下文提供者:由 AppController 注入，读取当前人脸表情/身份/手势，
   /// 随对话发给后端(文档 §2.4)。
   PophiePerception Function()? perceptionProvider;
@@ -224,6 +230,9 @@ class VoiceAssistant extends ChangeNotifier {
       }
 
       _setState(VoiceState.thinking);
+      // 即时反馈:进入 thinking 立即播放本地"嗯/好的",填补 STT+LLM 等待空白。
+      // 后端 TTS 就绪时会在 speaking 前 stopFeedback() 抢占停掉。
+      if (ttsEnabled) unawaited(_playFeedback());
       conversationLog.log('think',
           '上传 Pophie /api/chat (skipTts=${!ttsEnabled}'
           '${wav == null ? ', 纯感知无语音' : ''})…');
@@ -265,6 +274,7 @@ class VoiceAssistant extends ChangeNotifier {
         debugPrint('[VoiceAssistant] silent reply (empty STT or LLM fail)');
         conversationLog.log('think',
             '静默回复(STT 空或 LLM 失败),不播报', error: true);
+        await stopFeedback();
         return; // finally 会回到 idle 并恢复唤醒监听
       }
 
@@ -294,6 +304,8 @@ class VoiceAssistant extends ChangeNotifier {
         }
       }
       if (ttsEnabled && ttsBytes != null) {
+        // 抢占停掉 thinking 阶段的即时反馈音,避免与后端 TTS 撞音。
+        await stopFeedback();
         _setState(VoiceState.speaking);
         conversationLog.log('speak', '开始播报…');
         // 播放前停麦克风:Android 上 AudioRecord active 时与播放器抢占
@@ -308,6 +320,8 @@ class VoiceAssistant extends ChangeNotifier {
       debugPrint('[VoiceAssistant] conversation error: $e');
       conversationLog.log('error', '对话异常: $e', error: true);
     } finally {
+      // 保险:任何路径(异常/超时/静默)结束时确保反馈音停掉。
+      await stopFeedback();
       _userText = '';
       _replyText = '';
       _robotState = null;
@@ -402,6 +416,41 @@ class VoiceAssistant extends ChangeNotifier {
       ticker?.cancel();
       audio.level.value = 0.0;
     }
+  }
+
+  /// 即时反馈音资源(短促的"嗯/好的",填补 thinking 等待空白)。
+  /// 文件放在 assets/sounds/ 下;缺失时静默跳过,不影响主流程。
+  static const List<String> _feedbackAssets = [
+    'sounds/feedback_1.mp3',
+    'sounds/feedback_2.mp3',
+    'sounds/feedback_3.mp3',
+  ];
+
+  /// 进入 thinking 时立即播放一个随机反馈音,降低用户等待焦虑。
+  /// 音量较低(0.5),作为过渡音;后端 TTS 就绪时由 stopFeedback 抢占停掉。
+  /// 失败(无文件/播放错误)静默忽略,不阻断对话主流程。
+  Future<void> _playFeedback() async {
+    try {
+      final asset = _feedbackAssets[math.Random().nextInt(_feedbackAssets.length)];
+      await _feedbackPlayer.setReleaseMode(ReleaseMode.stop);
+      await _feedbackPlayer.setVolume(0.5);
+      await _feedbackPlayer.play(AssetSource(asset));
+      _feedbackPlaying = true;
+      debugPrint('[VoiceAssistant] feedback playing: $asset');
+    } catch (e) {
+      // 资源缺失或播放失败:静默跳过,不影响对话。
+      _feedbackPlaying = false;
+      debugPrint('[VoiceAssistant] feedback skipped: $e');
+    }
+  }
+
+  /// 抢占停掉反馈音(后端 TTS 就绪时调用)。
+  Future<void> stopFeedback() async {
+    if (!_feedbackPlaying) return;
+    try {
+      await _feedbackPlayer.stop();
+    } catch (_) {/* ignore */}
+    _feedbackPlaying = false;
   }
 
   /// 从 WAV 字节计算逐 60ms 窗口的 RMS 音量包络(归一化 0..1)。
@@ -534,6 +583,7 @@ class VoiceAssistant extends ChangeNotifier {
     _proactiveTimer = null;
     stop();
     _player.dispose();
+    _feedbackPlayer.dispose();
     pophie.dispose();
     audio.dispose();
     wakeWord.dispose();

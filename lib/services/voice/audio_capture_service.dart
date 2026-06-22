@@ -97,10 +97,13 @@ class AudioCaptureService {
   /// - [speechThreshold] 起说话门槛。原 0.12 偏高,声音小/离麦远时达不到
   ///   → 偶发"未采集到语音"。降到 0.06 让正常说话能稳定触发。
   /// - [silenceThreshold] 续说话门槛。降到 0.04。
+  /// - [silenceTimeout] 静音判定结束。原 1500ms 偏长(说完话还要等 1.5s
+  ///   才上传),降到 700ms(Siri ~700ms、Google ~600ms 的业界值),
+  ///   省 ~0.8s 端到端延迟;在"不误截停顿"与"快速响应"间取得平衡。
   /// - [onsetTimeout] 起始超时。原 6s 偏短(唤醒后停顿一下就超时),延到 10s。
   Future<Uint8List?> captureUtterance({
     Duration maxDuration = const Duration(seconds: 12),
-    Duration silenceTimeout = const Duration(milliseconds: 1500),
+    Duration silenceTimeout = const Duration(milliseconds: 700),
     Duration onsetTimeout = const Duration(seconds: 10),
     double speechThreshold = 0.06,
     double silenceThreshold = 0.04,
