@@ -20,8 +20,9 @@
 1. GET  /api/health          → 确认服务与语音能力
 2. GET  /api/schema          → 拉取表情枚举、TTS 音色列表
 3. POST /api/session/new     → 获取 session_id（也可自行生成）
-4. POST /api/chat            → 主对话（文字 / 语音 / 表情）
-5. GET  /api/proactive_messages → 轮询主动消息（可选）
+4. PUT  /api/robots/{robot_id}/owner → 首次激活时注册主人档案（见 §3.16）
+5. POST /api/chat            → 主对话（文字 / 语音 / 表情）
+6. GET  /api/proactive_messages → 轮询主动消息（可选）
 ```
 
 ### 1.2 身份与会话
@@ -225,6 +226,30 @@ edge-tts 中文音色（可通过 `GET /api/schema` 动态获取；`default: tru
 在 `ChatInput.voice_id` 或 `TtsRequest.voice_id` 中传入。无效或不可用 ID 将回退为 `config.yaml` 中 `speech.tts.default_voice`（未配置时回退 `zh-CN-XiaoxiaoNeural`）。
 
 > 部分音色（如 `zh-CN-XiaochenNeural`）在部分地区/网络下微软会拒收，服务端不会列入 `/api/schema`，传入时也会自动回退。
+
+### 2.8 主人档案 `OwnerProfile`
+
+桌面陪伴机器人「首次激活向导」采集的**主人**信息。该档案绑定到 `robot_id`（一台物理机器人对应一个主人），用于机器人对主人的个性化称呼、自我介绍与长期记忆偏好。
+
+> **人脸数据不上传**：端侧通过 MobileFaceNet 完成人脸特征提取与比对，后端永远不接收人脸图像/特征向量。本类型只携带 `face_registered` 标志位。
+
+```json
+{
+  "nickname": "小明",
+  "robot_name": "狗蛋",
+  "gender": "male",
+  "birthday": "1990-01-01",
+  "face_registered": true
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `nickname` | string | 是 | 主人昵称/称呼，机器人对主人的个性化称呼（同时作为 `/api/chat` 的 `user_id` 与 `perception.identity`） |
+| `robot_name` | string | 是 | 主人给机器人起的名字，替换服务端默认名 |
+| `gender` | string | 否 | `male` / `female` / `other`；不填写时省略或为 `null` |
+| `birthday` | string | 否 | ISO 日期 `YYYY-MM-DD`；用户选择不填写时省略或为 `null` |
+| `face_registered` | bool | 否 | 端侧是否已录入主人人脸，默认 `false`。**仅标志位，不传人脸向量** |
 
 ---
 
@@ -963,6 +988,100 @@ edge-tts 中文音色（可通过 `GET /api/schema` 动态获取；`default: tru
 
 ---
 
+### 3.16 主人档案
+
+> 这些是**普通接口**（非 `/api/admin/*`），无需 `X-Admin-Token`，因为它们属于客户端「首次激活向导」流程。所有数据按 `robot_id` 隔离，与现有记忆/会话的隔离模型一致。一条 `robot_id` 至多对应一份主人档案。`OwnerProfile` 字段定义见 §2.8。
+
+#### 注册/更新主人档案
+
+**`PUT /api/robots/{robot_id}/owner`** — 幂等 upsert。已存在则覆盖，不存在则创建。
+
+**请求体：**
+
+```json
+{
+  "owner": {
+    "nickname": "小明",
+    "robot_name": "狗蛋",
+    "gender": "male",
+    "birthday": "1990-01-01",
+    "face_registered": true
+  }
+}
+```
+
+**响应 200：**
+
+```json
+{
+  "ok": true,
+  "robot_id": "robot-xxx",
+  "owner": {
+    "nickname": "小明",
+    "robot_name": "狗蛋",
+    "gender": "male",
+    "birthday": "1990-01-01",
+    "face_registered": true
+  }
+}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `ok` | 操作是否成功 |
+| `robot_id` | 回显归属机器人 ID |
+| `owner` | 服务端落库后的主人档案（已做字段校验与归一，如 `gender` 非法时置 `null`） |
+
+#### 查询主人档案
+
+**`GET /api/robots/{robot_id}/owner`**
+
+**响应 200：** 同上，但不含 `ok`/`robot_id` 外层，直接返回 `owner` 对象（或返回 `{"owner": {...}}`，以服务端 `/docs` 为准）。
+
+```json
+{
+  "nickname": "小明",
+  "robot_name": "狗蛋",
+  "gender": "male",
+  "birthday": "1990-01-01",
+  "face_registered": true
+}
+```
+
+**响应 404：** 该 `robot_id` 未注册主人档案，`{"detail": "owner not found"}`。
+
+#### 删除主人档案
+
+**`DELETE /api/robots/{robot_id}/owner`** — 对应客户端「重新设置主人」/恢复出厂流程。仅删除主人档案本身，**不清空**该机器人下的记忆/对话/提醒（如需一并清除，另调 §3.13 `POST /api/admin/wipe`）。
+
+**响应 200：**
+
+```json
+{
+  "ok": true,
+  "robot_id": "robot-xxx"
+}
+```
+
+**响应 404：** 该 `robot_id` 未注册主人档案。
+
+#### 错误
+
+| HTTP | 场景 |
+|------|------|
+| 400 | `owner` 缺失或 `nickname` / `robot_name` 为空；`gender` 非法（除合法三值与 `null` 外） |
+| 404 | `GET` / `DELETE` 时该 `robot_id` 无主人档案 |
+
+#### 客户端同步策略
+
+端侧采用**本地优先 + 后端 best-effort**：
+
+- 向导完成时本地档案立即生效并进入主界面，**不阻塞**于网络；
+- 完成时调 `PUT`，失败则静默记录「待同步」，后续后台重试；
+- 重置时调 `DELETE`（best-effort），失败不阻断本地重置。
+
+---
+
 ## 4. 客户端集成要点
 
 ### 4.1 Android
@@ -1071,6 +1190,17 @@ curl http://127.0.0.1:8000/api/schema
 curl -X POST http://127.0.0.1:8000/api/chat \
   -H "Content-Type: application/json" \
   -d '{"input":{"text":"你好","skip_tts":true}}'
+
+# 注册/更新主人档案（首次激活向导完成时）
+curl -X PUT http://127.0.0.1:8000/api/robots/robot-xxx/owner \
+  -H "Content-Type: application/json" \
+  -d '{"owner":{"nickname":"小明","robot_name":"狗蛋","gender":"male","birthday":"1990-01-01","face_registered":true}}'
+
+# 查询主人档案
+curl http://127.0.0.1:8000/api/robots/robot-xxx/owner
+
+# 删除主人档案（重新设置主人）
+curl -X DELETE http://127.0.0.1:8000/api/robots/robot-xxx/owner
 ```
 
 ---
