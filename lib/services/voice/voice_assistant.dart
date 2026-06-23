@@ -9,6 +9,7 @@ import 'chat_service.dart';
 import 'conversation_logger.dart';
 import 'pophie_client.dart';
 import 'speech_service.dart';
+import 'streaming_tts_player.dart';
 import 'voice_state.dart';
 import 'wake_word_service.dart';
 
@@ -16,8 +17,13 @@ import 'wake_word_service.dart';
 /// 以一个有限状态机对外暴露 [state] / [userText] / [replyText] / [level]。
 ///
 /// 一轮对话:唤醒/双击触发 → 聆听整段语音(静音 VAD) → 整段 WAV 上传
-/// Pophie /api/chat(一次完成 STT+LLM+TTS) → 播放返回的 TTS 音频。
-/// 详见 docs/API对接文档.md 与 [_runConversation]。
+/// Pophie /api/chat(**skip_tts=true**,只拿文字/表情) → 调
+/// /api/tts/stream(NDJSON)逐片喂 [StreamingTtsPlayer] 边收边播(首声≈500ms)。
+/// 详见 docs/API对接文档.md 与 [_runConversation] / [_playStreamingTts]。
+///
+/// 流式播放稳定性:[StreamingTtsPlayer] 基于 flutter_pcm_sound,**无 native
+/// FeedThread**(背压由原生 feed 回调驱动),规避 flutter_sound issue #508 的
+/// SEGV。流式失败时回退批量 /api/tts + playTts。
 ///
 /// 生命周期由 [AppController] 持有,随语音总开关 start/stop。对外是
 /// [ChangeNotifier]:任何状态/文本/音量变化都 notifyListeners,UI 与虚拟宠物
@@ -38,11 +44,11 @@ class VoiceAssistant extends ChangeNotifier {
   /// TTS 音频播放器(audioplayers，Android/iOS 通用)。
   final AudioPlayer _player = AudioPlayer();
 
-  /// 本地即时反馈音播放器(独立实例,避免与 TTS 播放器抢占)。
-  /// 用户说完话进入 thinking 时立即播放一个短促的"嗯/好的",
-  /// 填补 STT+LLM 的等待空白;后端 TTS 就绪前会被 stopFeedback() 抢占停掉。
-  final AudioPlayer _feedbackPlayer = AudioPlayer();
-  bool _feedbackPlaying = false;
+  /// 流式 TTS 播放器:把 /api/tts/stream 的 PCM 分片逐帧喂给 AudioTrack,
+  /// 首个分片到达即开口(首声延迟 ≈500ms)。基于 flutter_pcm_sound,无 native
+  /// FeedThread,规避 SEGV(issue #508)。详见 [StreamingTtsPlayer]。
+  /// 惰性初始化(初始化器不能引用实例成员 audio)。
+  late final StreamingTtsPlayer _streamingTts = StreamingTtsPlayer(audio);
 
   /// 端侧感知上下文提供者:由 AppController 注入，读取当前人脸表情/身份/手势，
   /// 随对话发给后端(文档 §2.4)。
@@ -230,11 +236,8 @@ class VoiceAssistant extends ChangeNotifier {
       }
 
       _setState(VoiceState.thinking);
-      // 即时反馈:进入 thinking 立即播放本地"嗯/好的",填补 STT+LLM 等待空白。
-      // 后端 TTS 就绪时会在 speaking 前 stopFeedback() 抢占停掉。
-      if (ttsEnabled) unawaited(_playFeedback());
       conversationLog.log('think',
-          '上传 Pophie /api/chat (skipTts=${!ttsEnabled}'
+          '上传 Pophie /api/chat (skipTts=true 流式优先'
           '${wav == null ? ', 纯感知无语音' : ''})…');
       PophieChatResult result;
       try {
@@ -242,9 +245,10 @@ class VoiceAssistant extends ChangeNotifier {
           wavBytes: wav,
           perception: perception,
           userId: userId,
-          // 优先请求内嵌 TTS(省一次网络请求);后端 inline_tts=false 或合成
-          // 失败时 audio 为 null,下方兜底再调 /api/tts。
-          skipTts: !ttsEnabled,
+          // 始终 skip_tts=true:不等待内嵌整段音频,拿到文字/表情/voice 后立即
+          // 调 /api/tts/stream 流式合成(文档 §5.1 推荐做法)。是否播放由
+          // 后续 _playStreamingTts 决定,与 ttsEnabled 解耦。
+          skipTts: true,
         );
       } catch (e) {
         debugPrint('[VoiceAssistant] chat request failed: $e');
@@ -260,68 +264,39 @@ class VoiceAssistant extends ChangeNotifier {
       _robotState = result.robotState;
       notifyListeners();
 
-      // 记录后端返回详情:STT 文本、LLM 回复、robot_state、音频字节数。
-      // 带 skipTts 实际值,便于区分"无音频"是请求跳过了还是后端没返回。
-      final audioInfo = result.audioBytes != null
-          ? '音频 ${result.audioBytes!.length} 字节 (${result.audioFormat ?? 'wav'})'
-          : '无音频 (skipTts=${!ttsEnabled})';
+      // 记录后端返回详情:STT 文本、LLM 回复、robot_state、voice(供流式透传)。
       conversationLog.log('think',
           '后端返回: STT="${result.sttText}" | LLM="${result.text}" | '
-          'robotState=${result.robotState} | $audioInfo');
+          'robotState=${result.robotState} | '
+          'voice=${result.voice ?? "(默认)"}');
 
       // STT 空 / LLM 失败:后端返回静默(空 text),端侧保持安静,不播报。
       if (result.isSilent) {
         debugPrint('[VoiceAssistant] silent reply (empty STT or LLM fail)');
         conversationLog.log('think',
             '静默回复(STT 空或 LLM 失败),不播报', error: true);
-        await stopFeedback();
         return; // finally 会回到 idle 并恢复唤醒监听
       }
 
       _replyText = result.text;
       notifyListeners();
 
-      // speaking:优先用内嵌音频(省一次请求);没有时兜底调 /api/tts。
-      Uint8List? ttsBytes = result.audioBytes;
-      String ttsFormat = result.audioFormat ?? 'wav';
+      // speaking:流式合成(文档 §3.6.1)收齐 PCM 后用 playTts 整段播放。
+      // ttsEnabled=false 时仅显示文字。
       if (ttsEnabled && result.text.isNotEmpty) {
-        if (ttsBytes != null) {
-          conversationLog.log('speak',
-              '使用内嵌音频: ${ttsBytes.length} 字节 ($ttsFormat)');
-        } else {
-          // 后端未内嵌音频(inline_tts=false 或合成失败),兜底调 /api/tts。
-          conversationLog.log('speak', '内嵌音频为空,兜底调 /api/tts…');
-          try {
-            final t = await pophie.tts(result.text);
-            ttsBytes = t.bytes;
-            ttsFormat = t.format;
-            conversationLog.log('speak',
-                '/api/tts 成功: ${ttsBytes.length} 字节 ($ttsFormat)');
-          } catch (e) {
-            debugPrint('[VoiceAssistant] /api/tts failed: $e');
-            conversationLog.log('speak', '/api/tts 失败: $e', error: true);
-          }
-        }
-      }
-      if (ttsEnabled && ttsBytes != null) {
-        // 抢占停掉 thinking 阶段的即时反馈音,避免与后端 TTS 撞音。
-        await stopFeedback();
         _setState(VoiceState.speaking);
-        conversationLog.log('speak', '开始播报…');
-        // 播放前停麦克风:Android 上 AudioRecord active 时与播放器抢占
-        // AEC/SCO 通路,偶发导致"有音频但没声音"。
-        await audio.stop();
-        await playTts(ttsBytes, ttsFormat);
-        await audio.start();
-      } else if (ttsEnabled && ttsBytes == null) {
-        conversationLog.log('speak', '无音频可播(合成失败)', error: true);
+        conversationLog.log('speak', '流式合成开始…');
+        await _playStreamingTts(
+          text: result.text,
+          voice: result.voice,
+          fallbackFormat: result.audioFormat,
+          fallbackBytes: result.audioBytes,
+        );
       }
     } catch (e) {
       debugPrint('[VoiceAssistant] conversation error: $e');
       conversationLog.log('error', '对话异常: $e', error: true);
     } finally {
-      // 保险:任何路径(异常/超时/静默)结束时确保反馈音停掉。
-      await stopFeedback();
       _userText = '';
       _replyText = '';
       _robotState = null;
@@ -337,6 +312,102 @@ class VoiceAssistant extends ChangeNotifier {
       }
       // 恢复唤醒监听,等待下一次唤醒。
       await _resumeWakeListening();
+    }
+  }
+
+  /// 流式合成并边收边播(文档 §3.6.1)。
+  ///
+  /// 流程:
+  /// 1. **先停麦**:`audio.stop()` 在首个分片到达前完成,避免 Android 上
+  ///    AudioRecord active 时与播放器抢占 AEC/SCO 通路(同 [playTts] 注释)。
+  /// 2. 调 [PophieClient.ttsStream] 拉取 NDJSON 流:
+  ///    - `meta` 到达 → [StreamingTtsPlayer.start](sampleRate) 初始化播放器;
+  ///    - `chunk` 到达 → [StreamingTtsPlayer.feedChunk] 入队并尝试立即喂入,
+  ///      **首个 chunk 即开口**(首声延迟 ≈ LLM 结束 + DashScope 首包 ~500ms);
+  ///    - `done` → 记录首包延迟,标记喂入结束。
+  /// 3. 全部喂完 → [StreamingTtsPlayer.waitForDone](等队列+原生缓冲排空)
+  ///    → [StreamingTtsPlayer.release] → `audio.start()` 重启麦克风。
+  ///
+  /// **稳定性**:[StreamingTtsPlayer] 基于 flutter_pcm_sound,**无 native FeedThread**
+  /// (背压由原生 feed 回调驱动,不存在后台线程撞已释放 track 的 SEGV,见类注释),
+  /// 彻底规避 flutter_sound issue #508。
+  ///
+  /// **回退**:网络错误 / 非 2xx / 流内 `error` 行 → [ttsStream] 抛异常,
+  /// 本方法 catch 后改走批量 [pophie.tts] + [playTts](整段缓冲再播),
+  /// 保证可用性。若 [fallbackBytes] 非空(/api/chat 意外返回了内嵌音频),
+  /// 直接用它,省一次请求。
+  ///
+  /// 主动消息路径([_playProactive])也复用本方法,其 voice 为 null(用默认情感)。
+  ///
+  /// [text] 必须非空;调用前已置 speaking 态。
+  Future<void> _playStreamingTts({
+    required String text,
+    Map<String, dynamic>? voice,
+    Uint8List? fallbackBytes,
+    String? fallbackFormat,
+  }) async {
+    // 内嵌音频兜底优先(若 /api/chat 意外带回了 audio,省一次流式请求)。
+    if (fallbackBytes != null && fallbackBytes.isNotEmpty) {
+      conversationLog.log('speak',
+          '使用内嵌音频(回退): ${fallbackBytes.length} 字节 '
+          '(${fallbackFormat ?? 'wav'})');
+      await audio.stop();
+      await playTts(fallbackBytes, fallbackFormat ?? 'wav');
+      await audio.start();
+      return;
+    }
+
+    // 停麦(必须在首个分片到达前完成,消除 AEC/SCO 竞态)。
+    await audio.stop();
+    var chunkCount = 0;
+    var started = false; // meta 是否已到(已 start 播放器)
+    try {
+      await pophie.ttsStream(
+        text,
+        voice: voice,
+        onMeta: (format, sampleRate) async {
+          // meta 到达即初始化播放器,后续 chunk 一到就开口。
+          await _streamingTts.start(sampleRate);
+          started = true;
+        },
+        onChunk: (pcm16) {
+          if (chunkCount == 0) {
+            conversationLog.log('speak', '首个 PCM 分片到达,开始边收边播');
+          }
+          chunkCount++;
+          // 入队并尝试立即喂入(首片即开口);队列满时由原生 feed 回调驱动。
+          _streamingTts.feedChunk(pcm16);
+        },
+        onDone: (firstPacketMs) {
+          debugPrint('[VoiceAssistant] tts stream done '
+              'chunks=$chunkCount firstPacketMs=$firstPacketMs');
+          conversationLog.log('speak',
+              '流式合成完成: $chunkCount 片, 首包延迟 ${firstPacketMs ?? "?"}ms');
+          // 标记喂入结束:之后 waitForDone 会等队列+原生缓冲都排空。
+          _streamingTts.markFeedingDone();
+        },
+      );
+      // 全部喂完:等排空再 release,确保尾部音频完整播完。
+      if (started) {
+        await _streamingTts.waitForDone();
+        await _streamingTts.release();
+        conversationLog.log('speak', '流式播报完成');
+      }
+    } catch (e) {
+      debugPrint('[VoiceAssistant] tts stream failed: $e — 回退批量 /api/tts');
+      conversationLog.log('speak', '流式失败,回退批量: $e', error: true);
+      // 流式途中可能已开口播放,先释放播放器再走批量。
+      await _streamingTts.release();
+      try {
+        final t = await pophie.tts(text);
+        await playTts(t.bytes, t.format);
+      } catch (e2) {
+        debugPrint('[VoiceAssistant] fallback /api/tts failed: $e2');
+        conversationLog.log('speak', '批量回退也失败: $e2', error: true);
+      }
+    } finally {
+      // 重启麦克风(无论成功/回退/失败),恢复唤醒监听前置条件。
+      await audio.start();
     }
   }
 
@@ -416,41 +487,6 @@ class VoiceAssistant extends ChangeNotifier {
       ticker?.cancel();
       audio.level.value = 0.0;
     }
-  }
-
-  /// 即时反馈音资源(短促的"嗯/好的",填补 thinking 等待空白)。
-  /// 文件放在 assets/sounds/ 下;缺失时静默跳过,不影响主流程。
-  static const List<String> _feedbackAssets = [
-    'sounds/feedback_1.mp3',
-    'sounds/feedback_2.mp3',
-    'sounds/feedback_3.mp3',
-  ];
-
-  /// 进入 thinking 时立即播放一个随机反馈音,降低用户等待焦虑。
-  /// 音量较低(0.5),作为过渡音;后端 TTS 就绪时由 stopFeedback 抢占停掉。
-  /// 失败(无文件/播放错误)静默忽略,不阻断对话主流程。
-  Future<void> _playFeedback() async {
-    try {
-      final asset = _feedbackAssets[math.Random().nextInt(_feedbackAssets.length)];
-      await _feedbackPlayer.setReleaseMode(ReleaseMode.stop);
-      await _feedbackPlayer.setVolume(0.5);
-      await _feedbackPlayer.play(AssetSource(asset));
-      _feedbackPlaying = true;
-      debugPrint('[VoiceAssistant] feedback playing: $asset');
-    } catch (e) {
-      // 资源缺失或播放失败:静默跳过,不影响对话。
-      _feedbackPlaying = false;
-      debugPrint('[VoiceAssistant] feedback skipped: $e');
-    }
-  }
-
-  /// 抢占停掉反馈音(后端 TTS 就绪时调用)。
-  Future<void> stopFeedback() async {
-    if (!_feedbackPlaying) return;
-    try {
-      await _feedbackPlayer.stop();
-    } catch (_) {/* ignore */}
-    _feedbackPlaying = false;
   }
 
   /// 从 WAV 字节计算逐 60ms 窗口的 RMS 音量包络(归一化 0..1)。
@@ -545,8 +581,11 @@ class VoiceAssistant extends ChangeNotifier {
     }
   }
 
-  /// 播报一条主动消息:合成 TTS → 停麦 → 播放 → 启麦 → 回 idle。
+  /// 播报一条主动消息:流式合成 → 停麦 → 边收边播 → 启麦 → 回 idle。
   /// 仅应在 idle 态调用(由 _enqueueOrPlay 或 _runConversation 的 finally 保证)。
+  ///
+  /// 主动消息只回文本(无 output.voice),用默认情感参数走流式;流式失败时
+  /// [_playStreamingTts] 内部会自动回退批量 /api/tts + playTts。
   Future<void> _playProactive(ProactiveMessage msg) async {
     if (!_running) return;
     try {
@@ -555,13 +594,8 @@ class VoiceAssistant extends ChangeNotifier {
       notifyListeners();
       conversationLog.log('proactive', '主动提醒: ${msg.content}');
 
-      // proactive_messages 只回文本,必须单独调 /api/tts 合成。
-      final t = await pophie.tts(msg.content);
-
-      // 停麦 → 播放 → 启麦(消除 AEC/SCO 竞态,同 _runConversation 范式)。
-      await audio.stop();
-      await playTts(t.bytes, t.format);
-      await audio.start();
+      // 流式合成播报(内部含停麦/启麦与批量回退,同主对话范式)。
+      await _playStreamingTts(text: msg.content);
     } catch (e) {
       debugPrint('[VoiceAssistant] proactive play failed: $e');
       conversationLog.log('proactive', '主动提醒播放失败: $e', error: true);
@@ -583,7 +617,6 @@ class VoiceAssistant extends ChangeNotifier {
     _proactiveTimer = null;
     stop();
     _player.dispose();
-    _feedbackPlayer.dispose();
     pophie.dispose();
     audio.dispose();
     wakeWord.dispose();

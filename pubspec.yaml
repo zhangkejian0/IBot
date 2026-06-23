@@ -57,6 +57,13 @@ dependencies:
   lpinyin: ^2.0.1
   audioplayers: ^6.7.1
   uuid: ^4.5.3
+  # 流式 TTS 播放:专为实时裸 PCM 喂入设计(无 native FeedThread,回调驱动),
+  # 把 /api/tts/stream 的 PCM 分片逐帧喂给设备扬声器,首个分片到达即开口。
+  # 对应文档 §3.6.1 推荐的 Android AudioTrack(ENCODING_PCM_16BIT)。
+  # 不用 flutter_sound:其 native FeedThread 在 AudioTrack.write 时撞上已释放
+  # track 会 SEGV(issue #508),背压难根治。flutter_pcm_sound 由原生 feed
+  # 回调驱动,无此竞态。录音侧仍用 record 包(见上)。
+  flutter_pcm_sound: ^3.3.3
 
   # —— 底座控制 ——
   # 经典蓝牙 SPP（RFCOMM），App 通过它与物理旋转底座收发 JSON 指令。
@@ -118,7 +125,6 @@ flutter:
   assets:
     - assets/models/
     - assets/images/
-    - assets/sounds/
     - assets/html/dist/
     # Flutter 的目录声明不会递归打包子目录，必须把 vite 产物所在的
     # assets/ 子目录单独声明，否则 index-*.js 不会被装入 bundle，

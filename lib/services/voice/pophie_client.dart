@@ -68,6 +68,11 @@ class PophieChatResult {
   /// 音频格式(wav/mp3)。
   final String? audioFormat;
 
+  /// 服务端回传的合成情感参数(文档 §2.6 output.voice,如
+  /// {tone,intonation,speed})。流式 TTS 时需原样透传给
+  /// `POST /api/tts/stream` 的 `voice` 字段(文档 §3.6.1)。
+  final Map<String, dynamic>? voice;
+
   /// 服务端回传的 session_id(需保存复用)。
   final String? sessionId;
 
@@ -78,6 +83,7 @@ class PophieChatResult {
     required this.sttText,
     this.audioBytes,
     this.audioFormat,
+    this.voice,
     this.sessionId,
   });
 
@@ -296,6 +302,121 @@ class PophieClient {
     return (bytes: bytes, format: format);
   }
 
+  /// 流式 TTS 合成(文档 §3.6.1 `POST /api/tts/stream`)。
+  ///
+  /// 响应为 `application/x-ndjson`:每行一个 JSON 对象,顺序为
+  /// `meta` → 若干 `chunk` → `done`(或中途 `error`)。本方法用 dio
+  /// `ResponseType.stream` 拉取字节流,**逐行解析并立即回调**,使调用方
+  /// 能在首个 PCM 分片到达时即开始播放(首声延迟 ≈ LLM 结束 + DashScope
+  /// 首包 ~500ms),而非等整段合成。
+  ///
+  /// 请求体与 [tts] 相同(text/voice_id),并新增 [voice](情感参数),
+  /// 由调用方从 `/api/chat` 的 `output.voice` 透传(文档 §3.6.1)。
+  ///
+  /// 回调:
+  /// - [onMeta]:首行,含 format(pcm/mp3)与 sample_rate;据此初始化播放器。
+  /// - [onChunk]:Base64 解码后的 PCM16 分片;收到即可喂播放器。
+  /// - [onDone]:合成结束,firstPacketMs 为 DashScope 首包延迟(毫秒)。
+  /// - 任何网络错误、非 2xx、或流中 `error` 行,均**抛异常**(触发上层批量回退)。
+  ///
+  /// 实现:NDJSON 行可能跨字节分片截断,故维护一个 [lineBuf] 累积,按 `\n`
+  /// 切分并保留尾部不完整行;不用 `LineSplitter.split(单个 chunk)`(会漏行)。
+  Future<void> ttsStream(
+    String text, {
+    Map<String, dynamic>? voice,
+    String? voiceId,
+    required void Function(String format, int sampleRate) onMeta,
+    required void Function(Uint8List pcm16) onChunk,
+    void Function(int? firstPacketMs)? onDone,
+  }) async {
+    final body = <String, dynamic>{
+      'text': text,
+      if (voice != null && voice.isNotEmpty) 'voice': voice,
+      if ((voiceId ?? _config.voiceId).isNotEmpty)
+        'voice_id': voiceId ?? _config.voiceId,
+    };
+
+    final Response<ResponseBody> response;
+    try {
+      response = await _dio.post<ResponseBody>(
+        '${_config.baseUrl}/api/tts/stream',
+        data: body,
+        options: Options(
+          contentType: Headers.jsonContentType,
+          responseType: ResponseType.stream,
+          // 流式合成本身长时,放宽接收超时;首字到达后即有数据,不会触发。
+          receiveTimeout: const Duration(seconds: 40),
+          headers: {'Accept': 'application/x-ndjson'},
+        ),
+      );
+    } on DioException catch (e) {
+      // 503 语音未启用 / 400 参数非法等:抛出供上层走批量回退。
+      final code = e.response?.statusCode;
+      throw Exception(
+          '/api/tts/stream 请求失败 ${code ?? ""} ${e.message ?? e.type}');
+    }
+
+    final stream = response.data!.stream;
+    var lineBuf = ''; // 跨分片的未完成行缓冲
+    await for (final chunk in stream) {
+      lineBuf += utf8.decode(chunk);
+      // 逐行处理(按 \n 切分),保留最后一段(可能不完整)到 lineBuf。
+      var nl = lineBuf.indexOf('\n');
+      while (nl >= 0) {
+        final line = lineBuf.substring(0, nl).trim();
+        lineBuf = lineBuf.substring(nl + 1);
+        nl = lineBuf.indexOf('\n');
+        if (line.isEmpty) continue;
+        _handleNdjsonLine(line, onMeta: onMeta, onChunk: onChunk, onDone: onDone);
+      }
+    }
+    // 处理流末尾可能残留的最后一行(无尾随 \n)。
+    final tail = lineBuf.trim();
+    if (tail.isNotEmpty) {
+      _handleNdjsonLine(tail, onMeta: onMeta, onChunk: onChunk, onDone: onDone);
+    }
+  }
+
+  /// 解析单行 NDJSON 并分发到对应回调。`error` 行抛异常。
+  void _handleNdjsonLine(
+    String line, {
+    required void Function(String format, int sampleRate) onMeta,
+    required void Function(Uint8List pcm16) onChunk,
+    void Function(int? firstPacketMs)? onDone,
+  }) {
+    Map<String, dynamic> obj;
+    try {
+      obj = jsonDecode(line) as Map<String, dynamic>;
+    } catch (e) {
+      debugPrint('[Pophie] ttsStream bad ndjson line: $line ($e)');
+      return; // 跳过无法解析的行,不致命
+    }
+    final type = obj['type'] as String?;
+    switch (type) {
+      case 'meta':
+        final format = (obj['format'] as String?) ?? 'pcm';
+        final sampleRate = (obj['sample_rate'] as num?)?.toInt() ?? 22050;
+        onMeta(format, sampleRate);
+        break;
+      case 'chunk':
+        final data = obj['data'] as String?;
+        if (data != null && data.isNotEmpty) {
+          onChunk(base64Decode(data));
+        }
+        break;
+      case 'done':
+        final ms = (obj['first_packet_ms'] as num?)?.toInt();
+        onDone?.call(ms);
+        break;
+      case 'error':
+        // 合成失败:抛异常,触发上层批量 /api/tts 回退。
+        throw Exception(
+            '/api/tts/stream 合成失败: ${obj['message'] ?? "未知错误"}');
+      default:
+        debugPrint('[Pophie] ttsStream unknown ndjson type: $type');
+    }
+  }
+
   /// 主对话(文档 §3.4)。[wavBytes] 为 16k 单声道 WAV，与 [text] 至少一个非空。
   ///
   /// [userId] 用于响应回显/溯源；[skipTts] 为 null 时遵循服务端配置。
@@ -379,6 +500,7 @@ class PophieClient {
       sttText: (stt?['text'] as String?) ?? '',
       audioBytes: audioBytes,
       audioFormat: audioFormat,
+      voice: (output['voice'] as Map?)?.cast<String, dynamic>(),
       sessionId: sid,
     );
   }
