@@ -1,0 +1,42 @@
+// 本地 fork：修复原 flutter_bluetooth_serial 0.4.0 在 AGP 8+ 下的兼容性问题：
+//   1. 添加 namespace（AGP 8 强制要求，原版用 AndroidManifest 的 package 属性）
+//   2. 移除已废弃的 jcenter
+//   3. 移除内嵌的 AGP classpath（由项目根目录统一管理 AGP 版本）
+//   4. compileSdk 升级到 34，Java 11
+group 'io.github.edufolly.flutterbluetoothserial'
+version '1.0-SNAPSHOT'
+
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+apply plugin: 'com.android.library'
+
+android {
+    namespace 'io.github.edufolly.flutterbluetoothserial'
+
+    compileSdk 34
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+
+    defaultConfig {
+        minSdk 19
+    }
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+}

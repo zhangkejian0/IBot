@@ -74,7 +74,7 @@ class OwnerProfile {
 
   final DateTime createdAt;
 
-  const OwnerProfile({
+  OwnerProfile({
     required this.nickname,
     required this.robotName,
     this.gender,

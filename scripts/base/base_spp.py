@@ -30,9 +30,13 @@ import sys
 import os
 import time
 import json
+import queue
 import signal
+import threading
 import traceback
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse
 
 import subprocess
 
@@ -52,6 +56,12 @@ SPP_SERVICE_DESC = "XBot Base SPP Service"
 RFCOMM_PORT = 1  # RFCOMM 通道号，SPP 约定为 1
 
 LOG_FILE = "/var/log/xbot-base.log"
+
+# 可视化 HTTP 服务端口（浏览器访问 http://<板子IP>:HTTP_PORT/）
+# 注：板子 8080 被 llama-server 占用，改用 8090。
+HTTP_PORT = 8090
+# 可视化 HTML 页面路径（与脚本同目录）
+VIZ_HTML_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "base_viz.html")
 
 # 设备能力（回复 version/status 时上报给 App）
 DEVICE_DOF = 3              # 自由度 2/3
@@ -84,6 +94,229 @@ def log(level, msg):
             _log_fp.write(line + "\n")
         except Exception:
             pass
+
+
+# ==================== 可视化（HTTP + SSE）====================
+#
+# 浏览器访问 http://<板子IP>:HTTP_PORT/ 打开 3D 可视化页面；
+# 页面通过 SSE（/events）实时接收 SPP 收到的指令，驱动云台动画。
+# SPP 收到指令时调用 broadcast_frame() 把帧推给所有已连接的浏览器。
+
+class VizState:
+    """当前底座姿态快照（供 SSE 新连接发送 snapshot）。线程安全。"""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.data = {
+            "yaw": 0.0, "pitch": 0.0, "roll": 0.0,
+            "mode": "idle", "moving": False,
+            "dof": DEVICE_DOF, "hw": DEVICE_HW,
+        }
+
+    def update_from_frame(self, obj):
+        """根据收到的指令更新姿态快照（move/move_rel/home/set_mode 等）。"""
+        cmd = obj.get("cmd")
+        with self._lock:
+            if cmd == "move":
+                if isinstance(obj.get("yaw"), (int, float)):
+                    self.data["yaw"] = float(obj["yaw"])
+                if isinstance(obj.get("pitch"), (int, float)):
+                    self.data["pitch"] = float(obj["pitch"])
+                if isinstance(obj.get("roll"), (int, float)):
+                    self.data["roll"] = float(obj["roll"])
+            elif cmd == "move_rel":
+                if isinstance(obj.get("dyaw"), (int, float)):
+                    self.data["yaw"] += float(obj["dyaw"])
+                if isinstance(obj.get("dpitch"), (int, float)):
+                    self.data["pitch"] += float(obj["dpitch"])
+                if isinstance(obj.get("droll"), (int, float)):
+                    self.data["roll"] += float(obj["droll"])
+            elif cmd == "home":
+                self.data["yaw"] = self.data["pitch"] = self.data["roll"] = 0.0
+            elif cmd == "set_mode":
+                if isinstance(obj.get("mode"), str):
+                    self.data["mode"] = obj["mode"]
+
+    def snapshot_json(self):
+        with self._lock:
+            return json.dumps(self.data, ensure_ascii=False)
+
+
+# 全局：姿态快照 + SSE 客户端队列列表
+viz_state = VizState()
+viz_clients = []          # list[queue.Queue]
+viz_clients_lock = threading.Lock()
+viz_peer = {"addr": None}  # 当前连接的对端（SPP 客户端）
+
+
+def broadcast_frame(obj, direction="RX"):
+    """把一帧推送给所有已连接的浏览器（SSE event: frame）。"""
+    payload = dict(obj)
+    payload["__dir"] = direction  # 告诉前端这帧方向
+    data = json.dumps(payload, ensure_ascii=False)
+    with viz_clients_lock:
+        dead = []
+        for i, q in enumerate(viz_clients):
+            try:
+                q.put_nowait(("frame", data))
+            except Exception:
+                dead.append(i)
+        for i in reversed(dead):
+            try:
+                viz_clients.pop(i)
+            except Exception:
+                pass
+
+
+def broadcast_peer(addr):
+    """通知所有浏览器对端连接变化。"""
+    with viz_clients_lock:
+        for q in viz_clients:
+            try:
+                q.put_nowait(("peer", addr or ""))
+            except Exception:
+                pass
+
+
+class VizHTTPHandler(BaseHTTPRequestHandler):
+    """HTTP 处理器：/ 返回页面，/events 返回 SSE 流，/status 返回 JSON 快照。"""
+
+    def log_message(self, *args):
+        # 静默 HTTP 访问日志，避免刷屏
+        pass
+
+    def _no_cache_headers(self):
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
+
+    def do_GET(self):
+        path = urlparse(self.path).path
+        if path == "/" or path == "/index.html":
+            self._serve_html()
+        elif path == "/events":
+            self._serve_sse()
+        elif path == "/status":
+            self._serve_status()
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_POST(self):
+        """POST /inject：无蓝牙时手动注入一帧指令用于测试页面动画。
+
+        Body: 一行 JSON 指令，如 {"cmd":"move","yaw":45,"pitch":-15}
+        """
+        path = urlparse(self.path).path
+        if path != "/inject":
+            self.send_response(404)
+            self.end_headers()
+            return
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(length).decode("utf-8") if length > 0 else "{}"
+            obj = json.loads(raw)
+        except Exception as e:
+            self._json(400, {"ok": False, "error": "invalid json: %s" % e})
+            return
+        # 更新姿态快照 + 广播给浏览器（模拟 SPP 收到该帧）
+        viz_state.update_from_frame(obj)
+        broadcast_frame(obj, direction="RX")
+        log("SYS", "[inject] 注入指令: %s" % obj.get("cmd"))
+        self._json(200, {"ok": True})
+
+    def _json(self, code, data):
+        body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self._no_cache_headers()
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _serve_html(self):
+        try:
+            with open(VIZ_HTML_PATH, "r", encoding="utf-8") as f:
+                html = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self._no_cache_headers()
+            self.send_header("Content-Length", str(len(html.encode("utf-8"))))
+            self.end_headers()
+            self.wfile.write(html.encode("utf-8"))
+        except Exception as e:
+            msg = "HTML 读取失败: %s (%s)" % (e, VIZ_HTML_PATH)
+            self.send_response(500)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(msg.encode("utf-8"))
+
+    def _serve_status(self):
+        data = viz_state.snapshot_json().encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self._no_cache_headers()
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _serve_sse(self):
+        # 为这个连接建一个队列，加入全局客户端列表
+        q = queue.Queue()
+        with viz_clients_lock:
+            viz_clients.append(q)
+        client_addr = self.client_address[0]
+        log("SYS", "可视化浏览器已连接: %s（当前 %d 个）"
+            % (client_addr, len(viz_clients)))
+
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+
+            # 先发当前快照 + peer
+            self._sse_write("snapshot", viz_state.snapshot_json())
+            self._sse_write("peer", viz_peer["addr"] or "")
+
+            # 循环推送队列中的事件
+            while True:
+                try:
+                    evt_name, evt_data = q.get(timeout=15)
+                except queue.Empty:
+                    # 心跳保活
+                    self._sse_write("ping", str(int(time.time())))
+                    continue
+                self._sse_write(evt_name, evt_data)
+        except Exception as e:
+            log("ERR", "SSE 连接异常: %s" % e)
+        finally:
+            with viz_clients_lock:
+                if q in viz_clients:
+                    viz_clients.remove(q)
+            log("SYS", "可视化浏览器断开（剩余 %d 个）" % len(viz_clients))
+
+    def _sse_write(self, event, data):
+        """写一条 SSE 事件。"""
+        chunk = "event: %s\ndata: %s\n\n" % (event, data)
+        self.wfile.write(chunk.encode("utf-8"))
+        self.wfile.flush()
+
+
+def start_http_server():
+    """在独立线程中启动 HTTP 服务器（提供可视化页面 + SSE）。"""
+    try:
+        srv = ThreadingHTTPServer(("0.0.0.0", HTTP_PORT), VizHTTPHandler)
+        log("SYS", "可视化 HTTP 服务已启动: http://0.0.0.0:%d/  (页面: %s)"
+            % (HTTP_PORT, VIZ_HTML_PATH))
+        srv.serve_forever()
+    except Exception as e:
+        log("ERR", "HTTP 服务启动失败: %s" % e)
+
+
+
 
 
 # ==================== 协议响应 ====================
@@ -128,6 +361,8 @@ def handle_client(conn, client_info):
     """
     peer = "%s:%s" % client_info if client_info else "unknown"
     log("SYS", "客户端已连接: %s" % peer)
+    viz_peer["addr"] = peer
+    broadcast_peer(peer)
 
     buf = b""  # 接收缓冲区（字节流，可能跨包）
     conn.settimeout(1.0)  # 带超时的 recv，便于周期性检查退出标志
@@ -137,7 +372,11 @@ def handle_client(conn, client_info):
             try:
                 data = conn.recv(1024)
             except bluetooth.BluetoothError as e:
-                # 蓝牙层错误（多半是连接断开）
+                msg = str(e).lower()
+                if "timed out" in msg or "timeout" in msg:
+                    # recv 超时：连接正常，只是暂无数据，继续等待
+                    continue
+                # 其余蓝牙层错误（多半是连接断开）
                 log("ERR", "recv BluetoothError: %s" % e)
                 break
             except TimeoutError:
@@ -167,10 +406,12 @@ def handle_client(conn, client_info):
         except Exception:
             pass
         log("SYS", "连接结束: %s" % peer)
+        viz_peer["addr"] = None
+        broadcast_peer("")
 
 
 def process_frame(conn, frame_text):
-    """处理一帧（一行 JSON 文本）：打印 + 解析 + 回包。"""
+    """处理一帧（一行 JSON 文本）：打印 + 解析 + 回包 + 可视化广播。"""
     # —— 打印收到的指令（核心需求）——
     log("RX", frame_text)
 
@@ -186,6 +427,10 @@ def process_frame(conn, frame_text):
     cmd = obj.get("cmd", "")
     req_id = obj.get("id")
 
+    # —— 更新可视化姿态快照 + 广播给浏览器 ——
+    viz_state.update_from_frame(obj)
+    broadcast_frame(obj, direction="RX")
+
     # 构造并回包
     resp = build_response(cmd, obj)
     if resp is not None:
@@ -196,6 +441,8 @@ def _send(conn, obj):
     """发送一帧 JSON：jsonEncode + '\\n'。"""
     text = json.dumps(obj, ensure_ascii=False)
     log("TX", text)
+    # 回包也广播给可视化（前端日志显示设备回了什么）
+    broadcast_frame(obj, direction="TX")
     try:
         conn.sendall((text + "\n").encode("utf-8"))
     except Exception as e:
@@ -278,6 +525,10 @@ def main():
     log("SYS", "==== XBot 底座 SPP 服务启动 (PID %d) ====" % os.getpid())
     log("SYS", "服务名=%s  PIN=1234（由 bluetoothctl agent 处理配对）"
         % SPP_SERVICE_NAME)
+
+    # 启动可视化 HTTP 服务（独立线程，非守护以避免被提前回收）
+    http_thread = threading.Thread(target=start_http_server, name="VizHTTP", daemon=True)
+    http_thread.start()
 
     try:
         serve_forever()

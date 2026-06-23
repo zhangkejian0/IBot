@@ -67,7 +67,7 @@ class BaseService extends ChangeNotifier {
   BaseService();
 
   // 标准 SPP UUID（Serial Port Profile），与板子端一致。
-  static const String sppUuid = '00001101-0000-1000-8000-00805F9B34AF';
+  static const String sppUuid = '00001101-0000-1000-8000-00805F9B34FB';
 
   final BaseProtocol _protocol = BaseProtocol();
 

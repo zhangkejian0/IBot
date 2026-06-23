@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>XBot 底座可视化</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --dim: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --orange: #d29922;
+    --red: #f85149;
+    --teal: #2dd4bf;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 20px;
+  }
+  h1 {
+    font-size: 20px;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .subtitle {
+    color: var(--dim);
+    font-size: 13px;
+    margin-bottom: 20px;
+  }
+  .status-bar {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    padding: 10px 18px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    margin-bottom: 24px;
+    font-size: 13px;
+  }
+  .dot {
+    width: 9px; height: 9px;
+    border-radius: 50%;
+    background: var(--dim);
+    transition: background 0.2s;
+  }
+  .dot.live { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .dot.dead { background: var(--red); }
+  .dot.idle { background: var(--dim); }
+
+  .main {
+    display: flex;
+    gap: 28px;
+    flex-wrap: wrap;
+    justify-content: center;
+    width: 100%;
+    max-width: 1100px;
+  }
+
+  /* ===== 3D 场景 ===== */
+  .scene-wrap {
+    flex: 1 1 420px;
+    min-width: 380px;
+    background: linear-gradient(180deg, #0a0e14 0%, #161b22 100%);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  .scene-title {
+    color: var(--dim);
+    font-size: 12px;
+    margin-bottom: 8px;
+    align-self: flex-start;
+    letter-spacing: 1px;
+  }
+  .scene {
+    width: 320px;
+    height: 320px;
+    perspective: 900px;
+    margin: 30px 0 10px;
+    position: relative;
+  }
+  .ground {
+    position: absolute;
+    width: 260px; height: 260px;
+    left: 50%; top: 65%;
+    transform: translate(-50%, -50%) rotateX(75deg);
+    background:
+      radial-gradient(circle, rgba(88,166,255,0.18) 0%, transparent 60%),
+      repeating-linear-gradient(0deg, rgba(88,166,255,0.10) 0 1px, transparent 1px 26px),
+      repeating-linear-gradient(90deg, rgba(88,166,255,0.10) 0 1px, transparent 1px 26px);
+    border: 1px solid rgba(88,166,255,0.2);
+    border-radius: 8px;
+  }
+  /* 底座（基座，不动） */
+  .base-plate {
+    position: absolute;
+    width: 150px; height: 150px;
+    left: 50%; top: 50%;
+    transform: translate(-50%, -50%);
+    transform-style: preserve-3d;
+  }
+  .base-cylinder {
+    position: absolute;
+    left: 50%; top: 50%;
+    transform: translate(-50%, -50%);
+    width: 120px; height: 36px;
+    background: linear-gradient(180deg, #3a4250 0%, #21262d 100%);
+    border-radius: 60px / 18px;
+    box-shadow: 0 8px 20px rgba(0,0,0,0.5), inset 0 2px 4px rgba(255,255,255,0.1);
+  }
+  .base-ring {
+    position: absolute;
+    left: 50%; top: 50%;
+    transform: translate(-50%, -50%);
+    width: 90px; height: 22px;
+    background: linear-gradient(180deg, #4d5666 0%, #2d333b 100%);
+    border-radius: 45px / 11px;
+    box-shadow: inset 0 -2px 4px rgba(0,0,0,0.4);
+  }
+  .base-led {
+    position: absolute;
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 6px var(--green);
+    left: 50%; top: 62%;
+    transform: translateX(-50%);
+    transition: background 0.2s, box-shadow 0.2s;
+  }
+  .base-led.moving { background: var(--orange); box-shadow: 0 0 8px var(--orange); }
+  .base-led.sleep  { background: var(--dim); box-shadow: none; }
+  .base-led.error  { background: var(--red); box-shadow: 0 0 8px var(--red); }
+
+  /* 云台组（接受 yaw/pitch 旋转）。先 yaw 后 pitch：
+     外层做 yaw（绕 Y 轴），内层做 pitch（绕 X 轴）。
+     注意：这里用纯 CSS 3D，近似展示俯视/侧视效果。 */
+  .gimbal-yaw {
+    position: absolute;
+    width: 0; height: 0;
+    left: 50%; top: 38%;
+    transform: rotateY(0deg);
+    transition: transform 0.45s cubic-bezier(0.34, 1.2, 0.64, 1);
+    transform-style: preserve-3d;
+  }
+  .gimbal-pitch {
+    position: absolute;
+    width: 0; height: 0;
+    transform: rotateX(0deg);
+    transition: transform 0.45s cubic-bezier(0.34, 1.2, 0.64, 1);
+    transform-style: preserve-3d;
+  }
+  /* U 型支架臂 */
+  .arm {
+    position: absolute;
+    width: 70px; height: 50px;
+    left: -35px; top: -25px;
+    border: 4px solid #6e7681;
+    border-bottom: none;
+    border-radius: 35px 35px 0 0;
+    box-sizing: border-box;
+  }
+  /* 摄像头/头部模块（云台所载） */
+  .head {
+    position: absolute;
+    width: 54px; height: 54px;
+    left: -27px; top: -18px;
+    background: linear-gradient(160deg, #1f6feb 0%, #1158c7 100%);
+    border-radius: 12px;
+    box-shadow:
+      0 10px 24px rgba(0,0,0,0.6),
+      inset 0 2px 6px rgba(255,255,255,0.25),
+      inset 0 -4px 8px rgba(0,0,0,0.3);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .lens {
+    width: 22px; height: 22px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 35% 35%, #4d8eff 0%, #0a0e14 70%);
+    border: 2px solid #0a0e14;
+    box-shadow: inset 0 0 4px rgba(0,0,0,0.8);
+  }
+  .lens::after {
+    content: '';
+    position: absolute;
+    width: 5px; height: 5px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.7);
+    margin-top: -6px;
+    margin-left: -6px;
+  }
+  /* 朝向指示箭头（随 yaw 转，直观显示水平朝向） */
+  .compass {
+    position: absolute;
+    width: 80px; height: 80px;
+    left: 50%; top: 50%;
+    transform: translate(-50%, -50%);
+    border: 1px dashed rgba(88,166,255,0.25);
+    border-radius: 50%;
+    pointer-events: none;
+  }
+  .needle {
+    position: absolute;
+    width: 2px; height: 36px;
+    left: 50%; top: 8%;
+    transform-origin: bottom center;
+    transform: translateX(-50%) rotate(0deg);
+    transition: transform 0.45s cubic-bezier(0.34, 1.2, 0.64, 1);
+  }
+  .needle::before {
+    content: '';
+    position: absolute;
+    top: -2px; left: -4px;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-bottom: 9px solid var(--accent);
+  }
+
+  /* 角度数据面板 */
+  .axes {
+    display: flex;
+    gap: 14px;
+    margin-top: 8px;
+    width: 100%;
+    justify-content: center;
+  }
+  .axis {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 18px;
+    text-align: center;
+    min-width: 92px;
+  }
+  .axis .name { font-size: 11px; color: var(--dim); letter-spacing: 1px; }
+  .axis .val { font-size: 22px; font-weight: 700; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .axis .bar {
+    margin-top: 6px;
+    height: 4px; border-radius: 2px;
+    background: linear-gradient(90deg, transparent 45%, var(--border) 45%, var(--border) 55%, transparent 55%);
+    position: relative;
+  }
+  .axis .bar i {
+    position: absolute; top: -1px;
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--accent);
+    transition: left 0.45s cubic-bezier(0.34, 1.2, 0.64, 1);
+    left: 50%;
+    transform: translateX(-50%);
+  }
+  .axis.yaw .val { color: var(--accent); }
+  .axis.yaw .bar i { background: var(--accent); }
+  .axis.pitch .val { color: var(--green); }
+  .axis.pitch .bar i { background: var(--green); }
+  .axis.roll .val { color: var(--orange); }
+  .axis.roll .bar i { background: var(--orange); }
+
+  /* 右侧：指令流 + 模式 */
+  .side {
+    flex: 1 1 340px;
+    min-width: 320px;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 18px;
+  }
+  .card h2 {
+    font-size: 13px;
+    color: var(--dim);
+    font-weight: 600;
+    letter-spacing: 1px;
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .mode-grid {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 8px;
+  }
+  .mode-cell {
+    text-align: center;
+    padding: 10px 4px;
+    border-radius: 8px;
+    background: #21262d;
+    border: 1px solid transparent;
+    font-size: 12px;
+    color: var(--dim);
+    transition: all 0.2s;
+  }
+  .mode-cell.active {
+    background: rgba(88,166,255,0.15);
+    border-color: var(--accent);
+    color: var(--accent);
+    font-weight: 600;
+  }
+  #log {
+    height: 220px;
+    overflow-y: auto;
+    font-family: "SFMono-Regular", Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.7;
+  }
+  #log::-webkit-scrollbar { width: 6px; }
+  #log::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  .log-line { display: flex; gap: 8px; padding: 1px 0; }
+  .log-line .t { color: #484f58; flex-shrink: 0; }
+  .log-line .dir { font-weight: 700; width: 26px; flex-shrink: 0; }
+  .log-line .dir.tx { color: var(--accent); }
+  .log-line .dir.rx { color: var(--green); }
+  .log-line .dir.sys { color: var(--orange); }
+  .log-line .m { color: var(--text); word-break: break-all; }
+
+  .hint {
+    color: var(--dim);
+    font-size: 12px;
+    margin-top: 24px;
+    text-align: center;
+    max-width: 800px;
+    line-height: 1.6;
+  }
+  .hint code {
+    background: var(--panel);
+    padding: 2px 6px;
+    border-radius: 4px;
+    color: var(--teal);
+    font-size: 11px;
+  }
+</style>
+</head>
+<body>
+  <h1>XBot 底座实时可视化</h1>
+  <div class="subtitle">经典蓝牙 SPP 指令可视化 · 地瓜派 X5</div>
+
+  <div class="status-bar">
+    <span class="dot" id="connDot"></span>
+    <span id="connText">连接中…</span>
+    <span style="color:var(--border)">|</span>
+    <span style="color:var(--dim)">设备: <b id="devHw" style="color:var(--text)">--</b></span>
+    <span style="color:var(--dim)">自由度: <b id="devDof" style="color:var(--text)">--</b></span>
+    <span style="color:var(--dim)">BLE/SPP: <b id="devPeer" style="color:var(--text)">未连接</b></span>
+  </div>
+
+  <div class="main">
+    <!-- 3D 场景 -->
+    <div class="scene-wrap">
+      <div class="scene-title">底座姿态</div>
+      <div class="scene">
+        <div class="ground"></div>
+
+        <!-- 朝向罗盘（水平朝向，随 yaw） -->
+        <div class="compass"></div>
+        <div class="needle" id="needle"></div>
+
+        <!-- 基座（不动） -->
+        <div class="base-plate">
+          <div class="base-cylinder"></div>
+          <div class="base-ring"></div>
+          <div class="base-led" id="led"></div>
+        </div>
+
+        <!-- 云台（yaw 绕垂直轴，pitch 绕水平轴） -->
+        <div class="gimbal-yaw" id="gimbalYaw">
+          <div class="gimbal-pitch" id="gimbalPitch">
+            <div class="arm"></div>
+            <div class="head"><div class="lens"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="axes">
+        <div class="axis yaw">
+          <div class="name">YAW 水平</div>
+          <div class="val" id="vYaw">0.0°</div>
+          <div class="bar"><i id="bYaw"></i></div>
+        </div>
+        <div class="axis pitch">
+          <div class="name">PITCH 俯仰</div>
+          <div class="val" id="vPitch">0.0°</div>
+          <div class="bar"><i id="bPitch"></i></div>
+        </div>
+        <div class="axis roll">
+          <div class="name">ROLL 横滚</div>
+          <div class="val" id="vRoll">0.0°</div>
+          <div class="bar"><i id="bRoll"></i></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 右侧 -->
+    <div class="side">
+      <div class="card">
+        <h2>◆ 工作模式</h2>
+        <div class="mode-grid" id="modeGrid">
+          <div class="mode-cell" data-mode="idle">IDLE</div>
+          <div class="mode-cell" data-mode="track">TRACK</div>
+          <div class="mode-cell" data-mode="manual">MANUAL</div>
+          <div class="mode-cell" data-mode="sleep">SLEEP</div>
+          <div class="mode-cell" data-mode="demo">DEMO</div>
+        </div>
+      </div>
+      <div class="card">
+        <h2>◆ 指令流</h2>
+        <div id="log"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="hint">
+    页面通过 <code>SSE</code> 实时接收 SPP 指令。<code>move/move_rel</code> 驱动云台动画，<code>set_mode</code> 高亮模式，<code>stop</code> 急停，<code>home</code> 回原点。
+    摄像头模块随 YAW 左右、PITCH 上下转动。
+  </div>
+
+<script>
+  // ==================== 当前姿态（状态机） ====================
+  const state = {
+    yaw: 0, pitch: 0, roll: 0,
+    mode: 'idle',
+    moving: false,
+    dof: 3,
+    hw: '--',
+    peer: null,
+  };
+
+  // 角度范围（与协议一致）
+  const RANGE = { yaw: 90, pitch: 30, roll: 45 };
+
+  // ==================== DOM ====================
+  const el = {
+    connDot: document.getElementById('connDot'),
+    connText: document.getElementById('connText'),
+    devHw: document.getElementById('devHw'),
+    devDof: document.getElementById('devDof'),
+    devPeer: document.getElementById('devPeer'),
+    gimbalYaw: document.getElementById('gimbalYaw'),
+    gimbalPitch: document.getElementById('gimbalPitch'),
+    needle: document.getElementById('needle'),
+    led: document.getElementById('led'),
+    vYaw: document.getElementById('vYaw'),
+    vPitch: document.getElementById('vPitch'),
+    vRoll: document.getElementById('vRoll'),
+    bYaw: document.getElementById('bYaw'),
+    bPitch: document.getElementById('bPitch'),
+    bRoll: document.getElementById('bRoll'),
+    modeGrid: document.getElementById('modeGrid'),
+    log: document.getElementById('log'),
+  };
+
+  // ==================== 渲染 ====================
+  function clamp(v, r) { return Math.max(-r, Math.min(r, v)); }
+
+  function render() {
+    // 云台 3D：yaw 绕 Y 轴，pitch 绕 X 轴
+    // 注意 CSS rotateY 正值在屏幕上表现为顺时针俯视 → 与 yaw 正=右 一致
+    el.gimbalYaw.style.transform = `rotateY(${state.yaw}deg)`;
+    // pitch：负=上，正=下。CSS rotateX 正值顶部向后倾（即低头）→ 正=下 一致
+    el.gimbalPitch.style.transform = `rotateX(${state.pitch}deg)`;
+    // 罗盘指针随 yaw
+    el.needle.style.transform = `translateX(-50%) rotate(${state.yaw}deg)`;
+
+    // 数值
+    el.vYaw.textContent = state.yaw.toFixed(1) + '°';
+    el.vPitch.textContent = state.pitch.toFixed(1) + '°';
+    el.vRoll.textContent = state.roll.toFixed(1) + '°';
+
+    // 滑块位置（0%~100%，0°居中）
+    el.bYaw.style.left = ((state.yaw / RANGE.yaw) * 0.5 + 0.5) * 100 + '%';
+    el.bPitch.style.left = ((state.pitch / RANGE.pitch) * 0.5 + 0.5) * 100 + '%';
+    el.bRoll.style.left = ((state.roll / RANGE.roll) * 0.5 + 0.5) * 100 + '%';
+
+    // 模式高亮
+    [...el.modeGrid.children].forEach(c => {
+      c.classList.toggle('active', c.dataset.mode === state.mode);
+    });
+
+    // LED
+    el.led.className = 'base-led';
+    if (state.mode === 'sleep') el.led.classList.add('sleep');
+    else if (state.moving) el.led.classList.add('moving');
+
+    // 设备信息
+    el.devHw.textContent = state.hw;
+    el.devDof.textContent = state.dof + ' DOF';
+    el.devPeer.textContent = state.peer || '未连接';
+  }
+
+  // ==================== 日志 ====================
+  function addLog(dir, msg) {
+    const now = new Date();
+    const t = now.toTimeString().slice(0, 8);
+    const line = document.createElement('div');
+    line.className = 'log-line';
+    const dcls = dir === 'TX' ? 'tx' : dir === 'RX' ? 'rx' : 'sys';
+    line.innerHTML =
+      `<span class="t">${t}</span>` +
+      `<span class="dir ${dcls}">${dir}</span>` +
+      `<span class="m">${escapeHtml(msg)}</span>`;
+    el.log.appendChild(line);
+    while (el.log.children.length > 80) el.log.removeChild(el.log.firstChild);
+    el.log.scrollTop = el.log.scrollHeight;
+  }
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"]/g, c =>
+      ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  }
+
+  // ==================== 指令处理 ====================
+  function applyFrame(obj, dir) {
+    const cmd = obj.cmd;
+    // 记录日志
+    addLog(dir, JSON.stringify(obj));
+
+    switch (cmd) {
+      case 'move':
+        if (typeof obj.yaw === 'number') state.yaw = clamp(obj.yaw, RANGE.yaw);
+        if (typeof obj.pitch === 'number') state.pitch = clamp(obj.pitch, RANGE.pitch);
+        if (typeof obj.roll === 'number') state.roll = clamp(obj.roll, RANGE.roll);
+        state.moving = true;
+        // 短暂显示 moving，之后回稳
+        clearTimeout(window._mvT);
+        window._mvT = setTimeout(() => { state.moving = false; render(); }, 700);
+        render();
+        break;
+      case 'move_rel':
+        if (typeof obj.dyaw === 'number') state.yaw = clamp(state.yaw + obj.dyaw, RANGE.yaw);
+        if (typeof obj.dpitch === 'number') state.pitch = clamp(state.pitch + obj.dpitch, RANGE.pitch);
+        if (typeof obj.droll === 'number') state.roll = clamp(state.roll + obj.droll, RANGE.roll);
+        state.moving = true;
+        clearTimeout(window._mvT);
+        window._mvT = setTimeout(() => { state.moving = false; render(); }, 700);
+        render();
+        break;
+      case 'home':
+        state.yaw = 0; state.pitch = 0; state.roll = 0;
+        render();
+        break;
+      case 'stop':
+        state.moving = false;
+        // stop 闪烁一下红灯
+        el.led.classList.add('error');
+        setTimeout(render, 400);
+        render();
+        break;
+      case 'set_mode':
+        if (typeof obj.mode === 'string') {
+          state.mode = obj.mode;
+          render();
+        }
+        break;
+      case 'set_speed':
+        // 速度变化：短暂高亮
+        state.moving = true;
+        clearTimeout(window._mvT);
+        window._mvT = setTimeout(() => { state.moving = false; render(); }, 500);
+        render();
+        break;
+      case 'get_status':
+      case 'get_version':
+      case 'heartbeat':
+      case 'calibrate':
+        // 纯查询/心跳，已记录日志，不动姿态
+        break;
+      default:
+        break;
+    }
+  }
+
+  // ==================== SSE 连接 ====================
+  function connect() {
+    el.connDot.className = 'dot idle';
+    el.connText.textContent = '连接中…';
+    const es = new EventSource('/events');
+    es.addEventListener('open', () => {
+      el.connDot.className = 'dot live';
+      el.connText.textContent = '已连接';
+      addLog('SYS', 'SSE 已连接，等待指令…');
+    });
+    es.addEventListener('frame', (e) => {
+      try {
+        const obj = JSON.parse(e.data);
+        applyFrame(obj, obj.__dir || 'RX');
+      } catch (err) { console.warn('parse fail', err, e.data); }
+    });
+    es.addEventListener('snapshot', (e) => {
+      // 首连时的当前状态快照
+      try {
+        const obj = JSON.parse(e.data);
+        Object.assign(state, obj);
+        render();
+        addLog('SYS', '已加载当前姿态快照');
+      } catch (err) {}
+    });
+    es.addEventListener('peer', (e) => {
+      state.peer = e.data || null;
+      render();
+    });
+    es.onerror = () => {
+      el.connDot.className = 'dot dead';
+      el.connText.textContent = '连接断开，3 秒后重连…';
+      es.close();
+      setTimeout(connect, 3000);
+    };
+  }
+
+  // ==================== 初始默认 ====================
+  render();
+  connect();
+</script>
+</body>
+</html>

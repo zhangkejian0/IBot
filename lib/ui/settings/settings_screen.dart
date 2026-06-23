@@ -60,6 +60,19 @@ class SettingsScreen extends StatelessWidget {
                   ),
                   header: const _Header('身份识别'),
                   children: [
+                    if (controller.isOwnerRegistered)
+                      CupertinoListTile.notched(
+                        backgroundColor: AppTheme.groupedBackground,
+                        leading: const _LeadingIcon(
+                            CupertinoIcons.person_fill, AppTheme.accentPurple),
+                        title: const Text('主人',
+                            style: TextStyle(color: AppTheme.label)),
+                        subtitle: Text(
+                          controller.ownerProfile?.nickname ?? '—',
+                          style:
+                              const TextStyle(color: AppTheme.secondaryLabel),
+                        ),
+                      ),
                     CupertinoListTile.notched(
                       backgroundColor: AppTheme.groupedBackground,
                       leading: const _LeadingIcon(
@@ -106,6 +119,21 @@ class SettingsScreen extends StatelessWidget {
                               .updateSettings(() => s.identityEnabled = v)
                           : null,
                     ),
+                    if (controller.isOwnerRegistered)
+                      CupertinoListTile.notched(
+                        backgroundColor: AppTheme.groupedBackground,
+                        leading: const _LeadingIcon(
+                            CupertinoIcons.arrow_counterclockwise_circle_fill,
+                            AppTheme.accentOrange),
+                        title: const Text('重新设置主人',
+                            style: TextStyle(color: AppTheme.label)),
+                        subtitle: const Text(
+                          '清除主人信息并重新进入引导',
+                          style: TextStyle(color: AppTheme.secondaryLabel),
+                        ),
+                        trailing: const CupertinoListTileChevron(),
+                        onTap: () => _confirmResetOwner(context, controller),
+                      ),
                   ],
                 ),
 
@@ -322,6 +350,33 @@ class SettingsScreen extends StatelessWidget {
       ),
     );
   }
+}
+
+/// 「重新设置主人」二次确认。确认后调用 resetOwner，phase 切回 onboarding，
+/// 根路由自动重建到向导（设置页随之销毁）。
+void _confirmResetOwner(BuildContext context, AppController controller) {
+  showCupertinoDialog<void>(
+    context: context,
+    builder: (ctx) => CupertinoAlertDialog(
+      title: const Text('重新设置主人'),
+      content: const Text('将清除主人信息（含人脸）并重新进入引导。此操作不可撤销，确定继续吗？'),
+      actions: [
+        CupertinoDialogAction(
+          isDefaultAction: true,
+          onPressed: () => Navigator.of(ctx).pop(),
+          child: const Text('取消'),
+        ),
+        CupertinoDialogAction(
+          isDestructiveAction: true,
+          onPressed: () {
+            Navigator.of(ctx).pop();
+            controller.resetOwner();
+          },
+          child: const Text('重新设置'),
+        ),
+      ],
+    ),
+  );
 }
 
 class _ModelStatus extends StatelessWidget {

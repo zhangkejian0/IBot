@@ -61,7 +61,12 @@ dependencies:
   # —— 底座控制 ——
   # 经典蓝牙 SPP（RFCOMM），App 通过它与物理旋转底座收发 JSON 指令。
   # 仅支持经典蓝牙（不支持 BLE），与开发板 BlueZ SPP 服务端对接。
-  flutter_bluetooth_serial: ^0.4.0
+  #
+  # 原 pub 包 flutter_bluetooth_serial 0.4.0 不兼容 AGP 8（缺 namespace），
+  # 故使用项目内本地 fork（已修复 namespace/jcenter/compileSdk）。
+  # 见 plugins/flutter_bluetooth_serial/。
+  flutter_bluetooth_serial:
+    path: plugins/flutter_bluetooth_serial
 
 dev_dependencies:
   flutter_test:

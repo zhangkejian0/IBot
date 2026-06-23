@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 
+import '../../models/owner_profile.dart';
 import 'pophie_config.dart';
 
 /// 用户侧多模态感知上下文(文档 §2.4)。仅携带非空字段。
@@ -380,6 +381,65 @@ class PophieClient {
       audioFormat: audioFormat,
       sessionId: sid,
     );
+  }
+
+  // —— 主人档案（文档 §3.16）——
+  // 首次激活向导完成时同步主人文本档案到后端。人脸数据绝不上传（端侧本地比对），
+  // 这里只传 §2.8 的 5 个字段。全部 best-effort：失败返回 false，不抛异常，
+  // 由 AppController 决定是否后台重试（陪伴机器人离线必须可用）。
+
+  /// 注册/更新主人档案（PUT /api/robots/{robot_id}/owner，幂等 upsert）。
+  /// 成功返回 true；网络/服务端失败返回 false（不抛异常）。
+  Future<bool> registerOwner(OwnerProfile profile) async {
+    try {
+      await _dio.put<Map<String, dynamic>>(
+        '${_config.baseUrl}/api/robots/${_config.robotId}/owner',
+        data: {'owner': profile.toPophieJson()},
+        options: Options(contentType: Headers.jsonContentType),
+      );
+      debugPrint('[Pophie] registerOwner ok robotId=${_config.robotId}');
+      return true;
+    } catch (e) {
+      debugPrint('[Pophie] registerOwner failed (best-effort): $e');
+      return false;
+    }
+  }
+
+  /// 查询主人档案（GET /api/robots/{robot_id}/owner）。未注册(404)或失败返回 null。
+  Future<OwnerProfile?> fetchOwner() async {
+    try {
+      final r = await _dio.get<Map<String, dynamic>>(
+        '${_config.baseUrl}/api/robots/${_config.robotId}/owner',
+      );
+      final data = r.data ?? const {};
+      // 兼容两种外层结构：直接是 owner 对象，或包在 {"owner": {...}} 里。
+      final owner = (data['owner'] as Map?)?.cast<String, dynamic>() ??
+          (data.containsKey('nickname') ? data : null);
+      if (owner == null) return null;
+      return OwnerProfile.fromJson(owner);
+    } on DioException catch (e) {
+      // 404 视为未注册，返回 null 而非异常。
+      if (e.response?.statusCode == 404) return null;
+      debugPrint('[Pophie] fetchOwner failed: $e');
+      return null;
+    } catch (e) {
+      debugPrint('[Pophie] fetchOwner failed: $e');
+      return null;
+    }
+  }
+
+  /// 删除主人档案（DELETE /api/robots/{robot_id}/owner）。best-effort。
+  Future<bool> deleteOwner() async {
+    try {
+      await _dio.delete<Map<String, dynamic>>(
+        '${_config.baseUrl}/api/robots/${_config.robotId}/owner',
+      );
+      debugPrint('[Pophie] deleteOwner ok robotId=${_config.robotId}');
+      return true;
+    } catch (e) {
+      debugPrint('[Pophie] deleteOwner failed (best-effort): $e');
+      return false;
+    }
   }
 
   void dispose() => _dio.close(force: true);

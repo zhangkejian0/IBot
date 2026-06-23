@@ -12,12 +12,14 @@ import 'package:permission_handler/permission_handler.dart';
 import '../face/gaze_zone_detector.dart';
 import '../models/detection.dart';
 import '../models/expression.dart';
+import '../models/owner_profile.dart';
 import '../models/person.dart';
 import '../services/camera_image_utils.dart';
 import '../services/face_engine.dart';
 import '../services/face_recognition_service.dart';
 import '../services/hand_engine.dart';
 import '../services/mlkit_face_engine.dart';
+import '../services/owner_profile_store.dart';
 import '../services/person_repository.dart';
 import '../services/static_server.dart';
 import '../services/base/base_service.dart';
@@ -28,7 +30,7 @@ import '../services/voice/voice_assistant.dart';
 import 'package:hand_detection/hand_detection.dart' show GestureType;
 
 /// 应用整体阶段。
-enum AppPhase { loading, ready, error, permissionDenied }
+enum AppPhase { loading, onboarding, ready, error, permissionDenied }
 
 /// 调试 / 显示开关。
 class DisplaySettings {
@@ -85,6 +87,7 @@ class AppController extends ChangeNotifier {
   final MlKitFaceEngine mlkitFaceEngine = MlKitFaceEngine();
   final FaceRecognitionService faceRecognition = FaceRecognitionService();
   final PersonRepository personRepository = PersonRepository();
+  final OwnerProfileStore ownerProfileStore = OwnerProfileStore();
   final DisplaySettings settings = DisplaySettings();
   final StaticServer staticServer = StaticServer();
   final BaseService baseService = BaseService();
@@ -104,6 +107,14 @@ class AppController extends ChangeNotifier {
 
   AppPhase _phase = AppPhase.loading;
   AppPhase get phase => _phase;
+
+  // —— 主人档案 ——
+  /// 当前主人档案；未注册时为 null。
+  OwnerProfile? get ownerProfile => ownerProfileStore.profile;
+  /// 是否已完成首次激活注册（owner_profile.json 存在）。
+  bool get isOwnerRegistered => ownerProfileStore.isRegistered;
+  /// 机器人显示名：已注册用主人起的名字，否则用默认「狗蛋」。
+  String get robotDisplayName => ownerProfile?.robotName ?? '狗蛋';
 
   AppController() {
     // 转发 voiceAssistant 的变化:唤醒模型后台加载完成等子事件会改变
@@ -232,14 +243,19 @@ class AppController extends ChangeNotifier {
       voiceAssistant.pophie.configure(pophieConfigStore.config);
       _wireVoicePerception();
 
+      // 加载主人档案（决定是否进入首次激活向导）。文件存在=已注册。
+      await ownerProfileStore.load();
+
       _setLoading(1.0, '准备就绪');
       await _camera?.startImageStream(_onFrame);
 
       // 固定额外等待：摄像头首帧与各模型推理管道仍需少量时间稳定，
-      // 缓冲后再进入 ready，避免开场即出现掉帧/未识别。
+      // 缓冲后再进入下一阶段，避免开场即出现掉帧/未识别。
       await Future<void>.delayed(_readyBuffer);
 
-      _phase = AppPhase.ready;
+      // 已注册主人 → 直接进入主界面；未注册 → 进入首次激活向导。
+      // 向导的人脸录入依赖常驻相机与识别模型，故必须在就绪缓冲之后才分流。
+      _phase = isOwnerRegistered ? AppPhase.ready : AppPhase.onboarding;
       notifyListeners();
     } catch (e) {
       _phase = AppPhase.error;
@@ -291,7 +307,10 @@ class AppController extends ChangeNotifier {
   /// `(sensorOrientation + deviceRotation) % 360`，后置为相减。
   /// 身份识别裁剪必须用同一旋转，否则裁剪框与归一化坐标空间错位。
   void _onFrame(CameraImage image) {
-    if (_disposed || _processing || _phase != AppPhase.ready) return;
+    // 帧处理在 ready（主界面）与 onboarding（激活向导的人脸录入）阶段都需运行：
+    // 向导的人脸录入依赖 captureFaceSample，它靠 _onFrame 内的 needCapture 分支满足。
+    if (_disposed || _processing) return;
+    if (_phase != AppPhase.ready && _phase != AppPhase.onboarding) return;
     // 帧级检测节流:未到间隔的帧跳过整帧检测。不重置图像(直接 return),
     // 上一帧 DetectionResult 保留,UI/虚拟宠物继续用旧值驱动注视与表情,
     // 视觉上不会闪烁,只是检测频率降到 ~15fps。
@@ -756,6 +775,88 @@ class AppController extends ChangeNotifier {
     final path = '${dir.path}/$personId.jpg';
     await File(path).writeAsBytes(jpg);
     return path;
+  }
+
+  // —— 主人档案：首次激活 / 重置 / 同步 ——
+
+  /// 完成首次激活向导。
+  ///
+  /// 1. 若带有人脸样本：构造主脸 Person（relation=owner），填 embeddings，
+  ///    存头像 + 存人物，回填 profile.personId / faceRegistered。
+  /// 2. 本地档案立即生效并进入主界面（ready）——不阻塞于网络。
+  /// 3. 后台 best-effort 同步到 Pophie：成功置 syncedToServer 并落盘，失败静默
+  ///    （后续可由 [retryOwnerSync] 重试）。陪伴机器人离线必须可用。
+  ///
+  /// [faceSamples] 由向导人脸步骤采集的样本（jpg 缩略图 + embedding）。
+  Future<void> completeOnboarding({
+    required OwnerProfile profile,
+    List<EnrollCapture>? faceSamples,
+  }) async {
+    var p = profile.copyWith(syncedToServer: false);
+
+    if (faceSamples != null && faceSamples.isNotEmpty) {
+      final valid = faceSamples.where((c) => c.hasEmbedding).toList();
+      if (valid.isNotEmpty) {
+        final person = Person(
+          id: DateTime.now().microsecondsSinceEpoch.toString(),
+          name: profile.nickname,
+          relation: FamilyRelation.owner,
+        );
+        person.embeddings.addAll(
+            valid.map((c) => c.embedding!).whereType<List<double>>());
+        final avatarPath = await saveAvatar(person.id, valid.first.jpgBytes);
+        person.avatarPath = avatarPath;
+        await personRepository.upsert(person);
+        p = p.copyWith(personId: person.id, faceRegistered: true);
+      }
+    }
+
+    await ownerProfileStore.save(p);
+    _phase = AppPhase.ready;
+    notifyListeners();
+
+    // 后台同步，不阻塞 UI。不 await：用户已进入主界面。
+    unawaited(_syncOwnerToServer(p));
+  }
+
+  /// 重置主人：重新进入向导。
+  ///
+  /// best-effort 通知后端删除（失败不阻断本地重置）→ 清本地档案 → 删除主脸
+  /// Person → 回到 onboarding 阶段（AppScope 会驱动根路由重建切回向导）。
+  Future<void> resetOwner() async {
+    final ownerPersonId = ownerProfile?.personId;
+    // 后台删除后端档案，不阻塞。
+    unawaited(voiceAssistant.pophie.deleteOwner());
+
+    await ownerProfileStore.clear();
+    if (ownerPersonId != null) {
+      await deletePerson(ownerPersonId);
+    }
+    _phase = AppPhase.onboarding;
+    notifyListeners();
+  }
+
+  /// 重试主人档案同步到 Pophie（供后台/设置页触发）。仅在未同步时实际发起。
+  /// 返回是否已成功同步（含本就同步成功的情况）。
+  Future<bool> retryOwnerSync() async {
+    final p = ownerProfile;
+    if (p == null || p.syncedToServer) return p?.syncedToServer ?? false;
+    final ok = await _syncOwnerToServer(p);
+    return ok;
+  }
+
+  /// 实际执行同步：成功则置 syncedToServer=true 并落盘。返回是否成功。
+  Future<bool> _syncOwnerToServer(OwnerProfile profile) async {
+    final ok = await voiceAssistant.pophie.registerOwner(profile);
+    if (ok && !profile.syncedToServer) {
+      final current = ownerProfile;
+      // 避免覆盖期间 profile 已被改动（如重置）。
+      if (current != null && current.nickname == profile.nickname) {
+        await ownerProfileStore.save(current.copyWith(syncedToServer: true));
+        if (!_disposed) notifyListeners();
+      }
+    }
+    return ok;
   }
 
   @override
