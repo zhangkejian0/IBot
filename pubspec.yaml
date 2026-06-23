@@ -58,6 +58,11 @@ dependencies:
   audioplayers: ^6.7.1
   uuid: ^4.5.3
 
+  # —— 底座控制 ——
+  # 经典蓝牙 SPP（RFCOMM），App 通过它与物理旋转底座收发 JSON 指令。
+  # 仅支持经典蓝牙（不支持 BLE），与开发板 BlueZ SPP 服务端对接。
+  flutter_bluetooth_serial: ^0.4.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

@@ -1,0 +1,20 @@
+[Unit]
+Description=XBot Base Bluetooth SPP Service
+After=bluetooth.service xbot-bt-agent.service
+Requires=bluetooth.service
+Wants=xbot-bt-agent.service
+
+[Service]
+Type=simple
+ExecStartPre=/opt/xbot/setup_bt.sh
+ExecStart=/usr/bin/python3 /opt/xbot/base_spp.py
+Restart=on-failure
+RestartSec=3
+# 蓝牙 socket / SDP 权限
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -15,6 +15,21 @@
     <!-- 查询麦克风可用性(部分 Android 版本需声明) -->
     <uses-feature android:name="android.hardware.microphone" android:required="false"/>
 
+    <!-- 底座控制：经典蓝牙 SPP(RFCOMM)。与开发板 BlueZ 服务端对接。 -->
+    <!-- 经典蓝牙基础权限(Android 11 及以下) -->
+    <uses-permission android:name="android.permission.BLUETOOTH"
+        android:maxSdkVersion="30"/>
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"
+        android:maxSdkVersion="30"/>
+    <!-- 扫描/发现经典蓝牙设备需要位置权限(Android 11 及以下) -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+    <!-- Android 12+ 运行时蓝牙权限(minSdk=24 需兼容新旧) -->
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation"/>
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+    <!-- 声明使用经典蓝牙(BR/EDR),App 不要求强制具备 -->
+    <uses-feature android:name="android.hardware.bluetooth" android:required="false"/>
+
     <application
         android:label="狗蛋"
         android:name="${applicationName}"

@@ -1,20 +1,22 @@
-import 'dart:convert';
+import 'dart:async';
 
 import 'package:flutter/cupertino.dart';
+import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
 
 import '../../core/app_controller.dart';
 import '../../core/app_scope.dart';
+import '../../services/base/base_service.dart';
 import '../../theme/app_theme.dart';
 
-/// 底座控制调试页面
+/// 底座控制调试页面。
 ///
-/// 提供完整的底座调试功能：
-/// - 连接状态显示
-/// - 手动角度控制（Yaw/Pitch/Roll 滑杆）
-/// - 测试命令按钮
-/// - 指令日志列表
+/// 与开发板经典蓝牙 SPP 服务端对接（服务名 XBot-Base，UUID 00001101-...）：
+/// - 列出系统已配对设备，选择一个建立 SPP 连接
+/// - 手动角度控制（Yaw/Pitch/Roll 滑杆）→ 真实发送 move 指令
+/// - 测试命令按钮（模式/速度/查询状态版本）→ 真实发送
+/// - 指令日志：TX(发送)/RX(接收)/SYS(系统) 实时记录
 ///
-/// 首版使用 Mock 实现，不实际通讯。
+/// 收发数据源来自 [AppController.baseService]（真实蓝牙），不再是 Mock。
 class BaseDebugScreen extends StatefulWidget {
   const BaseDebugScreen({super.key});
 
@@ -23,15 +25,7 @@ class BaseDebugScreen extends StatefulWidget {
 }
 
 class _BaseDebugScreenState extends State<BaseDebugScreen> {
-  // —— 连接状态（Mock）——
-  bool _connected = false;
-  int _dof = 2;
-  String _mode = 'idle';
-  double _currentYaw = 0;
-  double _currentPitch = 0;
-  double _currentRoll = 0;
-
-  // —— 手动控制 ——
+  // —— 手动控制目标值（本地，连接后才发送）——
   double _targetYaw = 0;
   double _targetPitch = 0;
   double _targetRoll = 0;
@@ -40,91 +34,36 @@ class _BaseDebugScreenState extends State<BaseDebugScreen> {
   final List<_LogEntry> _logs = [];
   final ScrollController _logScrollCtrl = ScrollController();
 
+  late BaseService _base;
+  StreamSubscription? _wireSub;
+
+  @override
+  void initState() {
+    super.initState();
+    // initState 里不能直接 AppScope.of，dispose 后延迟绑定；
+    // 这里在 build 首帧后绑定 wire 日志回调。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _base = AppScope.of(context).baseService;
+      _wireSub = _base.onWireLogStream.listen(_onWireLog);
+    });
+  }
   @override
   void dispose() {
+    _wireSub?.cancel();
     _logScrollCtrl.dispose();
     super.dispose();
   }
 
-  // ==================== 指令发送（Mock） ====================
-
-  void _sendCommand(String cmd, Map<String, dynamic> params) {
-    final json = {'cmd': cmd, ...params};
-    _addLog('TX', jsonEncode(json));
-
-    // Mock 响应
-    Future.delayed(const Duration(milliseconds: 50), () {
-      _handleMockResponse(cmd, params);
-    });
-  }
-
-  void _handleMockResponse(String cmd, Map<String, dynamic> params) {
-    switch (cmd) {
-      case 'move':
-        setState(() {
-          _currentYaw = (params['yaw'] as num).toDouble();
-          _currentPitch = (params['pitch'] as num).toDouble();
-          _currentRoll = (params['roll'] as num?)?.toDouble() ?? 0;
-        });
-        _addLog('RX', '{"cmd":"ack","ok":true}');
-        break;
-      case 'move_rel':
-        setState(() {
-          _currentYaw += (params['dyaw'] as num).toDouble();
-          _currentPitch += (params['dpitch'] as num).toDouble();
-          _currentRoll += (params['droll'] as num?)?.toDouble() ?? 0;
-        });
-        _addLog('RX', '{"cmd":"ack","ok":true}');
-        break;
-      case 'home':
-        setState(() {
-          _currentYaw = 0;
-          _currentPitch = 0;
-          _currentRoll = 0;
-          _targetYaw = 0;
-          _targetPitch = 0;
-          _targetRoll = 0;
-        });
-        _addLog('RX', '{"cmd":"ack","ok":true}');
-        break;
-      case 'stop':
-        _addLog('RX', '{"cmd":"ack","ok":true}');
-        break;
-      case 'set_mode':
-        setState(() {
-          _mode = params['mode'] as String;
-        });
-        _addLog('RX', '{"cmd":"ack","ok":true}');
-        break;
-      case 'set_speed':
-        _addLog('RX', '{"cmd":"ack","ok":true}');
-        break;
-      case 'get_status':
-        _addLog('RX',
-            '{"cmd":"status","mode":"$_mode","yaw":$_currentYaw,"pitch":$_currentPitch,"roll":$_currentRoll,"dof":$_dof,"moving":false,"calibrated":true}');
-        break;
-      case 'get_version':
-        _addLog('RX',
-            '{"cmd":"version","major":1,"minor":0,"patch":0,"build":1,"dof":$_dof,"hw":"XBot-Base-Mock"}');
-        break;
-      default:
-        _addLog('RX', '{"cmd":"ack","ok":true}');
-    }
-  }
-
-  void _addLog(String direction, String message) {
+  void _onWireLog(WireLog log) {
     setState(() {
       _logs.add(_LogEntry(
-        time: DateTime.now(),
-        direction: direction,
-        message: message,
+        time: log.time,
+        direction: log.direction,
+        message: log.message,
       ));
-      // 保留最近 100 条
-      if (_logs.length > 100) {
-        _logs.removeAt(0);
-      }
+      if (_logs.length > 100) _logs.removeAt(0);
     });
-    // 滚动到底部
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_logScrollCtrl.hasClients) {
         _logScrollCtrl.jumpTo(_logScrollCtrl.position.maxScrollExtent);
@@ -132,17 +71,20 @@ class _BaseDebugScreenState extends State<BaseDebugScreen> {
     });
   }
 
-  void _clearLogs() {
-    setState(() {
-      _logs.clear();
-    });
-  }
+  void _clearLogs() => setState(() => _logs.clear());
 
-  // ==================== UI 构建 ====================
+  // ==================== 发送 ====================
+
+  void _send(String cmd, Map<String, dynamic> params) =>
+      _base.send(cmd, params);
+
+  // ==================== UI ====================
 
   @override
   Widget build(BuildContext context) {
     final controller = AppScope.of(context);
+    _base = controller.baseService;
+    final status = _base.status;
 
     return CupertinoPageScaffold(
       backgroundColor: AppTheme.background,
@@ -168,7 +110,7 @@ class _BaseDebugScreenState extends State<BaseDebugScreen> {
                 const SizedBox(height: 16),
                 _buildConnectionSection(),
                 const SizedBox(height: 16),
-                _buildManualControlSection(),
+                _buildManualControlSection(status),
                 const SizedBox(height: 16),
                 _buildTestCommandsSection(),
                 const SizedBox(height: 16),
@@ -181,7 +123,7 @@ class _BaseDebugScreenState extends State<BaseDebugScreen> {
     );
   }
 
-  // —— 人脸检测位置 ——
+  // —— 人脸检测位置（调试跟随映射）——
 
   Widget _buildFaceDetectionSection(AppController controller) {
     final result = controller.result;
@@ -199,57 +141,20 @@ class _BaseDebugScreenState extends State<BaseDebugScreen> {
                 faceCount > 0 ? AppTheme.accentGreen : AppTheme.secondaryLabel,
           ),
           if (face != null) ...[
-            Container(
-              height: 1,
-              color: AppTheme.separator,
-              margin: const EdgeInsets.symmetric(vertical: 8),
-            ),
-            _InfoRow(
-              label: '主脸位置',
-              value: '(${face.boundingBox.left.toStringAsFixed(2)}, '
-                  '${face.boundingBox.top.toStringAsFixed(2)})',
-            ),
-            _InfoRow(
-              label: '主脸大小',
-              value: '${face.boundingBox.width.toStringAsFixed(2)} × '
-                  '${face.boundingBox.height.toStringAsFixed(2)}',
-            ),
-            _InfoRow(
-              label: '中心点',
-              value:
-                  '(${(face.boundingBox.left + face.boundingBox.width / 2).toStringAsFixed(2)}, '
-                  '${(face.boundingBox.top + face.boundingBox.height / 2).toStringAsFixed(2)})',
-            ),
-            Container(
-              height: 1,
-              color: AppTheme.separator,
-              margin: const EdgeInsets.symmetric(vertical: 8),
-            ),
-            _InfoRow(
-              label: '注视 X',
-              value: face.gazeX.toStringAsFixed(3),
-              valueColor: _gazeColor(face.gazeX),
-            ),
-            _InfoRow(
-              label: '注视 Y',
-              value: face.gazeY.toStringAsFixed(3),
-              valueColor: _gazeColor(face.gazeY),
-            ),
-            Container(
-              height: 1,
-              color: AppTheme.separator,
-              margin: const EdgeInsets.symmetric(vertical: 8),
-            ),
-            _InfoRow(
-              label: '映射 Yaw',
-              value: '${(face.gazeX * 90).toStringAsFixed(1)}°',
-              valueColor: AppTheme.accentTeal,
-            ),
-            _InfoRow(
-              label: '映射 Pitch',
-              value: '${(face.gazeY * 30).toStringAsFixed(1)}°',
-              valueColor: AppTheme.accentTeal,
-            ),
+            Container(height: 1, color: AppTheme.separator,
+                margin: const EdgeInsets.symmetric(vertical: 8)),
+            _InfoRow(label: '注视 X', value: face.gazeX.toStringAsFixed(3),
+                valueColor: _gazeColor(face.gazeX)),
+            _InfoRow(label: '注视 Y', value: face.gazeY.toStringAsFixed(3),
+                valueColor: _gazeColor(face.gazeY)),
+            Container(height: 1, color: AppTheme.separator,
+                margin: const EdgeInsets.symmetric(vertical: 8)),
+            _InfoRow(label: '映射 Yaw',
+                value: '${(face.gazeX * 90).toStringAsFixed(1)}°',
+                valueColor: AppTheme.accentTeal),
+            _InfoRow(label: '映射 Pitch',
+                value: '${(face.gazeY * 30).toStringAsFixed(1)}°',
+                valueColor: AppTheme.accentTeal),
           ] else ...[
             const SizedBox(height: 8),
             const Center(
@@ -273,48 +178,52 @@ class _BaseDebugScreenState extends State<BaseDebugScreen> {
   // —— 连接状态 ——
 
   Widget _buildConnectionSection() {
+    final connected = _base.isConnected;
+    final stateText = _connectionStateText(_base.state);
+    final status = _base.status;
+
     return _Section(
       title: '连接状态',
       child: Column(
         children: [
           _InfoRow(
             label: '设备',
-            value: _connected ? 'Mock 底座 (模拟)' : '未连接',
+            value: connected
+                ? (_base.device?.name ?? _base.device?.address ?? '已连接')
+                : '未连接',
             valueColor:
-                _connected ? AppTheme.accentGreen : AppTheme.secondaryLabel,
+                connected ? AppTheme.accentGreen : AppTheme.secondaryLabel,
           ),
-          _InfoRow(
-            label: '自由度',
-            value: _connected ? '$_dof DOF' : '--',
-          ),
-          _InfoRow(
-            label: '当前模式',
-            value: _connected ? _mode.toUpperCase() : '--',
-          ),
-          _InfoRow(
-            label: '当前角度',
-            value: _connected
-                ? 'Y:${_currentYaw.toStringAsFixed(1)}° '
-                    'P:${_currentPitch.toStringAsFixed(1)}° '
-                    'R:${_currentRoll.toStringAsFixed(1)}°'
-                : '--',
-          ),
+          _InfoRow(label: '状态', value: stateText),
+          if (connected) ...[
+            _InfoRow(label: '自由度', value: '${status.dof} DOF'),
+            _InfoRow(label: '模式', value: status.mode.toUpperCase()),
+            _InfoRow(
+              label: '当前角度',
+              value: 'Y:${status.yaw.toStringAsFixed(1)}° '
+                  'P:${status.pitch.toStringAsFixed(1)}° '
+                  'R:${status.roll.toStringAsFixed(1)}°',
+            ),
+          ],
+          if (_base.errorMessage != null && !connected)
+            Padding(
+              padding: const EdgeInsets.only(top: 4, bottom: 4),
+              child: Text(_base.errorMessage!,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                      color: AppTheme.accentRed,
+                      fontSize: 12,
+                      decoration: TextDecoration.none)),
+            ),
           const SizedBox(height: 12),
           Row(
             children: [
               Expanded(
                 child: CupertinoButton.filled(
                   padding: const EdgeInsets.symmetric(vertical: 10),
-                  onPressed: _connected
-                      ? null
-                      : () {
-                          setState(() {
-                            _connected = true;
-                            _dof = 3;
-                          });
-                          _addLog('SYS', '已连接到 Mock 底座 (3 DOF)');
-                        },
-                  child: const Text('搜索设备',
+                  onPressed: connected ? null : _showDevicePicker,
+                  child: const Text('选择设备连接',
                       style: TextStyle(decoration: TextDecoration.none)),
                 ),
               ),
@@ -323,15 +232,7 @@ class _BaseDebugScreenState extends State<BaseDebugScreen> {
                 child: CupertinoButton(
                   padding: const EdgeInsets.symmetric(vertical: 10),
                   color: AppTheme.accentRed,
-                  onPressed: _connected
-                      ? () {
-                          setState(() {
-                            _connected = false;
-                            _mode = 'idle';
-                          });
-                          _addLog('SYS', '已断开连接');
-                        }
-                      : null,
+                  onPressed: connected ? () => _base.disconnect() : null,
                   child: const Text('断开',
                       style: TextStyle(decoration: TextDecoration.none)),
                 ),
@@ -343,9 +244,86 @@ class _BaseDebugScreenState extends State<BaseDebugScreen> {
     );
   }
 
+  String _connectionStateText(BaseConnectionState s) {
+    switch (s) {
+      case BaseConnectionState.disconnected:
+        return '未连接';
+      case BaseConnectionState.connecting:
+        return '连接中…';
+      case BaseConnectionState.connected:
+        return '已连接';
+      case BaseConnectionState.error:
+        return '错误';
+    }
+  }
+
+  /// 弹出系统已配对设备列表，选择一个连接。
+  Future<void> _showDevicePicker() async {
+    _addLocalLog('SYS', '正在获取已配对设备…');
+    final devices = await _base.getBondedDevices();
+    if (!mounted) return;
+    if (devices.isEmpty) {
+      _addLocalLog('ERR', '没有已配对设备。请先在系统蓝牙设置里配对底座(XBot-Base)。');
+      showCupertinoDialog(
+        context: context,
+        builder: (_) => CupertinoAlertDialog(
+          title: const Text('未发现已配对设备',
+              style: TextStyle(decoration: TextDecoration.none)),
+          content: const Text(
+              '经典蓝牙需要先在系统蓝牙设置里配对底座。\n\n'
+              '1. 打开系统「设置 → 蓝牙」\n'
+              '2. 找到名为 XBot-Base 的设备\n'
+              '3. 点击配对（PIN 默认 1234，SSP 直接确认）\n'
+              '4. 配对完成后回到此处选择连接',
+              style: TextStyle(decoration: TextDecoration.none)),
+          actions: [
+            CupertinoDialogAction(
+              child: const Text('知道了',
+                  style: TextStyle(decoration: TextDecoration.none)),
+              onPressed: () => Navigator.pop(context),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
+    // 弹底部选择列表
+    final selected = await showCupertinoModalPopup<BluetoothDevice>(
+      context: context,
+      builder: (_) => CupertinoActionSheet(
+        title: const Text('选择底座设备',
+            style: TextStyle(decoration: TextDecoration.none)),
+        actions: devices
+            .map((d) => CupertinoActionSheetAction(
+                  onPressed: () => Navigator.pop(context, d),
+                  child: Text('${d.name ?? '(未命名)'}\n${d.address}',
+                      style: const TextStyle(decoration: TextDecoration.none)),
+                ))
+            .toList(),
+        cancelButton: CupertinoActionSheetAction(
+          isDefaultAction: true,
+          onPressed: () => Navigator.pop(context),
+          child: const Text('取消',
+              style: TextStyle(decoration: TextDecoration.none)),
+        ),
+      ),
+    );
+    if (selected == null) return;
+    _addLocalLog('SYS', '正在连接 ${selected.name ?? selected.address}…');
+    final ok = await _base.connect(selected);
+    if (!mounted) return;
+    _addLocalLog(ok ? 'SYS' : 'ERR',
+        ok ? '连接成功' : '连接失败：${_base.errorMessage}');
+  }
+
+  void _addLocalLog(String direction, String message) {
+    _onWireLog(WireLog(DateTime.now(), direction, message));
+  }
+
   // —— 手动控制 ——
 
-  Widget _buildManualControlSection() {
+  Widget _buildManualControlSection(BaseStatus status) {
+    final connected = _base.isConnected;
     return _Section(
       title: '手动控制',
       child: Column(
@@ -355,25 +333,22 @@ class _BaseDebugScreenState extends State<BaseDebugScreen> {
             value: _targetYaw,
             min: -90,
             max: 90,
-            onChanged: _connected
-                ? (v) => setState(() => _targetYaw = v)
-                : null,
+            onChanged: connected ? (v) => setState(() => _targetYaw = v) : null,
           ),
           _AngleSlider(
             label: 'Pitch (垂直)',
             value: _targetPitch,
             min: -30,
             max: 30,
-            onChanged: _connected
-                ? (v) => setState(() => _targetPitch = v)
-                : null,
+            onChanged:
+                connected ? (v) => setState(() => _targetPitch = v) : null,
           ),
           _AngleSlider(
             label: 'Roll (横滚)',
             value: _targetRoll,
             min: -45,
             max: 45,
-            onChanged: _connected && _dof >= 3
+            onChanged: connected && status.dof >= 3
                 ? (v) => setState(() => _targetRoll = v)
                 : null,
           ),
@@ -383,8 +358,8 @@ class _BaseDebugScreenState extends State<BaseDebugScreen> {
               Expanded(
                 child: CupertinoButton.filled(
                   padding: const EdgeInsets.symmetric(vertical: 10),
-                  onPressed: _connected
-                      ? () => _sendCommand('move', {
+                  onPressed: connected
+                      ? () => _send('move', {
                             'yaw': _targetYaw,
                             'pitch': _targetPitch,
                             'roll': _targetRoll,
@@ -399,9 +374,9 @@ class _BaseDebugScreenState extends State<BaseDebugScreen> {
                 child: CupertinoButton(
                   padding: const EdgeInsets.symmetric(vertical: 10),
                   color: AppTheme.groupedBackground,
-                  onPressed: _connected
+                  onPressed: connected
                       ? () {
-                          _sendCommand('home', {});
+                          _send('home', {});
                           setState(() {
                             _targetYaw = 0;
                             _targetPitch = 0;
@@ -420,9 +395,7 @@ class _BaseDebugScreenState extends State<BaseDebugScreen> {
                 child: CupertinoButton(
                   padding: const EdgeInsets.symmetric(vertical: 10),
                   color: AppTheme.accentRed,
-                  onPressed: _connected
-                      ? () => _sendCommand('stop', {})
-                      : null,
+                  onPressed: connected ? () => _send('stop', {}) : null,
                   child: const Text('停止',
                       style: TextStyle(decoration: TextDecoration.none)),
                 ),
@@ -437,63 +410,37 @@ class _BaseDebugScreenState extends State<BaseDebugScreen> {
   // —— 测试命令 ——
 
   Widget _buildTestCommandsSection() {
+    final connected = _base.isConnected;
     return _Section(
       title: '测试命令',
       child: Wrap(
         spacing: 8,
         runSpacing: 8,
         children: [
+          _CmdButton(label: 'IDLE', enabled: connected,
+              onPressed: () => _send('set_mode', {'mode': 'idle'})),
+          _CmdButton(label: 'TRACK', enabled: connected,
+              onPressed: () => _send('set_mode', {'mode': 'track'})),
+          _CmdButton(label: 'MANUAL', enabled: connected,
+              onPressed: () => _send('set_mode', {'mode': 'manual'})),
+          _CmdButton(label: 'SLEEP', enabled: connected,
+              onPressed: () => _send('set_mode', {'mode': 'sleep'})),
+          _CmdButton(label: 'DEMO', enabled: connected,
+              onPressed: () => _send('set_mode', {'mode': 'demo'})),
           _CmdButton(
-            label: 'IDLE',
-            enabled: _connected,
-            onPressed: () => _sendCommand('set_mode', {'mode': 'idle'}),
-          ),
+              label: '速度 50%',
+              enabled: connected,
+              onPressed: () => _send('set_speed',
+                  {'yaw_speed': 50, 'pitch_speed': 50})),
           _CmdButton(
-            label: 'TRACK',
-            enabled: _connected,
-            onPressed: () => _sendCommand('set_mode', {'mode': 'track'}),
-          ),
-          _CmdButton(
-            label: 'MANUAL',
-            enabled: _connected,
-            onPressed: () => _sendCommand('set_mode', {'mode': 'manual'}),
-          ),
-          _CmdButton(
-            label: 'SLEEP',
-            enabled: _connected,
-            onPressed: () => _sendCommand('set_mode', {'mode': 'sleep'}),
-          ),
-          _CmdButton(
-            label: 'DEMO',
-            enabled: _connected,
-            onPressed: () => _sendCommand('set_mode', {'mode': 'demo'}),
-          ),
-          _CmdButton(
-            label: '速度 50%',
-            enabled: _connected,
-            onPressed: () => _sendCommand('set_speed', {
-              'yaw_speed': 50,
-              'pitch_speed': 50,
-            }),
-          ),
-          _CmdButton(
-            label: '速度 100%',
-            enabled: _connected,
-            onPressed: () => _sendCommand('set_speed', {
-              'yaw_speed': 100,
-              'pitch_speed': 100,
-            }),
-          ),
-          _CmdButton(
-            label: '查询状态',
-            enabled: _connected,
-            onPressed: () => _sendCommand('get_status', {}),
-          ),
-          _CmdButton(
-            label: '查询版本',
-            enabled: _connected,
-            onPressed: () => _sendCommand('get_version', {}),
-          ),
+              label: '速度 100%',
+              enabled: connected,
+              onPressed: () => _send('set_speed',
+                  {'yaw_speed': 100, 'pitch_speed': 100})),
+          _CmdButton(label: '查询状态', enabled: connected,
+              onPressed: () => _send('get_status', {})),
+          _CmdButton(label: '查询版本', enabled: connected,
+              onPressed: () => _send('get_version', {})),
         ],
       ),
     );
@@ -580,10 +527,11 @@ class _BaseDebugScreenState extends State<BaseDebugScreen> {
         title: const Text('底座控制调试',
             style: TextStyle(decoration: TextDecoration.none)),
         content: const Text(
-          '此页面用于调试底座通讯协议。\n\n'
-          '当前为 Mock 模式，不实际连接设备。\n'
-          '所有指令仅记录到日志中。\n\n'
-          '后续版本将支持 BLE/WiFi 连接。',
+          '此页面通过经典蓝牙 SPP 与开发板底座通讯。\n\n'
+          '1. 先在系统蓝牙设置配对底座 XBot-Base（PIN 1234）\n'
+          '2. 点「选择设备连接」建立 SPP 通道\n'
+          '3. 发送指令，指令与回包会记录到日志\n\n'
+          '帧格式：单行 JSON + 换行符。',
           style: TextStyle(decoration: TextDecoration.none),
         ),
         actions: [
@@ -630,7 +578,7 @@ class _Section extends StatelessWidget {
                 ),
               ),
               const Spacer(),
-              if (trailing != null) trailing!,
+              ?trailing,
             ],
           ),
           const SizedBox(height: 8),
@@ -793,7 +741,7 @@ class _LogEntry {
   });
 
   final DateTime time;
-  final String direction; // TX / RX / SYS
+  final String direction; // TX / RX / SYS / ERR
   final String message;
 
   String get timeStr {

@@ -20,6 +20,7 @@ import '../services/hand_engine.dart';
 import '../services/mlkit_face_engine.dart';
 import '../services/person_repository.dart';
 import '../services/static_server.dart';
+import '../services/base/base_service.dart';
 import '../services/voice/llm_config.dart';
 import '../services/voice/pophie_client.dart';
 import '../services/voice/pophie_config.dart';
@@ -86,6 +87,7 @@ class AppController extends ChangeNotifier {
   final PersonRepository personRepository = PersonRepository();
   final DisplaySettings settings = DisplaySettings();
   final StaticServer staticServer = StaticServer();
+  final BaseService baseService = BaseService();
   final VoiceAssistant voiceAssistant = VoiceAssistant();
   /// LLM 服务配置(DeepSeek 预设,可在设置页修改并持久化)。
   final LlmConfigStore llmConfigStore = LlmConfigStore();
@@ -108,9 +110,16 @@ class AppController extends ChangeNotifier {
     // 设置页各语音开关的启用状态,需冒泡到 AppController 才能让 ListenableBuilder
     // 重建(设置页只监听 AppController)。
     voiceAssistant.addListener(_onVoiceAssistantChanged);
+    // 转发 baseService 的连接/状态变化到 AppController,供调试页 ListenableBuilder 重建。
+    baseService.addListener(_onBaseServiceChanged);
   }
 
   void _onVoiceAssistantChanged() {
+    if (_disposed) return;
+    notifyListeners();
+  }
+
+  void _onBaseServiceChanged() {
     if (_disposed) return;
     notifyListeners();
   }
@@ -766,6 +775,8 @@ class AppController extends ChangeNotifier {
     faceRecognition.dispose();
     voiceAssistant.removeListener(_onVoiceAssistantChanged);
     voiceAssistant.dispose();
+    baseService.removeListener(_onBaseServiceChanged);
+    baseService.dispose();
     staticServer.stop();
     super.dispose();
   }
