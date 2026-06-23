@@ -1,5 +1,6 @@
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../core/app_controller.dart';
 import '../../core/app_scope.dart';
@@ -57,6 +58,8 @@ class _OnboardingScreenState extends State<OnboardingScreen>
     _pageController.dispose();
     _nicknameController.dispose();
     _robotNameController.dispose();
+    // 离开向导时确保恢复沉浸式（避免输入态残留影响主界面）。
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     super.dispose();
   }
 
@@ -385,6 +388,7 @@ class _OnboardingScreenState extends State<OnboardingScreen>
 
   // ===== Step 1: 关于你 =====
   Widget _buildAboutYou() {
+    final nickname = _nicknameController.text.trim();
     return SingleChildScrollView(
       padding: const EdgeInsets.symmetric(horizontal: 48, vertical: 24),
       child: Column(
@@ -395,11 +399,12 @@ class _OnboardingScreenState extends State<OnboardingScreen>
           _subtitle('告诉我怎么称呼你（必填）'),
           const SizedBox(height: 20),
           _sectionCard([
-            _textRow(
+            // 称呼：点击弹窗输入（弹窗内输入框不触发 OPPO 安全键盘）。
+            _pickerRow(
               label: '称呼',
-              controller: _nicknameController,
+              value: nickname,
               hint: '想让我怎么叫你',
-              onChanged: (_) => setState(() {}),
+              onTap: () => _editNickname(),
             ),
             _rowDivider(),
             _pickerRow(
@@ -423,6 +428,45 @@ class _OnboardingScreenState extends State<OnboardingScreen>
     );
   }
 
+  /// 称呼弹窗编辑（参照唤醒词的 CupertinoAlertDialog 模式）。
+  /// OPPO 安全键盘只对直接铺页面的输入框触发，弹窗内的输入框不受影响。
+  void _editNickname() {
+    final controller = TextEditingController(text: _nicknameController.text);
+    showCupertinoModalPopup<void>(
+      context: context,
+      builder: (ctx) => CupertinoAlertDialog(
+        title: const Text('你的称呼'),
+        content: Padding(
+          padding: const EdgeInsets.only(top: 8),
+          child: CupertinoTextField(
+            controller: controller,
+            autofocus: true,
+            placeholder: '想让我怎么叫你',
+            textAlign: TextAlign.center,
+            maxLength: 16,
+          ),
+        ),
+        actions: [
+          CupertinoDialogAction(
+            isDefaultAction: true,
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('取消',
+                style: TextStyle(decoration: TextDecoration.none)),
+          ),
+          CupertinoDialogAction(
+            onPressed: () {
+              _nicknameController.text = controller.text;
+              setState(() {});
+              Navigator.of(ctx).pop();
+            },
+            child: const Text('保存',
+                style: TextStyle(decoration: TextDecoration.none)),
+          ),
+        ],
+      ),
+    );
+  }
+
   // ===== Step 2: 机器人昵称 =====
   Widget _buildRobotName() {
     return SingleChildScrollView(
@@ -435,11 +479,12 @@ class _OnboardingScreenState extends State<OnboardingScreen>
           _subtitle('这是你对我的称呼（默认「狗蛋」）'),
           const SizedBox(height: 20),
           _sectionCard([
-            _textRow(
+            // 名字：点击弹窗输入（弹窗内不触发安全键盘）。
+            _pickerRow(
               label: '名字',
-              controller: _robotNameController,
+              value: _robotNameController.text.trim(),
               hint: '狗蛋',
-              onChanged: (_) => setState(() {}),
+              onTap: () => _editRobotName(),
             ),
           ]),
           const SizedBox(height: 28),
@@ -455,6 +500,44 @@ class _OnboardingScreenState extends State<OnboardingScreen>
               textAlign: TextAlign.center,
               style: const TextStyle(color: AppTheme.label, fontSize: 15, height: 1.5),
             ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 机器人名字弹窗编辑（参照唤醒词模式，避开 OPPO 安全键盘）。
+  void _editRobotName() {
+    final controller = TextEditingController(text: _robotNameController.text);
+    showCupertinoModalPopup<void>(
+      context: context,
+      builder: (ctx) => CupertinoAlertDialog(
+        title: const Text('给它起个名字'),
+        content: Padding(
+          padding: const EdgeInsets.only(top: 8),
+          child: CupertinoTextField(
+            controller: controller,
+            autofocus: true,
+            placeholder: '狗蛋',
+            textAlign: TextAlign.center,
+            maxLength: 16,
+          ),
+        ),
+        actions: [
+          CupertinoDialogAction(
+            isDefaultAction: true,
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('取消',
+                style: TextStyle(decoration: TextDecoration.none)),
+          ),
+          CupertinoDialogAction(
+            onPressed: () {
+              _robotNameController.text = controller.text;
+              setState(() {});
+              Navigator.of(ctx).pop();
+            },
+            child: const Text('保存',
+                style: TextStyle(decoration: TextDecoration.none)),
           ),
         ],
       ),
@@ -761,45 +844,6 @@ class _OnboardingScreenState extends State<OnboardingScreen>
         padding: EdgeInsets.only(left: 16),
         child: Divider(height: 0.5, thickness: 0.5, color: Color(0x5C545458)),
       );
-
-  Widget _textRow({
-    required String label,
-    required TextEditingController controller,
-    required String hint,
-    ValueChanged<String>? onChanged,
-  }) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-      child: Row(
-        children: [
-          SizedBox(
-              width: 64,
-              child: Text(label,
-                  style: const TextStyle(color: AppTheme.label, fontSize: 16))),
-          Expanded(
-            child: CupertinoTextField(
-              controller: controller,
-              onChanged: onChanged,
-              textAlign: TextAlign.right,
-              style: const TextStyle(
-                  color: AppTheme.label,
-                  fontSize: 16,
-                  decoration: TextDecoration.none),
-              cursorColor: AppTheme.accent,
-              padding: EdgeInsets.zero,
-              decoration: const BoxDecoration(),
-              placeholder: hint,
-              placeholderStyle: const TextStyle(
-                  color: Color(0x99EBEBF5), fontSize: 16),
-              // 关闭拼写检查/自动纠正，避免中文或昵称被标红/双下划线。
-              enableSuggestions: false,
-              autocorrect: false,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 
   Widget _pickerRow({
     required String label,
