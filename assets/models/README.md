@@ -41,3 +41,30 @@ assets/models/mobilefacenet.tflite
 ## 手势模型
 
 手势（hand_detection）所需的 TFLite 模型已由插件内置打包，无需手动放置。
+
+## 物体识别模型（YOLO11，由插件自动管理）
+
+物体识别使用官方 `ultralytics_yolo` 插件 + **YOLO11**（COCO 80 类，含 cup /
+bottle / cell phone / book / laptop / remote / banana 等常见手持物体）。
+
+模型**无需手动放入本目录**：`lib/services/object_engine.dart` 里 `modelPath`
+设为官方 ID `yolo11n`，插件会在首次运行时**自动下载并缓存**（因此首次启动需
+联网；之后离线可用）。类名中文显示由 `object_engine.dart` 的 `_cocoZh` 映射。
+
+### 改为完全离线（可选，推荐用于出厂固件）
+
+若设备首次启动无网络，可把导出的模型随包提供：
+
+1. 用 Ultralytics 导出 TFLite：`yolo export model=yolo11n.pt format=tflite`
+   （Android 用 `.tflite`；iOS 用 Core ML `.mlpackage`）。
+2. 放到 `assets/models/yolo11n.tflite`，并在 `pubspec.yaml` 的 assets 已含
+   `assets/models/`（无需新增）。
+3. 把 `object_engine.dart` 的 `_modelPath` 改为 `assets/models/yolo11n.tflite`。
+
+### 想只认少数自定义物体 / 更高精度
+
+用自有数据训练 YOLO11（`yolo train ...`）后按上面方式导出替换即可，
+`_cocoZh` 按你的类名补充中文映射。
+
+若模型加载失败（如首次无网络），App 仍正常运行：物体识别停用，状态页提示
+「物体识别模型加载失败」，人脸/表情/手势/身份均不受影响。

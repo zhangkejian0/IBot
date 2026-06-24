@@ -43,6 +43,11 @@ dependencies:
   hand_detection: ^3.1.1
   kwon_mediapipe_landmarker: ^0.0.3
   google_mlkit_face_detection: ^0.13.2
+  # 物体识别:官方 Ultralytics YOLO 插件(YOLO11)。推理在原生线程执行,
+  # 不占用 Dart 主 isolate;COCO 80 类含 cup/bottle/cell phone/book 等常见物体。
+  # 采用单图 predict 路径(接现有相机帧管线),JPEG 编码放 Isolate,物体检测
+  # 后台节流执行,不阻塞人脸/注视帧循环。模型 'yolo11n' 由插件自动下载并缓存。
+  ultralytics_yolo: ^0.6.0
   flutter_litert: ^2.8.3
   webview_flutter: ^4.13.0
 

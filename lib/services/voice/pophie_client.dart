@@ -21,18 +21,36 @@ class PophiePerception {
   /// 抚摸类物理交互，如「摸头」「拥抱」。
   final String? touch;
 
+  /// 端侧物体识别到的物体名列表（去重、按显著度排序），如 ['水杯','手机']。
+  /// 进入大模型上下文，供「画面里有什么」类提问参考。
+  final List<String>? objects;
+
+  /// 当前被手持的物体名（结合手部+物体检测的空间叠加），如 '水杯'。
+  /// 用于回答「我手里拿着什么」。
+  final String? heldObject;
+
+  /// 自然语言场景描述（端侧据感知拼装），如 '用户右手拿着水杯'。
+  /// 最利于大模型直接理解；与结构化字段同时携带，互为补充。
+  final String? scene;
+
   const PophiePerception({
     this.facialExpression,
     this.identity,
     this.gestureType,
     this.touch,
+    this.objects,
+    this.heldObject,
+    this.scene,
   });
 
   bool get isEmpty =>
       (facialExpression == null || facialExpression!.isEmpty) &&
       (identity == null || identity!.isEmpty) &&
       (gestureType == null || gestureType!.isEmpty) &&
-      (touch == null || touch!.isEmpty);
+      (touch == null || touch!.isEmpty) &&
+      (objects == null || objects!.isEmpty) &&
+      (heldObject == null || heldObject!.isEmpty) &&
+      (scene == null || scene!.isEmpty);
 
   Map<String, dynamic> toJson() {
     final m = <String, dynamic>{};
@@ -44,6 +62,11 @@ class PophiePerception {
       m['gesture'] = {'type': gestureType};
     }
     if (touch != null && touch!.isNotEmpty) m['touch'] = touch;
+    if (objects != null && objects!.isNotEmpty) m['objects'] = objects;
+    if (heldObject != null && heldObject!.isNotEmpty) {
+      m['held_object'] = heldObject;
+    }
+    if (scene != null && scene!.isNotEmpty) m['scene'] = scene;
     return m;
   }
 }

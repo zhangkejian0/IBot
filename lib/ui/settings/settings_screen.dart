@@ -226,6 +226,16 @@ class SettingsScreen extends StatelessWidget {
                       onChanged: (v) =>
                           controller.updateSettings(() => s.handEnabled = v),
                     ),
+                    _SwitchTile(
+                      icon: CupertinoIcons.cube_box_fill,
+                      color: AppTheme.accentTeal,
+                      label: '物体识别',
+                      value: s.objectEnabled,
+                      onChanged: controller.objectEngine.isInitialized
+                          ? (v) => controller
+                              .updateSettings(() => s.objectEnabled = v)
+                          : null,
+                    ),
                   ],
                 ),
 
@@ -294,6 +304,14 @@ class SettingsScreen extends StatelessWidget {
                       value: s.showIdentity,
                       onChanged: (v) =>
                           controller.updateSettings(() => s.showIdentity = v),
+                    ),
+                    _SwitchTile(
+                      icon: CupertinoIcons.cube_box,
+                      color: AppTheme.accentTeal,
+                      label: '物体框',
+                      value: s.showObject,
+                      onChanged: (v) =>
+                          controller.updateSettings(() => s.showObject = v),
                     ),
                     _SwitchTile(
                       icon: CupertinoIcons.arrow_left_right,

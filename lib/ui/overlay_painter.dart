@@ -44,12 +44,41 @@ class DetectionOverlayPainter extends CustomPainter {
       _paintZoneGrid(canvas, size);
     }
 
+    if (settings.showObject) {
+      for (final obj in result.objects) {
+        _paintObject(canvas, size, obj);
+      }
+    }
     for (final face in result.faces) {
       _paintFace(canvas, size, face);
     }
     for (final hand in result.hands) {
       _paintHand(canvas, size, hand);
     }
+  }
+
+  void _paintObject(Canvas canvas, Size size, ObjectOverlay obj) {
+    final box = _mapRect(obj.boundingBox, size);
+    // 手持物体高亮（暖色），其余物体用青色，便于区分「我手里拿着的」。
+    final color = obj.heldByHand ? AppTheme.accentOrange : AppTheme.accentTeal;
+    final boxPaint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = obj.heldByHand ? 3 : 2;
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(box, const Radius.circular(8)),
+      boxPaint,
+    );
+
+    final label = obj.label ?? '物体';
+    final conf = obj.confidence > 0 ? '  ${(obj.confidence * 100).round()}%' : '';
+    final prefix = obj.heldByHand ? '✋ ' : '📦 ';
+    _paintChips(
+      canvas,
+      [_Chip('$prefix$label$conf', color)],
+      Offset(box.left, box.top - 6),
+      above: true,
+    );
   }
 
   /// 绘制区域网格

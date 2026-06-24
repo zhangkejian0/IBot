@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:math' as math;
 import 'dart:ui';
 
@@ -19,6 +20,7 @@ import '../services/face_engine.dart';
 import '../services/face_recognition_service.dart';
 import '../services/hand_engine.dart';
 import '../services/mlkit_face_engine.dart';
+import '../services/object_engine.dart';
 import '../services/owner_profile_store.dart';
 import '../services/person_repository.dart';
 import '../services/static_server.dart';
@@ -37,6 +39,7 @@ class DisplaySettings {
   bool faceEnabled = true;
   bool handEnabled = true;
   bool identityEnabled = true;
+  bool objectEnabled = true;
 
   // 调试模式：开启时显示摄像头的人脸/手势识别画面，关闭时显示虚拟宠物网页。
   bool debugMode = false;
@@ -49,6 +52,7 @@ class DisplaySettings {
   bool showExpression = true;
   bool showGesture = true;
   bool showIdentity = true;
+  bool showObject = true;
   bool mirrorFrontCamera = true;
 
   // —— 底座控制 ——
@@ -85,6 +89,7 @@ class AppController extends ChangeNotifier {
   final FaceEngine faceEngine = FaceEngine();
   final HandEngine handEngine = HandEngine();
   final MlKitFaceEngine mlkitFaceEngine = MlKitFaceEngine();
+  final ObjectEngine objectEngine = ObjectEngine();
   final FaceRecognitionService faceRecognition = FaceRecognitionService();
   final PersonRepository personRepository = PersonRepository();
   final OwnerProfileStore ownerProfileStore = OwnerProfileStore();
@@ -164,6 +169,20 @@ class AppController extends ChangeNotifier {
   DateTime _lastDetectRun = DateTime.fromMillisecondsSinceEpoch(0);
   static const Duration _detectInterval = Duration(milliseconds: 200);
 
+  // 物体检测独立节流:物体移动远比注视/表情慢,没必要每个检测帧都跑。
+  // 用更长的间隔(默认 500ms ≈ 2fps)进一步降低原生调用频率与每帧 RGBA 取字节
+  // 的开销;两次物体检测之间复用上一帧 objects(覆盖层/感知不闪烁)。
+  DateTime _lastObjectRun = DateTime.fromMillisecondsSinceEpoch(0);
+  // YOLO 比 ML Kit 重,且走 JPEG 往返,节流放宽到 700ms(~1.4fps),配合后台执行。
+  static const Duration _objectInterval = Duration(milliseconds: 700);
+  List<ObjectOverlay> _lastObjects = const [];
+  // 后台物体检测是否在跑:避免上一次未完成又触发,导致任务堆积。
+  bool _objectBusy = false;
+
+  // 「手持物体」判定:物体框与手框的中心距离阈值(归一化空间,0..1)。
+  // 手部 landmarks 包围盒通常较紧,放宽到 0.22 兼顾「手握住物体边缘」的情形。
+  static const double _heldDistance = 0.22;
+
   /// 按位置追踪的「身份 slot」：多人脸时为每张脸维持一个稳定身份，避免逐帧
   /// 串脸。每个 slot 记录归一化中心点、命中身份及其最后可见时刻。TTL 内即使
   /// 这一帧未跑识别（节流中），也能凭 slot 给该位置的人脸续上身份。
@@ -226,6 +245,9 @@ class AppController extends ChangeNotifier {
 
       _setLoading(0.7, '加载手势识别模型…');
       await handEngine.initialize();
+
+      _setLoading(0.78, '加载物体识别模型…');
+      await objectEngine.initialize();
 
       _setLoading(0.85, '加载身份识别模型…');
       await faceRecognition.initialize();
@@ -340,10 +362,16 @@ class AppController extends ChangeNotifier {
       final identityDue = settings.identityEnabled &&
           faceRecognition.isAvailable &&
           DateTime.now().difference(_lastIdentityRun) >= _identityInterval;
-      // MLKit 检测与身份识别/录入都用同一旋转基准(_detectionRotation)摆正图像，
-      // 二者旋转角一致 → 算一次共享。仅当确实需要时才算（惰性）。
-      final needsUpright =
-          settings.faceEnabled || identityDue || needCapture;
+      // 物体检测独立节流：到期才跑（间隔比检测帧更长，进一步省原生调用）。
+      final objectDue = settings.objectEnabled &&
+          objectEngine.isInitialized &&
+          DateTime.now().difference(_lastObjectRun) >= _objectInterval;
+      // MLKit 人脸/物体检测与身份识别/录入都用同一旋转基准(_detectionRotation)
+      // 摆正图像，旋转角一致 → 算一次共享。仅当确实需要时才算（惰性）。
+      final needsUpright = settings.faceEnabled ||
+          identityDue ||
+          needCapture ||
+          objectDue;
       img.Image? upright;
       if (needsUpright) {
         try {
@@ -351,6 +379,16 @@ class AppController extends ChangeNotifier {
         } catch (e, st) {
           debugPrint('[Frame] toUprightImage error: $e\n$st');
         }
+      }
+
+      // ML Kit 人脸与物体引擎吃的都是「摆正后的 RGBA 字节」：同帧只取一次字节，
+      // 两个引擎共享，避免重复的 getBytes 分配（降低主 isolate 负载/卡顿）。
+      Uint8List? uprightRgba;
+      int upW = 0, upH = 0;
+      if (upright != null && (settings.faceEnabled || objectDue)) {
+        upW = upright.width;
+        upH = upright.height;
+        uprightRgba = upright.getBytes(order: img.ChannelOrder.rgba);
       }
 
       final faceFuture = settings.faceEnabled
@@ -361,14 +399,8 @@ class AppController extends ChangeNotifier {
               deviceOrientation: _deviceOrientation,
             )
           : Future<FaceOverlay?>.value(null);
-      final mlkitFuture = settings.faceEnabled
-          ? mlkitFaceEngine.process(
-              image,
-              sensorRotation: detectionRotation,
-              isFrontCamera: _isFrontCamera,
-              deviceOrientation: _deviceOrientation,
-              upright: upright, // 复用上面算好的摆正图，不再重复 YUV 转换
-            )
+      final mlkitFuture = settings.faceEnabled && uprightRgba != null
+          ? mlkitFaceEngine.processRgba(uprightRgba, upW, upH)
           : Future<List<Rect>>.value(const []);
       final handFuture = settings.handEnabled
           ? handEngine.process(
@@ -378,6 +410,17 @@ class AppController extends ChangeNotifier {
               deviceOrientation: _deviceOrientation,
             )
           : Future<List<HandOverlay>>.value(const []);
+
+      // 物体检测（YOLO11）：后台 fire-and-forget,**不**并入本帧 await。
+      // 原因:predict 走「JPEG 编码 + 原生解码 + 推理」,耗时远高于人脸/手势;
+      // 若 await 进本帧会把注视/表情每次拖慢数百毫秒。这里只在到期且空闲时
+      // 触发一次后台任务,完成后更新 _lastObjects 并 notifyListeners。本帧结果
+      // 直接复用 _lastObjects（覆盖层/感知不闪烁,只是物体刷新频率为 ~1-2fps）。
+      if (objectDue && !_objectBusy && uprightRgba != null) {
+        _objectBusy = true;
+        _lastObjectRun = DateTime.now();
+        unawaited(_runObjectDetection(uprightRgba, upW, upH));
+      }
 
       final mediapipeFace = await faceFuture; // 主脸：478 点 + 表情
       final mlkitBoxes = await mlkitFuture; // 多脸归一化框（主脸在前）
@@ -481,13 +524,77 @@ class AppController extends ChangeNotifier {
               ));
       }
 
+      // 手持物体推理：把本帧物体框与手框做就近匹配，命中者标记 heldByHand。
+      // 用于回答「我手里拿着什么」——结合手部检测 + 物体识别的端侧空间叠加。
+      // 关闭物体识别时清空缓存并输出空列表，避免旧物体框残留。
+      if (!settings.objectEnabled) _lastObjects = const [];
+      final objects = settings.objectEnabled
+          ? _markHeldObjects(_lastObjects, handResult)
+          : const <ObjectOverlay>[];
+
       final mirror = _effectiveMirrorOverlay();
-      _result =
-          DetectionResult(faces: resultFaces, hands: handResult, mirror: mirror);
+      _result = DetectionResult(
+        faces: resultFaces,
+        hands: handResult,
+        objects: objects,
+        mirror: mirror,
+      );
       if (!_disposed) notifyListeners();
     } catch (e) {
       debugPrint('processFrame error: $e');
     }
+  }
+
+  /// 后台执行一次 YOLO 物体检测：在 Isolate 里把摆正图编码为 JPEG（重计算,
+  /// 不占主 isolate）,再交给原生 YOLO 推理；完成后更新 _lastObjects 并通知 UI。
+  /// 全程不阻塞 _processFrame 的人脸/注视主循环。
+  Future<void> _runObjectDetection(Uint8List rgba, int w, int h) async {
+    try {
+      if (w <= 0 || h <= 0) return;
+      final jpg = await Isolate.run(() => _encodeJpgFromRgba(rgba, w, h));
+      if (_disposed) return;
+      final objs = await objectEngine.predictJpeg(jpg, w, h);
+      if (_disposed) return;
+      _lastObjects = objs;
+      notifyListeners();
+    } catch (e) {
+      debugPrint('[Frame] object detection error: $e');
+    } finally {
+      _objectBusy = false;
+    }
+  }
+
+  /// 把物体标记为「正被手持」：物体框与任一手框重叠（IoU>0）或中心距离够近
+  /// 即判定为手持。返回带 heldByHand 标记的新物体列表（不改原对象）。
+  List<ObjectOverlay> _markHeldObjects(
+    List<ObjectOverlay> objects,
+    List<HandOverlay> hands,
+  ) {
+    if (objects.isEmpty || hands.isEmpty) return objects;
+    return objects.map((o) {
+      var held = false;
+      for (final h in hands) {
+        final overlap = _iou(o.boundingBox, h.boundingBox) > 0 ||
+            o.boundingBox.overlaps(h.boundingBox);
+        final near = _dist(o.center, h.boundingBox.center) < _heldDistance;
+        if (overlap || near) {
+          held = true;
+          break;
+        }
+      }
+      return held ? o.copyWith(heldByHand: true) : o;
+    }).toList(growable: false);
+  }
+
+  /// 把归一化中心点量化成「左/中/右·上/中/下」的大概位置描述（中文）。
+  /// 前置镜像生效时水平方向取反，使「左右」与用户自拍视角一致。
+  String _locationLabel(Offset center) {
+    var x = center.dx;
+    if (_effectiveMirrorOverlay()) x = 1 - x;
+    final h = x < 0.34 ? '左' : (x > 0.66 ? '右' : '中');
+    final v = center.dy < 0.34 ? '上' : (center.dy > 0.66 ? '下' : '中');
+    if (h == '中' && v == '中') return '画面中央';
+    return '画面$v${h == '中' ? '' : h}方';
   }
 
   /// 两个归一化矩形的交并比。
@@ -661,7 +768,7 @@ class AppController extends ChangeNotifier {
     };
   }
 
-  /// 由当前识别结果构造 Pophie 感知上下文(表情/身份/手势)。
+  /// 由当前识别结果构造 Pophie 感知上下文(表情/身份/手势/物体)。
   PophiePerception _buildPerception() {
     final face = _result.face;
     final expr = face != null ? _expressionApiKey(face.expression.expression) : null;
@@ -670,11 +777,48 @@ class AppController extends ChangeNotifier {
     if (_result.hands.isNotEmpty) {
       gesture = _gestureApiKey(_result.hands.first.gesture);
     }
+
+    // 物体感知：去重收集有标签的物体名；提取手持物体；拼装自然语言场景。
+    final objects = _result.objects;
+    final names = <String>[];
+    for (final o in objects) {
+      final l = o.label;
+      if (l != null && l.isNotEmpty && !names.contains(l)) names.add(l);
+    }
+    final held = _result.heldObject;
+    final heldName = held?.label;
+    final scene = _buildSceneDescription(
+      heldObject: held,
+      objectNames: names,
+      identity: identity,
+    );
+
     return PophiePerception(
       facialExpression: expr,
       identity: identity,
       gestureType: gesture,
+      objects: names.isEmpty ? null : names,
+      heldObject: (heldName != null && heldName.isNotEmpty) ? heldName : null,
+      scene: scene,
     );
+  }
+
+  /// 拼装端侧自然语言场景描述（最利于大模型理解「我手里拿着什么」）。
+  /// 无任何物体信息时返回 null（不污染感知上下文）。
+  String? _buildSceneDescription({
+    required ObjectOverlay? heldObject,
+    required List<String> objectNames,
+    required String? identity,
+  }) {
+    final who = (identity != null && identity.isNotEmpty) ? identity : '用户';
+    if (heldObject?.label != null && heldObject!.label!.isNotEmpty) {
+      final loc = _locationLabel(heldObject.center);
+      return '$who手里拿着${heldObject.label}（位于$loc）';
+    }
+    if (objectNames.isNotEmpty) {
+      return '画面中可见：${objectNames.join('、')}';
+    }
+    return null;
   }
 
   /// 当前用户身份(认识我命中的主脸人名),作为 user_id 回显/溯源。
@@ -873,6 +1017,7 @@ class AppController extends ChangeNotifier {
     faceEngine.dispose();
     handEngine.dispose();
     mlkitFaceEngine.dispose();
+    objectEngine.dispose();
     faceRecognition.dispose();
     voiceAssistant.removeListener(_onVoiceAssistantChanged);
     voiceAssistant.dispose();
@@ -899,4 +1044,19 @@ class _Pair {
   final _IdentitySlot slot;
   final int faceIndex;
   const _Pair(this.dist, this.box, this.slot, {this.faceIndex = -1});
+}
+
+/// 在 Isolate 中把摆正图的 RGBA 字节编码为 JPEG。
+///
+/// YOLO 插件的单图 predict 需要编码图像字节,而 `img.encodeJpg` 是 CPU 密集的
+/// 主 isolate 阻塞点。放到 [Isolate.run] 里执行,彻底避免编码引发的掉帧。
+/// 顶层函数 + 仅传可发送的 [rgba]/[w]/[h],满足 isolate 入参约束。
+Uint8List _encodeJpgFromRgba(Uint8List rgba, int w, int h) {
+  final image = img.Image.fromBytes(
+    width: w,
+    height: h,
+    bytes: rgba.buffer,
+    order: img.ChannelOrder.rgba,
+  );
+  return Uint8List.fromList(img.encodeJpg(image, quality: 85));
 }

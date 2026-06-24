@@ -481,6 +481,40 @@ class _StatusPanel extends StatelessWidget {
               : AppTheme.accentOrange,
         ));
 
+        // 物体识别：优先展示手持物体，其次列出可见物体名。
+        final held = r.heldObject;
+        final objNames = <String>[];
+        for (final o in r.objects) {
+          final l = o.label;
+          if (l != null && l.isNotEmpty && !objNames.contains(l)) {
+            objNames.add(l);
+          }
+        }
+        String objText;
+        Color objColor;
+        if (held?.label != null && held!.label!.isNotEmpty) {
+          objText = '手持：${held.label}';
+          objColor = AppTheme.accentOrange;
+        } else if (objNames.isNotEmpty) {
+          objText = '物体：${objNames.take(3).join('、')}';
+          objColor = AppTheme.accentTeal;
+        } else if (r.objects.isNotEmpty) {
+          // 检测到包围盒但无可用标签（base 模型常见）：仍提示已检测到。
+          objText = '物体：${r.objects.length} 个（未分类）';
+          objColor = AppTheme.accentTeal;
+        } else if (!controller.objectEngine.isInitialized) {
+          objText = '物体：未加载模型';
+          objColor = AppTheme.tertiaryLabel;
+        } else {
+          objText = '未识别到物体';
+          objColor = AppTheme.tertiaryLabel;
+        }
+        rows.add(_line(
+          icon: CupertinoIcons.cube_box_fill,
+          text: objText,
+          color: objColor,
+        ));
+
         return Container(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
           decoration: BoxDecoration(

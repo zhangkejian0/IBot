@@ -70,20 +70,26 @@ class MlKitFaceEngine {
 
   /// 对已摆正的图像做人脸检测，返回归一化包围盒（按面积降序，主脸在前）。
   Future<List<Rect>> processUpright(img.Image upright) async {
-    final detector = _detector;
-    if (detector == null || !_initialized) return const [];
-
+    if (!_initialized) return const [];
     final w = upright.width;
     final h = upright.height;
     if (w <= 0 || h <= 0) return const [];
-
     final bytes = upright.getBytes(order: img.ChannelOrder.rgba);
+    return processRgba(Uint8List.fromList(bytes), w, h);
+  }
+
+  /// 对「摆正后的 RGBA 字节」做人脸检测。供调用方与 [ObjectEngine] 共享同一份
+  /// RGBA 字节、避免同帧重复做 YUV→RGB 与 getBytes（降低主 isolate 负载）。
+  Future<List<Rect>> processRgba(Uint8List rgba, int w, int h) async {
+    final detector = _detector;
+    if (detector == null || !_initialized || w <= 0 || h <= 0) return const [];
+
     // 用 fromBitmap（RGBA）而非 fromBytes(bgra8888)：ML Kit 在 Android 原生
     // 端的 bytes 分支只接受 NV21/YV12，bgra8888 仅 iOS 支持，会导致
     // "ImageFormat is not supported" 错误。fromBitmap 走 ARGB_8888 Bitmap
     // 路径，跨平台通用。图已摆正，rotation 传 0。
     final input = InputImage.fromBitmap(
-      bitmap: Uint8List.fromList(bytes),
+      bitmap: rgba,
       width: w,
       height: h,
       rotation: 0,
