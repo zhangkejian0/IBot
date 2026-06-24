@@ -184,6 +184,11 @@ class StreamingTtsPlayer {
     _audio.externalLevel = false;
   }
 
+  /// 释放资源(进程级)。dispose 后不可再用。
+  Future<void> dispose() async {
+    await release();
+  }
+
   // —— 实时嘴型(算法对齐 AudioCaptureService._rmsLevel)——
   double _lastLevel = 0.0;
 

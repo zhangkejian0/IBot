@@ -2,9 +2,11 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:audioplayers/audioplayers.dart';
+import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 
 import 'audio_capture_service.dart';
+import 'barge_in_detector.dart';
 import 'chat_service.dart';
 import 'conversation_logger.dart';
 import 'pophie_client.dart';
@@ -49,6 +51,18 @@ class VoiceAssistant extends ChangeNotifier {
   /// FeedThread,规避 SEGV(issue #508)。详见 [StreamingTtsPlayer]。
   /// 惰性初始化(初始化器不能引用实例成员 audio)。
   late final StreamingTtsPlayer _streamingTts = StreamingTtsPlayer(audio);
+
+  // —— 打断(barge-in)——
+  /// 打断检测器:TTS 播放时监听麦克风,用户开口即触发停止 TTS 重新聆听。
+  /// 详见 [BargeInDetector](抗回声:高阈值+连续帧+冷却期)。
+  late final BargeInDetector _bargeIn = BargeInDetector();
+
+  /// 打断功能总开关。默认开;若实测 AEC/SCO 通路有异常,可关回退为播放时停麦。
+  bool bargeInEnabled = true;
+
+  /// 本轮是否因用户打断而中止播放(_runConversation finally 据此决定是否
+  /// 立即重新聆听,而非只恢复唤醒监听)。
+  bool _bargeInTriggered = false;
 
   /// 端侧感知上下文提供者:由 AppController 注入，读取当前人脸表情/身份/手势，
   /// 随对话发给后端(文档 §2.4)。
@@ -330,16 +344,30 @@ class VoiceAssistant extends ChangeNotifier {
       _robotState = null;
       audio.externalLevel = false;
       audio.level.value = 0.0;
+      final wasBarged = _bargeInTriggered;
+      _bargeInTriggered = false;
       _setState(VoiceState.idle);
       conversationLog.log('end', '一轮对话结束,回到 idle');
       // 一轮对话结束回到 idle:若有排队的主动消息(对话期间收到的),补播。
       // 不 await,放后台播;它自己会再次回到 idle,触发下一条。
-      if (_proactiveQueue.isNotEmpty) {
+      // (被打断时不补播:用户要说话,优先聆听。)
+      if (_proactiveQueue.isNotEmpty && !wasBarged) {
         final next = _proactiveQueue.removeAt(0);
         _playProactive(next);
+      } else {
+        // _playStreamingTts 播放时停了麦(barge-in 模式)或播完停麦(回退模式),
+        // 这里重启麦克风,恢复唤醒监听与聆听的前置条件。
+        await audio.start();
+        // 恢复唤醒监听,等待下一次唤醒。
+        await _resumeWakeListening();
+        // 打断(barge-in)后立即重新聆听,不等用户再说唤醒词:
+        // _runConversation 防重入要求 _state==idle(已在上面置位),直接重启一轮。
+        // 麦克风已在上面 audio.start() 恢复(captureUtterance 依赖)。
+        if (wasBarged) {
+          conversationLog.log('wake', '打断后立即重新聆听');
+          _runConversation();
+        }
       }
-      // 恢复唤醒监听,等待下一次唤醒。
-      await _resumeWakeListening();
     }
   }
 
@@ -386,6 +414,7 @@ class VoiceAssistant extends ChangeNotifier {
     String? fallbackFormat,
   }) async {
     // 内嵌音频兜底优先(若 /api/chat 意外带回了 audio,省一次流式请求)。
+    // 注意:内嵌路径用 playTts 整段播放,不支持打断(整段缓冲);停麦播完再启麦。
     if (fallbackBytes != null && fallbackBytes.isNotEmpty) {
       conversationLog.log('speak',
           '使用内嵌音频(回退): ${fallbackBytes.length} 字节 '
@@ -396,23 +425,53 @@ class VoiceAssistant extends ChangeNotifier {
       return;
     }
 
-    // 停麦(必须在首个分片到达前完成,消除 AEC/SCO 竞态)。
-    await audio.stop();
+    // —— 打断(barge-in)策略 ——
+    // 播放期间**保持麦克风开启** + 启 [BargeInDetector],用户开口即停 TTS
+    // 重新聆听。需确保麦已 start(可能上一阶段已 stop)。靠已启用的平台 AEC
+    // + BargeInDetector 的高阈值/连续帧抗回声。
+    if (bargeInEnabled) {
+      await audio.start();
+      _bargeIn.start(audio.audioStream);
+    } else {
+      // 关闭打断:回退为播放时停麦(消除 AEC/SCO 竞态)。
+      await audio.stop();
+    }
+
     var chunkCount = 0;
     var started = false; // meta 是否已到(已 start 播放器)
     final ttsSw = Stopwatch()..start(); // TTS 总耗时(发起到播完)
     Stopwatch? firstPacketSw; // 从发起到首片到达
+    // 流式下载的取消令牌:用户打断时 cancel(),中断 HTTP 下载。
+    final cancelToken = CancelToken();
+    // 打断回调:停播放器 + 取消下载 + 设标志。触发后让 await ttsStream 抛出。
+    void onBargeIn() {
+      if (_bargeInTriggered) return;
+      _bargeInTriggered = true;
+      conversationLog.log('speak', '打断触发:停止 TTS,准备重新聆听', error: true);
+      // 立即停播、清队列(release 内部复位 externalLevel/level)。
+      unawaited(_streamingTts.release());
+      // 中断 HTTP 流式下载(await ttsStream 抛 DioException cancel)。
+      if (!cancelToken.isCancelled) cancelToken.cancel();
+    }
+
+    StreamSubscription? bargeSub;
+    if (bargeInEnabled) {
+      bargeSub = _bargeIn.onBargeIn.listen((_) => onBargeIn());
+    }
     try {
       firstPacketSw = Stopwatch()..start();
       await pophie.ttsStream(
         text,
         voice: voice,
+        cancelToken: cancelToken,
         onMeta: (format, sampleRate) async {
           // meta 到达即初始化播放器,后续 chunk 一到就开口。
           await _streamingTts.start(sampleRate);
           started = true;
         },
         onChunk: (pcm16) {
+          // 用户已打断:丢弃后续分片(防御)。
+          if (_bargeInTriggered) return;
           if (chunkCount == 0) {
             firstPacketSw!.stop();
             final fpMs = firstPacketSw.elapsedMilliseconds;
@@ -439,7 +498,8 @@ class VoiceAssistant extends ChangeNotifier {
         },
       );
       // 全部喂完:等排空再 release,确保尾部音频完整播完。
-      if (started) {
+      // (若已打断,_bargeInTriggered 为 true,onBargeIn 已 release,跳过等待。)
+      if (started && !_bargeInTriggered) {
         await _streamingTts.waitForDone();
         await _streamingTts.release();
         ttsSw.stop();
@@ -448,6 +508,27 @@ class VoiceAssistant extends ChangeNotifier {
             '流式播报完成 (TTS 总耗时 ${ttsSw.elapsedMilliseconds}ms)');
       } else {
         ttsSw.stop();
+      }
+    } on DioException catch (e) {
+      // HTTP 流式下载取消(用户打断):DioException(type: cancel)。
+      // 用户打断:不走批量回退(用户要说话,不该再播),直接结束。
+      ttsSw.stop();
+      _timings?.ttsTotalMs = ttsSw.elapsedMilliseconds;
+      if (e.type == DioExceptionType.cancel && _bargeInTriggered) {
+        debugPrint('[VoiceAssistant] tts stream cancelled by barge-in');
+        await _streamingTts.release();
+      } else {
+        // 真网络错误:走批量回退。
+        debugPrint('[VoiceAssistant] tts stream dio error: $e — 回退批量');
+        conversationLog.log('speak', '流式失败(网络),回退批量: $e', error: true);
+        await _streamingTts.release();
+        try {
+          final t = await pophie.tts(text);
+          await playTts(t.bytes, t.format);
+        } catch (e2) {
+          debugPrint('[VoiceAssistant] fallback /api/tts failed: $e2');
+          conversationLog.log('speak', '批量回退也失败: $e2', error: true);
+        }
       }
     } catch (e) {
       ttsSw.stop();
@@ -464,8 +545,12 @@ class VoiceAssistant extends ChangeNotifier {
         conversationLog.log('speak', '批量回退也失败: $e2', error: true);
       }
     } finally {
-      // 重启麦克风(无论成功/回退/失败),恢复唤醒监听前置条件。
-      await audio.start();
+      // 停打断监听。
+      await bargeSub?.cancel();
+      _bargeIn.stop();
+      // 恢复麦克风到正常状态:打断模式下麦一直开着,这里确保停一次再交给上层;
+      // 关闭打断模式下麦已停。统一 stop 后由 _runConversation finally 按需启。
+      await audio.stop();
     }
   }
 
@@ -658,13 +743,20 @@ class VoiceAssistant extends ChangeNotifier {
       debugPrint('[VoiceAssistant] proactive play failed: $e');
       conversationLog.log('proactive', '主动提醒播放失败: $e', error: true);
     } finally {
+      final wasBarged = _bargeInTriggered;
+      _bargeInTriggered = false;
       _replyText = '';
       audio.level.value = 0.0;
       _setState(VoiceState.idle);
-      // 恢复唤醒监听(主动播报期间唤醒被停了,见 _playProactive 没有显式
-      // stop 唤醒,但 _runConversation 开头会 stop;主动播报走的是独立路径,
-      // 唤醒监听此刻应仍在跑 —— 若被中断这里也会重建)。
+      // _playStreamingTts 播放时停了麦,这里重启(唤醒与聆听前置条件)。
+      await audio.start();
+      // 恢复唤醒监听。
       await _resumeWakeListening();
+      // 打断后立即重新聆听(同主对话范式),不等唤醒词。
+      if (wasBarged) {
+        conversationLog.log('wake', '主动播报被打断,立即重新聆听');
+        _runConversation();
+      }
     }
   }
 
@@ -675,6 +767,8 @@ class VoiceAssistant extends ChangeNotifier {
     _proactiveTimer = null;
     stop();
     _player.dispose();
+    _streamingTts.dispose();
+    _bargeIn.dispose();
     pophie.dispose();
     audio.dispose();
     wakeWord.dispose();

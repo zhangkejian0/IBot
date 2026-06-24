@@ -321,6 +321,9 @@ class PophieClient {
   ///
   /// 实现:NDJSON 行可能跨字节分片截断,故维护一个 [lineBuf] 累积,按 `\n`
   /// 切分并保留尾部不完整行;不用 `LineSplitter.split(单个 chunk)`(会漏行)。
+  ///
+  /// [cancelToken]:可选取消令牌。调用方(打断检测)可 `token.cancel()` 中断
+  /// 正在进行的流式下载,`await for` 会抛 `DioException(type: cancel)`。
   Future<void> ttsStream(
     String text, {
     Map<String, dynamic>? voice,
@@ -328,6 +331,7 @@ class PophieClient {
     required void Function(String format, int sampleRate) onMeta,
     required void Function(Uint8List pcm16) onChunk,
     void Function(int? firstPacketMs)? onDone,
+    CancelToken? cancelToken,
   }) async {
     final body = <String, dynamic>{
       'text': text,
@@ -341,6 +345,7 @@ class PophieClient {
       response = await _dio.post<ResponseBody>(
         '${_config.baseUrl}/api/tts/stream',
         data: body,
+        cancelToken: cancelToken,
         options: Options(
           contentType: Headers.jsonContentType,
           responseType: ResponseType.stream,
@@ -350,6 +355,11 @@ class PophieClient {
         ),
       );
     } on DioException catch (e) {
+      // 用户主动取消(打断):原样抛 DioException,让上层据 type==cancel 区分,
+      // 不走批量回退(用户要说话,不该再播)。
+      if (e.type == DioExceptionType.cancel) {
+        rethrow;
+      }
       // 503 语音未启用 / 400 参数非法等:抛出供上层走批量回退。
       final code = e.response?.statusCode;
       throw Exception(
