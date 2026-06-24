@@ -128,28 +128,74 @@ class PersonaLogServer {
   static bool _validDate(String s) =>
       RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(s);
 
-  /// 探测局域网 IPv4 地址(优先非回环、非链路本地的私有地址)。
+  /// 探测局域网 IPv4 地址。
+  ///
+  /// 优先级：
+  /// 1. Wi-Fi / 以太网接口的私有地址（192.168.x.x 最优先）
+  /// 2. 其他接口的私有地址（10.x.x.x, 172.16-31.x.x）
+  /// 3. 任意非回环、非链路本地地址
+  ///
+  /// 会跳过常见的虚拟网卡（ADB、VPN、Docker 等）。
   static Future<String?> _lanIpv4() async {
     try {
       final interfaces = await NetworkInterface.list(
         type: InternetAddressType.IPv4,
         includeLoopback: false,
       );
-      String? fallback;
+
+      // 虚拟网卡名称模式（小写匹配），优先跳过。
+      const virtualPatterns = [
+        'adb', 'android', 'veth', 'docker', 'br-', 'virbr', 'vmnet',
+        'tun', 'tap', 'wg', 'utun', 'ipsec', 'vpn', 'clash', 'tailscale',
+      ];
+
+      String? bestWifi;      // 192.168.x.x (Wi-Fi 最常见)
+      String? bestPrivate;   // 10.x.x.x 或 172.16-31.x.x
+      String? fallback;      // 任意可用地址
+
       for (final iface in interfaces) {
+        final name = iface.name.toLowerCase();
+        final isVirtual = virtualPatterns.any((p) => name.contains(p));
+
         for (final addr in iface.addresses) {
           final ip = addr.address;
-          if (ip.startsWith('169.254.')) continue; // 链路本地
+          // 跳过链路本地地址 (169.254.x.x)
+          if (ip.startsWith('169.254.')) continue;
+
+          // 第一个可用地址作为 fallback
           fallback ??= ip;
-          // 常见私有网段优先(家庭/办公局域网)。
-          if (ip.startsWith('192.168.') ||
-              ip.startsWith('10.') ||
-              ip.startsWith('172.')) {
-            return ip;
+
+          // 检查是否为私有地址
+          final is192 = ip.startsWith('192.168.');
+          final is10 = ip.startsWith('10.');
+          final is172 = ip.startsWith('172.') &&
+              int.tryParse(ip.split('.')[1]) != null &&
+              int.parse(ip.split('.')[1]) >= 16 &&
+              int.parse(ip.split('.')[1]) <= 31;
+          final isPrivate = is192 || is10 || is172;
+
+          if (!isPrivate) continue;
+
+          // 非虚拟网卡的 192.168.x.x 最优先
+          if (is192 && !isVirtual) {
+            bestWifi = ip;
+            // 找到就立即返回，192.168 几乎总是 Wi-Fi
+            return bestWifi;
+          }
+
+          // 非虚拟网卡的其他私有地址
+          if (!isVirtual && bestPrivate == null) {
+            bestPrivate = ip;
+          }
+
+          // 虚拟网卡的私有地址作为最后备选
+          if (isVirtual && bestPrivate == null) {
+            bestPrivate ??= ip;
           }
         }
       }
-      return fallback;
+
+      return bestWifi ?? bestPrivate ?? fallback;
     } catch (e) {
       debugPrint('[PersonaLogServer] lan ip detect failed: $e');
       return null;
@@ -293,7 +339,11 @@ function render(){
     }
     if(e.person) people[e.person]=1;
     shown++;
-    var objs = (e.objects||[]).map(function(o){return '<span>'+esc(o)+'</span>';}).join('');
+    var objs = (e.objects||[]).map(function(o){
+      var name = typeof o === 'object' ? (o.name||'') : String(o);
+      var conf = typeof o === 'object' ? Math.round((o.confidence||0)*100) : 0;
+      return '<span>'+esc(name)+' ('+conf+'%)</span>';
+    }).join('');
     var sceneObj = '';
     if(objs) sceneObj += '<div class="chips">'+objs+'</div>';
     if(e.heldObject) sceneObj += '<div class="held">✋ 手持: '+esc(e.heldObject)+'</div>';

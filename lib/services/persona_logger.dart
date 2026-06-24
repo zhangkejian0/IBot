@@ -52,8 +52,9 @@ class PersonaLogEntry {
   /// 手势(中文标签，如「点赞」)。
   final String? gesture;
 
-  /// 画面中识别到的物体名(去重)。
-  final List<String> objects;
+  /// 画面中识别到的物体及其置信度(去重，按名称保留最高置信度)。
+  /// 每个元素结构：{'name': '杯子', 'confidence': 0.85}
+  final List<Map<String, dynamic>> objects;
 
   /// 被判定为「手持」的物体名。
   final String? heldObject;
@@ -89,7 +90,7 @@ class PersonaLogEntry {
     if (relation != null) map['relation'] = relation;
     if (expression != null) map['expression'] = expression;
     if (gesture != null) map['gesture'] = gesture;
-    if (objects.isNotEmpty) map['objects'] = objects;
+    if (objects.isNotEmpty) map['objects'] = objects.map((o) => {'name': o['name'], 'confidence': o['confidence']}).toList();
     if (heldObject != null) map['heldObject'] = heldObject;
     if (scene != null) map['scene'] = scene;
     if (faceCount != null) map['faceCount'] = faceCount;
@@ -114,7 +115,9 @@ class PersonaLogEntry {
       expression: json['expression'] as String?,
       gesture: json['gesture'] as String?,
       objects: (json['objects'] as List<dynamic>? ?? const [])
-          .map((e) => e.toString())
+          .map((e) => e is Map<String, dynamic>
+              ? {'name': e['name']?.toString() ?? '', 'confidence': (e['confidence'] as num?)?.toDouble() ?? 0.0}
+              : {'name': e.toString(), 'confidence': 0.0})
           .toList(),
       heldObject: json['heldObject'] as String?,
       scene: json['scene'] as String?,

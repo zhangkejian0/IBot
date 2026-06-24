@@ -249,17 +249,21 @@ class _LogCard extends StatelessWidget {
               spacing: 4,
               runSpacing: 4,
               children: e.objects
-                  .map((o) => Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 7, vertical: 1),
-                        decoration: BoxDecoration(
-                          color: AppTheme.background,
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                        child: Text(o,
-                            style: const TextStyle(
-                                color: AppTheme.secondaryLabel, fontSize: 12)),
-                      ))
+                  .map((o) {
+                    final name = o['name'] as String? ?? '';
+                    final conf = ((o['confidence'] as double? ?? 0) * 100).round();
+                    return Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 7, vertical: 1),
+                      decoration: BoxDecoration(
+                        color: AppTheme.background,
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Text('$name ($conf%)',
+                          style: const TextStyle(
+                              color: AppTheme.secondaryLabel, fontSize: 12)),
+                    );
+                  })
                   .toList(),
             ),
           ],

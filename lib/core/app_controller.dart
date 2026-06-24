@@ -647,12 +647,20 @@ class AppController extends ChangeNotifier {
     final expression = face?.expression.expression.label;
     final gesture =
         _result.hands.isNotEmpty ? _result.hands.first.gesture?.label : null;
-    final objects = <String>[];
+    final objects = <Map<String, dynamic>>[];
     for (final o in _result.objects) {
       final l = o.label;
-      if (l != null && l.isNotEmpty && !objects.contains(l)) objects.add(l);
+      if (l != null && l.isNotEmpty) {
+        // 去重：按名称去重，保留置信度最高的
+        final existing = objects.where((m) => m['name'] == l).firstOrNull;
+        if (existing == null) {
+          objects.add({'name': l, 'confidence': o.confidence});
+        } else if (o.confidence > (existing['confidence'] as double)) {
+          existing['confidence'] = o.confidence;
+        }
+      }
     }
-    objects.sort();
+    objects.sort((a, b) => (a['name'] as String).compareTo(b['name'] as String));
     final held = _result.heldObject?.label;
     final faceCount = _result.faces.length;
 
@@ -668,8 +676,9 @@ class AppController extends ChangeNotifier {
     // 空场景：什么都没识别到时不记录(减少噪声)。
     if (faceCount == 0 && objects.isEmpty && gesture == null) return;
 
+    final objectNames = objects.map((o) => o['name'] as String).toList();
     final sig = '$person|${persons.join(",")}|$expression|$gesture'
-        '|${objects.join(',')}|$held|$faceCount';
+        '|${objectNames.join(',')}|$held|$faceCount';
     final now = DateTime.now();
     final changed = sig != _lastPerceptionSig;
     final elapsedOk = now.difference(_lastPerceptionLog) >= _perceptionMinInterval;
@@ -681,7 +690,7 @@ class AppController extends ChangeNotifier {
 
     final scene = _buildSceneDescription(
       heldObject: _result.heldObject,
-      objectNames: objects,
+      objectNames: objectNames,
       identity: person,
     );
 
@@ -979,10 +988,18 @@ class AppController extends ChangeNotifier {
     if (!settings.personaLogEnabled) return;
     final face = _result.face;
     final identity = face?.identity;
-    final objects = <String>[];
+    final objects = <Map<String, dynamic>>[];
     for (final o in _result.objects) {
       final l = o.label;
-      if (l != null && l.isNotEmpty && !objects.contains(l)) objects.add(l);
+      if (l != null && l.isNotEmpty) {
+        // 去重：按名称去重，保留置信度最高的
+        final existing = objects.where((m) => m['name'] == l).firstOrNull;
+        if (existing == null) {
+          objects.add({'name': l, 'confidence': o.confidence});
+        } else if (o.confidence > (existing['confidence'] as double)) {
+          existing['confidence'] = o.confidence;
+        }
+      }
     }
     personaLogger.log(PersonaLogEntry(
       timestamp: DateTime.now(),
