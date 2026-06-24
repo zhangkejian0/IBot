@@ -8,6 +8,7 @@ import 'package:webview_flutter/webview_flutter.dart';
 
 import '../core/app_controller.dart';
 import '../core/app_scope.dart';
+import '../face/behavior_state_tracker.dart';
 import '../face/emotion_mapper.dart';
 import '../face/gaze_zone_detector.dart';
 import '../models/expression.dart';
@@ -300,9 +301,23 @@ class _VirtualPetWebViewState extends State<_VirtualPetWebView> {
     }
 
     // 情绪状态（带 dwell 去抖）。
+    // 用时序聚合后的稳定结果驱动，而非单帧表情：
+    //  - 困倦 → 困倦态；专注 → 注视态（行为态优先）；
+    //  - 其余用窗口「主导表情」（置信度加权投票）映射，避免单帧误判导致表情乱跳。
     String stateJs = '';
     if (face != null) {
-      final state = _mapper.map(face.expression.expression);
+      final behavior = widget.controller.behavior;
+      FaceState state;
+      switch (behavior.state) {
+        case BehaviorState.drowsy:
+          state = FaceState.sleepy;
+          break;
+        case BehaviorState.focused:
+          state = FaceState.gazing;
+          break;
+        default:
+          state = _mapper.map(behavior.dominantExpression);
+      }
       final now = DateTime.now();
       final changed = state != _lastSent;
       final dwellOk =

@@ -10,6 +10,7 @@ import 'package:flutter/services.dart' show DeviceOrientation;
 import 'package:image/image.dart' as img;
 import 'package:permission_handler/permission_handler.dart';
 
+import '../face/behavior_state_tracker.dart';
 import '../face/gaze_zone_detector.dart';
 import '../models/detection.dart';
 import '../models/expression.dart';
@@ -170,6 +171,13 @@ class AppController extends ChangeNotifier {
   DetectionResult _result = const DetectionResult();
   DetectionResult get result => _result;
 
+  // 时序行为聚合器：把高频单帧观测聚合成稳定的行为状态(专注/走神/困倦/离开)。
+  final BehaviorStateTracker _behaviorTracker = BehaviorStateTracker();
+  BehaviorSnapshot _behavior = BehaviorSnapshot.initial;
+
+  /// 当前时序聚合后的行为快照(状态 + 已持续时长 + 主导表情)，供 UI/交互消费。
+  BehaviorSnapshot get behavior => _behavior;
+
   // 区域检测器：用于调试可视化
   final GazeZoneDetector _gazeZoneDetector = GazeZoneDetector();
   GazeZoneDetector get gazeZoneDetector => _gazeZoneDetector;
@@ -311,6 +319,11 @@ class AppController extends ChangeNotifier {
       // 向导的人脸录入依赖常驻相机与识别模型，故必须在就绪缓冲之后才分流。
       _phase = isOwnerRegistered ? AppPhase.ready : AppPhase.onboarding;
       notifyListeners();
+      // 直接进主界面(已注册主人)时自动开启语音助手,拉起主动消息轮询与唤醒监听,
+      // 从而播报后端到点的欢迎语等主动消息。
+      if (isOwnerRegistered) {
+        _ensureVoiceStartedOnReady();
+      }
     } catch (e) {
       _phase = AppPhase.error;
       _errorMessage = '初始化失败：$e';
@@ -610,6 +623,7 @@ class AppController extends ChangeNotifier {
                 identity: identity,
                 gazeX: f.gazeX,
                 gazeY: f.gazeY,
+                eyeBlink: f.eyeBlink,
               ));
       }
 
@@ -628,6 +642,9 @@ class AppController extends ChangeNotifier {
         objects: objects,
         mirror: mirror,
       );
+      // 时序行为聚合：喂入本帧，得到稳定的行为状态(含状态转移事件)。
+      _behavior = _behaviorTracker.update(_result, DateTime.now());
+      _maybeLogBehavior(_behavior);
       _maybeLogPerception();
       if (!_disposed) notifyListeners();
     } catch (e) {
@@ -690,7 +707,7 @@ class AppController extends ChangeNotifier {
 
     final scene = _buildSceneDescription(
       heldObject: _result.heldObject,
-      objectNames: objectNames,
+      objects: _result.objects,
       identity: person,
     );
 
@@ -706,6 +723,30 @@ class AppController extends ChangeNotifier {
       heldObject: held,
       scene: scene,
       faceCount: faceCount,
+      behaviorState: _behavior.state.label,
+      sustainedExpression: _behavior.dominantExpression.label,
+    ));
+  }
+
+  /// 行为状态转移日志：仅在时序聚合确认状态切换的那一帧落盘一条 type='state'。
+  /// 这是「时间维度」的核心——把「进入专注/走神/困倦」「离开/回来」这类
+  /// 有意义的事件单独记录，且附带上一状态的持续时长，便于后续分析陪伴行为。
+  void _maybeLogBehavior(BehaviorSnapshot snapshot) {
+    if (!settings.personaLogEnabled || !personaLogger.enabled) return;
+    final tr = snapshot.transition;
+    if (tr == null) return;
+    final identity = _result.face?.identity;
+    personaLogger.log(PersonaLogEntry(
+      timestamp: DateTime.now(),
+      type: 'state',
+      person: identity?.person.name,
+      relation: identity?.person.relation.label,
+      faceCount: _result.faces.length,
+      behaviorState: tr.to.label,
+      behaviorDurationSeconds: tr.previousDuration.inSeconds,
+      sustainedExpression: snapshot.dominantExpression.label,
+      note: '${tr.from.label}→${tr.to.label}'
+          '（上一状态持续 ${tr.previousDuration.inSeconds} 秒）',
     ));
   }
 
@@ -1029,47 +1070,127 @@ class AppController extends ChangeNotifier {
       gesture = _gestureApiKey(_result.hands.first.gesture);
     }
 
-    // 物体感知：去重收集有标签的物体名；提取手持物体；拼装自然语言场景。
+    // 物体感知：去重收集有标签的物体名 + 结构化明细(名称/置信度/位置/包围盒)；
+    // 提取手持物体；拼装自然语言场景。同时携带「简名列表 + 结构化明细 + 自然
+    // 语言场景」三种表述，最大化后端/大模型对「画面里有什么、在哪儿」的理解。
     final objects = _result.objects;
     final names = <String>[];
+    final details = <Map<String, dynamic>>[];
     for (final o in objects) {
       final l = o.label;
-      if (l != null && l.isNotEmpty && !names.contains(l)) names.add(l);
+      if (l == null || l.isEmpty) continue;
+      if (!names.contains(l)) names.add(l);
+      details.add(_objectDetail(o));
     }
     final held = _result.heldObject;
     final heldName = held?.label;
-    final scene = _buildSceneDescription(
+    final heldDetail = held != null ? _objectDetail(held) : null;
+    final baseScene = _buildSceneDescription(
       heldObject: held,
-      objectNames: names,
+      objects: objects,
       identity: identity,
     );
+
+    // 注入时序行为状态(专注/走神/困倦等)，让大模型据此调整陪伴策略
+    // (如专注时少打扰、困倦时关心、走神时轻唤注意)。并入自然语言场景描述。
+    final attention = _attentionPhrase(identity);
+    final scene = [baseScene, attention]
+        .where((s) => s != null && s.isNotEmpty)
+        .join('；');
 
     return PophiePerception(
       facialExpression: expr,
       identity: identity,
       gestureType: gesture,
       objects: names.isEmpty ? null : names,
+      objectsDetail: details.isEmpty ? null : details,
       heldObject: (heldName != null && heldName.isNotEmpty) ? heldName : null,
+      heldObjectDetail: heldDetail,
       scene: scene,
     );
   }
 
+  /// 把单个物体识别结果序列化为结构化明细：名称 + 置信度 + 位置描述 +
+  /// 归一化包围盒 `[left, top, right, bottom]`（均做镜像校正，与「左/右」位置
+  /// 描述一致，便于后端/大模型回答「在画面哪个位置」）。
+  Map<String, dynamic> _objectDetail(ObjectOverlay o) {
+    final box = _mirrorRect(o.boundingBox);
+    return {
+      'name': o.label ?? '物体',
+      'confidence': double.parse(o.confidence.toStringAsFixed(2)),
+      'location': _locationLabel(o.center),
+      'box': [
+        double.parse(box.left.toStringAsFixed(3)),
+        double.parse(box.top.toStringAsFixed(3)),
+        double.parse(box.right.toStringAsFixed(3)),
+        double.parse(box.bottom.toStringAsFixed(3)),
+      ],
+    };
+  }
+
+  /// 归一化矩形按当前镜像设置做水平翻转，使包围盒坐标与「左/右」位置描述
+  /// 一致（前置镜像生效时 x 取反）。
+  Rect _mirrorRect(Rect r) {
+    if (!_effectiveMirrorOverlay()) return r;
+    return Rect.fromLTRB(1 - r.right, r.top, 1 - r.left, r.bottom);
+  }
+
   /// 拼装端侧自然语言场景描述（最利于大模型理解「我手里拿着什么」）。
+  /// 手持物体附带位置与置信度；其余可见物体逐个带上位置，避免大模型凭空臆造。
   /// 无任何物体信息时返回 null（不污染感知上下文）。
   String? _buildSceneDescription({
     required ObjectOverlay? heldObject,
-    required List<String> objectNames,
+    required List<ObjectOverlay> objects,
     required String? identity,
   }) {
     final who = (identity != null && identity.isNotEmpty) ? identity : '用户';
+    final parts = <String>[];
+
     if (heldObject?.label != null && heldObject!.label!.isNotEmpty) {
-      final loc = _locationLabel(heldObject.center);
-      return '$who手里拿着${heldObject.label}（位于$loc）';
+      parts.add('$who手里拿着${heldObject.label}'
+          '（位于${_locationLabel(heldObject.center)}'
+          '${_confPhrase(heldObject.confidence)}）');
     }
-    if (objectNames.isNotEmpty) {
-      return '画面中可见：${objectNames.join('、')}';
+
+    // 其余可见物体（排除手持物本身），逐个带位置，按名称去重保留最高置信度。
+    final seen = <String>{if (heldObject?.label != null) heldObject!.label!};
+    final others = <String>[];
+    for (final o in objects) {
+      final l = o.label;
+      if (l == null || l.isEmpty || seen.contains(l)) continue;
+      seen.add(l);
+      others.add('$l（${_locationLabel(o.center)}'
+          '${_confPhrase(o.confidence)}）');
     }
-    return null;
+    if (others.isNotEmpty) {
+      parts.add('${heldObject != null ? '画面中还能看到' : '画面中可见'}：'
+          '${others.join('、')}');
+    }
+
+    return parts.isEmpty ? null : parts.join('；');
+  }
+
+  /// 置信度短语：仅在置信度有效时输出「，识别置信度xx%」，否则为空。
+  String _confPhrase(double conf) =>
+      conf > 0 ? '，识别置信度${(conf * 100).round()}%' : '';
+
+  /// 把当前时序行为状态拼成自然语言，供大模型理解用户当下的投入/状态。
+  /// 「在场」属默认态，不额外描述以免噪声；其余状态附带已持续时长。
+  String? _attentionPhrase(String? identity) {
+    final who = (identity != null && identity.isNotEmpty) ? identity : '用户';
+    final secs = _behavior.duration.inSeconds;
+    switch (_behavior.state) {
+      case BehaviorState.focused:
+        return '$who正专注（已持续 $secs 秒）';
+      case BehaviorState.distracted:
+        return '$who有些走神、东张西望';
+      case BehaviorState.drowsy:
+        return '$who显得困倦、眼睛快闭上了';
+      case BehaviorState.absent:
+        return null;
+      case BehaviorState.present:
+        return null;
+    }
   }
 
   /// 当前用户身份(认识我命中的主脸人名),作为 user_id 回显/溯源。
@@ -1142,6 +1263,30 @@ class AppController extends ChangeNotifier {
     }
   }
 
+  /// 进入主界面(ready 阶段)时自动开启语音助手。
+  ///
+  /// [voiceEnabled] 默认 false 且 [DisplaySettings] 不持久化(每次启动从关闭
+  /// 开始),而主动消息(欢迎语等)的轮询只在 [VoiceAssistant.start] 内启动。
+  /// 若不在进入主界面时 start,后端到点的欢迎语永远拉不到 → 听不到声音。
+  ///
+  /// 故按"陪伴机器人开机即工作"的定位,进入主界面即开麦(顺带拉起主动消息轮询
+  /// 与唤醒监听),复用现有 _playProactive → _playStreamingTts 全链路。用户后续
+  /// 仍可在设置页关闭总开关([updateSettings] → [_syncVoiceAssistant] → stop)。
+  void _ensureVoiceStartedOnReady() {
+    final v = voiceAssistant;
+    // 无麦克风权限等不可用情况:不开启(与 _syncVoiceAssistant 行为一致)。
+    if (!v.isAvailable) return;
+    // 同步当前设置(TTS/唤醒词),与 _syncVoiceAssistant 前半段保持一致。
+    v.wakeWordEnabled = settings.wakeWordEnabled;
+    v.ttsEnabled = settings.ttsEnabled;
+    if (settings.wakeWord != v.wakeWord.keyword) {
+      v.wakeWord.setKeyword(settings.wakeWord);
+    }
+    if (!v.isRunning) {
+      v.start(); // 内部含 _startProactivePolling() —— 欢迎语链路由此打通。
+    }
+  }
+
   /// 更新 LLM 配置:持久化到磁盘 + 实时下发到对话服务 + 重置对话历史。
   /// 由设置页的 AI 服务编辑入口调用。
   Future<void> updateLlmConfig(LlmConfig config) async {
@@ -1209,6 +1354,8 @@ class AppController extends ChangeNotifier {
     await ownerProfileStore.save(p);
     _phase = AppPhase.ready;
     notifyListeners();
+    // 向导完成、进入主界面时自动开启语音助手,拉起主动消息轮询,播报欢迎语。
+    _ensureVoiceStartedOnReady();
 
     // 后台同步，不阻塞 UI。不 await：用户已进入主界面。
     unawaited(_syncOwnerToServer(p));

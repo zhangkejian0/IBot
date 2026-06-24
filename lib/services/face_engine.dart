@@ -93,12 +93,19 @@ class FaceEngine {
     final gazeX = face.horizontalGazeDirection;
     final gazeY = face.verticalGazeDirection;
 
+    // 眼睛闭合：取左右 eyeBlink 均值（0..1）。供时序聚合判定「困倦」。
+    final b = face.blendshapes;
+    final blinkL = (b[FaceBlendshape.eyeBlinkLeft] ?? 0).clamp(0.0, 1.0);
+    final blinkR = (b[FaceBlendshape.eyeBlinkRight] ?? 0).clamp(0.0, 1.0);
+    final eyeBlink = (blinkL + blinkR) / 2.0;
+
     return FaceOverlay(
       landmarks: points,
       boundingBox: Rect.fromLTRB(minX, minY, maxX, maxY),
       expression: expression,
       gazeX: gazeX,
       gazeY: gazeY,
+      eyeBlink: eyeBlink,
     );
   }
 

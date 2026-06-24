@@ -35,6 +35,10 @@ class FaceOverlay {
   final double gazeX;
   final double gazeY;
 
+  /// 眼睛闭合程度（eyeBlink 左右均值，0..1，1=完全闭眼）。
+  /// 供时序行为聚合判定「困倦」（长时间近乎闭眼）。仅主脸携带，其余脸为 0。
+  final double eyeBlink;
+
   const FaceOverlay({
     required this.landmarks,
     required this.boundingBox,
@@ -42,6 +46,7 @@ class FaceOverlay {
     this.identity,
     this.gazeX = 0,
     this.gazeY = 0,
+    this.eyeBlink = 0,
   });
 }
 

@@ -26,6 +26,9 @@ class PersonaLogEntry {
     this.userText,
     this.replyText,
     this.robotState,
+    this.behaviorState,
+    this.behaviorDurationSeconds,
+    this.sustainedExpression,
     this.note,
     Map<String, dynamic>? extra,
   }) : extra = extra ?? const {};
@@ -74,6 +77,17 @@ class PersonaLogEntry {
   /// 机器人响应的动作/表情状态(FSM state)。
   final String? robotState;
 
+  /// 时序聚合得到的行为状态中文标签(如「专注」「走神」「困倦」「离开」「在场」)。
+  /// 由 BehaviorStateTracker 在状态发生转移时写入(type='state')。
+  final String? behaviorState;
+
+  /// 行为状态相关的持续时长(秒)。
+  /// 对 type='state' 的转移记录而言，表示「离开的上一状态」已持续多久。
+  final int? behaviorDurationSeconds;
+
+  /// 时序窗口内置信度加权投票得到的主导表情中文标签(比单帧表情稳定)。
+  final String? sustainedExpression;
+
   /// 分析得到的、值得记录的额外信息(自由文本)。
   final String? note;
 
@@ -97,6 +111,13 @@ class PersonaLogEntry {
     if (userText != null) map['userText'] = userText;
     if (replyText != null) map['replyText'] = replyText;
     if (robotState != null) map['robotState'] = robotState;
+    if (behaviorState != null) map['behaviorState'] = behaviorState;
+    if (behaviorDurationSeconds != null) {
+      map['behaviorDurationSeconds'] = behaviorDurationSeconds;
+    }
+    if (sustainedExpression != null) {
+      map['sustainedExpression'] = sustainedExpression;
+    }
     if (note != null) map['note'] = note;
     if (extra.isNotEmpty) map['extra'] = extra;
     return map;
@@ -125,6 +146,10 @@ class PersonaLogEntry {
       userText: json['userText'] as String?,
       replyText: json['replyText'] as String?,
       robotState: json['robotState'] as String?,
+      behaviorState: json['behaviorState'] as String?,
+      behaviorDurationSeconds:
+          (json['behaviorDurationSeconds'] as num?)?.toInt(),
+      sustainedExpression: json['sustainedExpression'] as String?,
       note: json['note'] as String?,
       extra: (json['extra'] as Map?)?.cast<String, dynamic>() ?? const {},
     );

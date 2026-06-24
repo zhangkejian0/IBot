@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:audioplayers/audioplayers.dart';
@@ -274,6 +275,15 @@ class VoiceAssistant extends ChangeNotifier {
         conversationLog.log('think', '无语音且无感知数据,跳过请求');
         return;
       }
+
+      // 打印本轮实际发往后端的感知上下文(尤其是物体/手持/场景),
+      // 便于核对「物体是否真的发出去了」。空则明确标注。
+      conversationLog.log(
+        'think',
+        hasPerception
+            ? '本轮感知 → ${jsonEncode(perception.toJson())}'
+            : '本轮无感知数据(物体/表情/身份均为空)',
+      );
 
       _setState(VoiceState.thinking);
       conversationLog.log('think',

@@ -25,9 +25,20 @@ class PophiePerception {
   /// 进入大模型上下文，供「画面里有什么」类提问参考。
   final List<String>? objects;
 
+  /// 物体识别的结构化明细（名称+置信度+位置+归一化包围盒），供后端/大模型
+  /// 精确理解「画面里有什么、在哪儿」。每项形如：
+  /// `{ name:'手机', confidence:0.59, location:'画面右下方', box:[l,t,r,b] }`。
+  /// 与 [objects] 互为补充：[objects] 是简名列表，本字段带位置与可信度。
+  final List<Map<String, dynamic>>? objectsDetail;
+
   /// 当前被手持的物体名（结合手部+物体检测的空间叠加），如 '水杯'。
   /// 用于回答「我手里拿着什么」。
   final String? heldObject;
+
+  /// 手持物体的结构化明细（名称+置信度+位置+归一化包围盒），供大模型回答
+  /// 「我手里拿的是什么、在画面哪个位置」。形如
+  /// `{ name:'手机', confidence:0.59, location:'画面右下方', box:[l,t,r,b] }`。
+  final Map<String, dynamic>? heldObjectDetail;
 
   /// 自然语言场景描述（端侧据感知拼装），如 '用户右手拿着水杯'。
   /// 最利于大模型直接理解；与结构化字段同时携带，互为补充。
@@ -39,7 +50,9 @@ class PophiePerception {
     this.gestureType,
     this.touch,
     this.objects,
+    this.objectsDetail,
     this.heldObject,
+    this.heldObjectDetail,
     this.scene,
   });
 
@@ -49,7 +62,9 @@ class PophiePerception {
       (gestureType == null || gestureType!.isEmpty) &&
       (touch == null || touch!.isEmpty) &&
       (objects == null || objects!.isEmpty) &&
+      (objectsDetail == null || objectsDetail!.isEmpty) &&
       (heldObject == null || heldObject!.isEmpty) &&
+      (heldObjectDetail == null || heldObjectDetail!.isEmpty) &&
       (scene == null || scene!.isEmpty);
 
   Map<String, dynamic> toJson() {
@@ -63,8 +78,14 @@ class PophiePerception {
     }
     if (touch != null && touch!.isNotEmpty) m['touch'] = touch;
     if (objects != null && objects!.isNotEmpty) m['objects'] = objects;
+    if (objectsDetail != null && objectsDetail!.isNotEmpty) {
+      m['objects_detail'] = objectsDetail;
+    }
     if (heldObject != null && heldObject!.isNotEmpty) {
       m['held_object'] = heldObject;
+    }
+    if (heldObjectDetail != null && heldObjectDetail!.isNotEmpty) {
+      m['held_object_detail'] = heldObjectDetail;
     }
     if (scene != null && scene!.isNotEmpty) m['scene'] = scene;
     return m;
