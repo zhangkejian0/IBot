@@ -163,9 +163,6 @@ class _VirtualPetWebViewState extends State<_VirtualPetWebView> {
   // 分支会直接 return,前端表情卡在 listening(无人通知它切回)。
   bool _lastVoiceActive = false;
 
-  // 是否为前置摄像头（决定水平 gaze 是否镜像）。
-  bool _isFrontCamera = true;
-
   // 区域检测器：使用AppController中的实例，与调试可视化共享。
   GazeZoneDetector get _zoneDetector => widget.controller.gazeZoneDetector;
 
@@ -208,7 +205,6 @@ class _VirtualPetWebViewState extends State<_VirtualPetWebView> {
     // 语音助手是独立的 ChangeNotifier:活跃时(聆听/思考/说话)需独立驱动
     // 虚拟宠物表情与嘴部张合,即使没有摄像头帧也要能刷新。
     widget.controller.voiceAssistant.addListener(_onControllerChanged);
-    _isFrontCamera = widget.controller.isFrontCamera;
   }
 
   @override
@@ -287,7 +283,8 @@ class _VirtualPetWebViewState extends State<_VirtualPetWebView> {
       // 计算人脸中心归一化坐标（-1..1，画面中心为原点）
       var x = 2 * face.boundingBox.center.dx - 1; // 画面中心→0，右→+1
       var y = 2 * face.boundingBox.center.dy - 1; // 画面中心→0，下→+1
-      if (_isFrontCamera && CameraImageUtils.shouldFlipFrontCameraHorizontal) {
+      if (widget.controller.isFrontCamera &&
+          CameraImageUtils.shouldFlipFrontCameraHorizontal) {
         x = -x;
       }
 

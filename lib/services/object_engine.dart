@@ -19,15 +19,30 @@ import '../models/detection.dart';
 /// 包围盒归一化到该图像的 0..1 空间，与人脸/手势覆盖层共享同一坐标基准，
 /// 便于做「手持物体」的空间叠加判断。
 ///
-/// **模型**：用官方 `yolo26n`（COCO 80 类检测）。注意 ultralytics_yolo 0.6.x 已把
-/// `yolo11n` 移出自动下载清单（只剩 YOLO26 系列），传 `yolo11n` 会被原样透传给原生层
-/// 导致「Could not open 'yolo11n'」。为做到完全离线（陪伴机器人不依赖运行时联网），
-/// 已把 `yolo26n_int8.tflite` 内置到 assets/models/：插件解析官方 ID 时会优先从
-/// `assets/models/yolo26n_int8.tflite` 拷贝到内部存储使用，找不到才回退联网下载。
+/// **模型**：用官方 `yolo26n`（COCO 80 类检测）。插件 0.6.5 的原生后处理是按
+/// **YOLO26 系列**设计的,与该架构最匹配。注意 ultralytics_yolo 0.6.x 已把
+/// `yolo11n` 移出自动下载清单,且 v0.2.0 的旧 `yolo11n` 导出与 0.6.5 的解码器
+/// 不匹配 —— 实测换 `yolo11n` 反而劣化,故仍用 `yolo26n`。
+///
+/// 为完全离线(陪伴机器人不依赖运行时联网),已把 `yolo26n_int8.tflite` 内置到
+/// assets/models/:插件解析官方 ID `yolo26n` 时会优先从该资产拷贝到内部存储使用,
+/// 找不到才回退联网下载。
+///
+/// **关于量化与精度**:内置的是 int8 量化模型(体积小、速度快)。int8 对相近小物体
+/// (杯子/书/手机)区分略弱,若要更高精度可换**同架构的非量化版** yolo26n:
+///   `yolo export model=yolo26n.pt format=tflite half=True`  (生成 fp16)
+/// 导出后放到 `assets/models/yolo26n_float.tflite`,并把 [_modelCandidates] 首项
+/// 改为该路径即可(int8 作为回退保留)。**切勿换成 yolo11n**:架构不匹配会更差。
+///
+/// **加载策略([_modelCandidates])**:按优先级依次尝试,第一个成功的即采用,
+/// 任一失败(资产缺失/原生加载失败)自动回退,确保物体识别始终可用。
 class ObjectEngine {
-  /// 官方模型 ID。对应内置资产 assets/models/yolo26n_int8.tflite(插件按 ID 自动匹配)。
-  /// 换成 'assets/models/xxx.tflite' 可直接指定任意本地模型。
-  static const String _modelPath = 'yolo26n';
+  /// 模型候选(按优先级)。默认用官方 `yolo26n`(内置 int8 资产,离线可用)。
+  /// 想用非量化 yolo26n:导出 fp16 放到 assets/models/yolo26n_float.tflite,
+  /// 再把该路径加到本列表最前面即可。
+  static const List<String> _modelCandidates = [
+    'yolo26n',
+  ];
 
   /// 单帧最多返回的物体数（按面积降序截断）。
   final int maxObjects;
@@ -54,29 +69,43 @@ class ObjectEngine {
 
   Future<void> initialize() async {
     if (_initialized) return;
-    try {
-      // useGpu:false —— 陪伴机器人硬件多样,LiteRT GPU delegate 在部分设备会崩,
-      // 低频检测下 CPU 足够稳妥(插件文档亦建议为稳定性关闭 GPU)。
-      final yolo = YOLO(
-        modelPath: _modelPath,
-        task: YOLOTask.detect,
-        useGpu: false,
-      );
-      final ok = await yolo.loadModel();
-      if (!ok) {
-        _statusMessage = '物体识别模型加载失败（检查 assets/models/yolo26n_int8.tflite 是否打包）';
-        debugPrint('[ObjectEngine] loadModel returned false');
+    // 按优先级尝试候选模型:float 优先,失败(资产缺失/原生加载失败)逐级回退,
+    // 保证物体识别始终可用。记录最后一次错误用于诊断。
+    Object? lastError;
+    for (final path in _modelCandidates) {
+      try {
+        // useGpu:false —— 陪伴机器人硬件多样,LiteRT GPU delegate 在部分设备会崩,
+        // 低频检测下 CPU 足够稳妥(插件文档亦建议为稳定性关闭 GPU)。
+        final yolo = YOLO(
+          modelPath: path,
+          task: YOLOTask.detect,
+          useGpu: false,
+        );
+        final ok = await yolo.loadModel();
+        if (!ok) {
+          debugPrint('[ObjectEngine] loadModel returned false for $path');
+          continue;
+        }
+        _yolo = yolo;
+        _initialized = true;
+        final quant = path.contains('int8') ? 'int8' : 'float';
+        _statusMessage = '物体识别已加载 ${_shortName(path)}（$quant）';
+        debugPrint('[ObjectEngine] loaded $path ($quant)');
         return;
+      } catch (e) {
+        lastError = e;
+        debugPrint('[ObjectEngine] load $path failed: $e');
       }
-      _yolo = yolo;
-      _initialized = true;
-      _statusMessage = '物体识别已加载 YOLO26n';
-      debugPrint('[ObjectEngine] YOLO26n loaded');
-    } catch (e) {
-      _statusMessage = 'YOLO 初始化失败：$e';
-      debugPrint('[ObjectEngine] init error: $e');
     }
+    _statusMessage = '物体识别模型加载失败'
+        '（检查 assets/models/ 下的 yolo11n_float.tflite 是否打包）'
+        '${lastError != null ? '：$lastError' : ''}';
+    debugPrint('[ObjectEngine] all model candidates failed');
   }
+
+  /// 从模型路径取一个简短可读名(去目录与扩展名),用于状态展示。
+  static String _shortName(String path) =>
+      path.split('/').last.replaceAll('.tflite', '');
 
   /// 对一张「摆正后图像」编码的 JPEG 做物体检测。
   ///
@@ -108,6 +137,9 @@ class ObjectEngine {
       final rect = _readRect(d, w, h);
       if (rect == null || rect.width <= 0 || rect.height <= 0) continue;
       final cls = (d['className'] as String?) ?? '';
+      // 跳过「人」类:人的检测/身份由专门的人脸引擎负责,YOLO 的 person 框
+      // 既冗余又会被「手持」空间判定误命中,拼出「手里拿着人」这类离谱描述。
+      if (cls.trim().toLowerCase() == 'person') continue;
       out.add(ObjectOverlay(
         boundingBox: rect,
         label: _displayLabel(cls),

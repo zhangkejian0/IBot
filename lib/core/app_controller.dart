@@ -13,6 +13,7 @@ import 'package:permission_handler/permission_handler.dart';
 import '../face/gaze_zone_detector.dart';
 import '../models/detection.dart';
 import '../models/expression.dart';
+import '../models/hand_gesture.dart';
 import '../models/owner_profile.dart';
 import '../models/person.dart';
 import '../services/camera_image_utils.dart';
@@ -22,6 +23,8 @@ import '../services/hand_engine.dart';
 import '../services/mlkit_face_engine.dart';
 import '../services/object_engine.dart';
 import '../services/owner_profile_store.dart';
+import '../services/persona_log_server.dart';
+import '../services/persona_logger.dart';
 import '../services/person_repository.dart';
 import '../services/static_server.dart';
 import '../services/base/base_service.dart';
@@ -55,6 +58,10 @@ class DisplaySettings {
   bool showObject = true;
   bool mirrorFrontCamera = true;
 
+  /// 使用前置摄像头(true)还是后置摄像头(false)。默认前置(陪伴场景对着用户)。
+  /// 后置镜头通常画质更好、对焦更准,可在设置页切换以对比物体识别效果。
+  bool useFrontCamera = true;
+
   // —— 底座控制 ——
   /// 底座控制总开关。
   bool baseControlEnabled = false;
@@ -73,6 +80,12 @@ class DisplaySettings {
   /// 云端服务 API Key(阿里云 ASR/TTS、LLM;阶段 3+ 使用,首版可留空占位)。
   String? asrApiKey;
   String? llmApiKey;
+
+  // —— 人物日志 ——
+  /// 持久化记录开关：开启后按天记录识别到的人物/物体/表情/对话等。默认开。
+  bool personaLogEnabled = true;
+  /// 日志 HTTP 浏览服务开关：开启后可在同一局域网的电脑上访问查看日志。
+  bool personaLogServerEnabled = false;
 }
 
 /// 一次人脸采样的结果（用于「认识我」录入）。
@@ -97,6 +110,13 @@ class AppController extends ChangeNotifier {
   final StaticServer staticServer = StaticServer();
   final BaseService baseService = BaseService();
   final VoiceAssistant voiceAssistant = VoiceAssistant();
+
+  /// 人物行为日志记录器(按天持久化,供后续分析人物)。
+  final PersonaLogger personaLogger = PersonaLogger();
+
+  /// 人物日志 HTTP 浏览服务(局域网电脑端查看,方便调试)。
+  late final PersonaLogServer personaLogServer =
+      PersonaLogServer(personaLogger);
   /// LLM 服务配置(DeepSeek 预设,可在设置页修改并持久化)。
   final LlmConfigStore llmConfigStore = LlmConfigStore();
 
@@ -203,6 +223,14 @@ class AppController extends ChangeNotifier {
   // 录入采样请求
   Completer<EnrollCapture?>? _captureCompleter;
 
+  // —— 人物日志：感知节流 ——
+  // 感知帧高频(~5fps),不能逐帧落盘。这里做「变化触发 + 最小间隔」节流：
+  // 仅当关键信息(人物/表情/手势/物体/手持)相对上次记录发生变化,且距上次
+  // 记录已超过最小间隔时,才写一条 perception 记录,避免日志被重复帧刷爆。
+  String _lastPerceptionSig = '';
+  DateTime _lastPerceptionLog = DateTime.fromMillisecondsSinceEpoch(0);
+  static const Duration _perceptionMinInterval = Duration(seconds: 2);
+
   CameraController? get cameraController => _camera;
 
   void _setLoading(double progress, String message) {
@@ -255,6 +283,10 @@ class AppController extends ChangeNotifier {
       _setLoading(0.95, '读取已录入人物…');
       await personRepository.load();
 
+      // 初始化人物日志记录器(按天持久化)。失败不阻断主流程。
+      personaLogger.enabled = settings.personaLogEnabled;
+      await personaLogger.initialize();
+
       // 加载 LLM 配置(DeepSeek 预设),并注入语音助手的对话服务。
       // 预置 Key 仅在首次落盘时使用,之后以设置页录入为准。
       await llmConfigStore.load(defaultApiKey: _kPresetLlmApiKey);
@@ -286,21 +318,37 @@ class AppController extends ChangeNotifier {
     }
   }
 
+  /// 取流分辨率。物体识别(YOLO)对输入分辨率敏感:过低(如 low≈240p)时
+  /// 细节不足,杯子/书/手机这类相似小物体极易被误判。medium(≈480p)在
+  /// 准确率与 CPU/内存(逐像素 YUV→RGB 在主 isolate)之间取得平衡;若设备
+  /// 算力不足出现卡顿,可下调回 low;追求更高精度可上调到 high(720p)。
+  static const ResolutionPreset _captureResolution = ResolutionPreset.medium;
+
   Future<void> _initCamera() async {
     final cameras = await availableCameras();
     if (cameras.isEmpty) {
       throw StateError('未检测到可用摄像头');
     }
+    final wantFront = settings.useFrontCamera;
+    final preferred =
+        wantFront ? CameraLensDirection.front : CameraLensDirection.back;
+    final fallback =
+        wantFront ? CameraLensDirection.back : CameraLensDirection.front;
     final selected = cameras.firstWhere(
-      (c) => c.lensDirection == CameraLensDirection.front,
-      orElse: () => cameras.first,
+      (c) => c.lensDirection == preferred,
+      orElse: () => cameras.firstWhere(
+        (c) => c.lensDirection == fallback,
+        orElse: () => cameras.first,
+      ),
     );
     _sensorOrientation = selected.sensorOrientation;
     _isFrontCamera = selected.lensDirection == CameraLensDirection.front;
+    // 与实际选中的镜头保持一致(请求的镜头不存在时已回退)。
+    settings.useFrontCamera = _isFrontCamera;
 
     final controller = CameraController(
       selected,
-      ResolutionPreset.low,
+      _captureResolution,
       enableAudio: false,
       // 从源头限定 5fps 采集,与 _detectInterval=200ms 检测节流对齐:
       // 硬件不再以 30fps 回调再被丢弃 25 次,而是直接只产 5 帧/秒,
@@ -314,6 +362,47 @@ class AppController extends ChangeNotifier {
     // 从首帧起即为 landscape，避免 portraitUp→landscape 的 1~2 秒旋转闪烁。
     await controller.lockCaptureOrientation(DeviceOrientation.landscapeLeft);
     _camera = controller;
+  }
+
+  /// 是否正在切换摄像头(切换期间预览置黑、设置项禁用)。
+  bool _switchingCamera = false;
+  bool get isSwitchingCamera => _switchingCamera;
+
+  /// 在前/后摄像头之间切换(供设置页对比不同镜头的识别效果)。
+  Future<void> switchCamera() => setCamera(useFront: !_isFrontCamera);
+
+  /// 切换到指定镜头:停旧流 → 释放旧控制器 → 用新镜头重建并重启取流。
+  /// 切换期间复位与上一镜头相关的缓存(身份槽/物体/感知签名),避免错位残留。
+  Future<void> setCamera({required bool useFront}) async {
+    if (_switchingCamera) return;
+    if (_camera != null && _isFrontCamera == useFront) return;
+    _switchingCamera = true;
+    settings.useFrontCamera = useFront;
+    notifyListeners();
+    final old = _camera;
+    // 预览先置黑,避免 UI 继续引用即将释放的控制器。
+    _camera = null;
+    notifyListeners();
+    try {
+      if (old != null) {
+        if (old.value.isStreamingImages) {
+          await old.stopImageStream().catchError((_) {});
+        }
+        await old.dispose();
+      }
+      // 复位上一镜头遗留的识别缓存。
+      _slots.clear();
+      _lastObjects = const [];
+      _lastPerceptionSig = '';
+      await _initCamera();
+      await _camera?.startImageStream(_onFrame);
+    } catch (e) {
+      debugPrint('[AppController] switchCamera failed: $e');
+      _errorMessage = '切换摄像头失败：$e';
+    } finally {
+      _switchingCamera = false;
+      notifyListeners();
+    }
   }
 
   DeviceOrientation get _deviceOrientation =>
@@ -539,10 +628,66 @@ class AppController extends ChangeNotifier {
         objects: objects,
         mirror: mirror,
       );
+      _maybeLogPerception();
       if (!_disposed) notifyListeners();
     } catch (e) {
       debugPrint('processFrame error: $e');
     }
+  }
+
+  /// 变化触发的感知日志：把当前画面的人物/表情/手势/物体等写入人物日志。
+  /// 仅在关键信息相对上次记录发生变化、且超过最小间隔时落盘(见节流字段说明)。
+  /// 空场景(无人脸、无物体、无手势)不记录,避免无意义噪声。
+  void _maybeLogPerception() {
+    if (!settings.personaLogEnabled || !personaLogger.enabled) return;
+
+    final face = _result.face;
+    final identity = face?.identity;
+    final person = identity?.person.name;
+    final expression = face?.expression.expression.label;
+    final gesture =
+        _result.hands.isNotEmpty ? _result.hands.first.gesture?.label : null;
+    final objects = <String>[];
+    for (final o in _result.objects) {
+      final l = o.label;
+      if (l != null && l.isNotEmpty && !objects.contains(l)) objects.add(l);
+    }
+    objects.sort();
+    final held = _result.heldObject?.label;
+    final faceCount = _result.faces.length;
+
+    // 空场景：什么都没识别到时不记录(减少噪声)。
+    if (faceCount == 0 && objects.isEmpty && gesture == null) return;
+
+    final sig = '$person|$expression|$gesture|${objects.join(',')}'
+        '|$held|$faceCount';
+    final now = DateTime.now();
+    final changed = sig != _lastPerceptionSig;
+    final elapsedOk = now.difference(_lastPerceptionLog) >= _perceptionMinInterval;
+    // 变化才记;但同一状态长时间持续也无需重复记(仅在变化时落盘)。
+    if (!changed || !elapsedOk) return;
+
+    _lastPerceptionSig = sig;
+    _lastPerceptionLog = now;
+
+    final scene = _buildSceneDescription(
+      heldObject: _result.heldObject,
+      objectNames: objects,
+      identity: person,
+    );
+
+    personaLogger.log(PersonaLogEntry(
+      timestamp: now,
+      type: 'perception',
+      person: person,
+      relation: identity?.person.relation.label,
+      expression: expression,
+      gesture: gesture,
+      objects: objects,
+      heldObject: held,
+      scene: scene,
+      faceCount: faceCount,
+    ));
   }
 
   /// 后台执行一次 YOLO 物体检测：在 Isolate 里把摆正图编码为 JPEG（重计算,
@@ -741,6 +886,33 @@ class AppController extends ChangeNotifier {
     _virtualPetStarting = null;
   }
 
+  /// 人物日志 HTTP 浏览服务地址(局域网),启动后可用。
+  String? _personaLogUrl;
+  Future<String>? _personaLogStarting;
+  String? get personaLogUrl => _personaLogUrl;
+
+  /// 启动人物日志 HTTP 服务并返回局域网访问地址。多次调用等待同一启动过程。
+  Future<String> startPersonaLogServer() async {
+    if (_personaLogUrl != null) return _personaLogUrl!;
+    _personaLogStarting ??= _doStartPersonaLogServer();
+    return _personaLogStarting!;
+  }
+
+  Future<String> _doStartPersonaLogServer() async {
+    _personaLogUrl = await personaLogServer.start();
+    _personaLogStarting = null;
+    notifyListeners();
+    return _personaLogUrl!;
+  }
+
+  /// 停止人物日志 HTTP 服务。
+  Future<void> stopPersonaLogServer() async {
+    await personaLogServer.stop();
+    _personaLogUrl = null;
+    _personaLogStarting = null;
+    notifyListeners();
+  }
+
   /// 修改显示/识别设置后刷新监听者（用于设置页开关）。
   void updateSettings(VoidCallback change) {
     change();
@@ -753,6 +925,14 @@ class AppController extends ChangeNotifier {
     }
     // 语音助手总开关 / 唤醒 / TTS 变更时按需启停(仿虚拟宠物服务管理模式)。
     _syncVoiceAssistant();
+    // 人物日志记录开关实时生效。
+    personaLogger.enabled = settings.personaLogEnabled;
+    // 日志 HTTP 服务按开关启停。
+    if (settings.personaLogServerEnabled && _personaLogUrl == null) {
+      startPersonaLogServer();
+    } else if (!settings.personaLogServerEnabled && _personaLogUrl != null) {
+      stopPersonaLogServer();
+    }
     notifyListeners();
   }
 
@@ -766,6 +946,50 @@ class AppController extends ChangeNotifier {
       if (cfg.sessionId == sessionId) return;
       await pophieConfigStore.save(cfg.copyWith(sessionId: sessionId));
     };
+    // 每轮对话完成后把交互内容连同当前感知上下文写入人物日志。
+    voiceAssistant.onInteraction = ({
+      required String userText,
+      required String replyText,
+      String? robotState,
+    }) =>
+        _logConversation(
+          userText: userText,
+          replyText: replyText,
+          robotState: robotState,
+        );
+  }
+
+  /// 把一轮语音对话写入人物日志,附带当前画面的人物/表情/物体上下文,
+  /// 便于后续把「说了什么」与「当时在场的人和场景」关联分析。
+  void _logConversation({
+    required String userText,
+    required String replyText,
+    String? robotState,
+  }) {
+    if (!settings.personaLogEnabled) return;
+    final face = _result.face;
+    final identity = face?.identity;
+    final objects = <String>[];
+    for (final o in _result.objects) {
+      final l = o.label;
+      if (l != null && l.isNotEmpty && !objects.contains(l)) objects.add(l);
+    }
+    personaLogger.log(PersonaLogEntry(
+      timestamp: DateTime.now(),
+      type: 'conversation',
+      person: identity?.person.name,
+      relation: identity?.person.relation.label,
+      expression: face?.expression.expression.label,
+      gesture: _result.hands.isNotEmpty
+          ? _result.hands.first.gesture?.label
+          : null,
+      objects: objects,
+      heldObject: _result.heldObject?.label,
+      faceCount: _result.faces.length,
+      userText: userText.isEmpty ? null : userText,
+      replyText: replyText.isEmpty ? null : replyText,
+      robotState: robotState,
+    ));
   }
 
   /// 由当前识别结果构造 Pophie 感知上下文(表情/身份/手势/物体)。
@@ -1024,6 +1248,8 @@ class AppController extends ChangeNotifier {
     baseService.removeListener(_onBaseServiceChanged);
     baseService.dispose();
     staticServer.stop();
+    personaLogServer.stop();
+    personaLogger.dispose();
     super.dispose();
   }
 }
@@ -1058,5 +1284,8 @@ Uint8List _encodeJpgFromRgba(Uint8List rgba, int w, int h) {
     bytes: rgba.buffer,
     order: img.ChannelOrder.rgba,
   );
-  return Uint8List.fromList(img.encodeJpg(image, quality: 85));
+  // 质量 92:YOLO 对压缩伪影敏感,过低的 JPEG 质量会进一步劣化相似小物体
+  // (杯子/书/手机)的纹理特征。略提质量换取识别准确率,编码在 Isolate 中
+  // 执行不阻塞主循环。
+  return Uint8List.fromList(img.encodeJpg(image, quality: 92));
 }

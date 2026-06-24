@@ -42,28 +42,52 @@ assets/models/mobilefacenet.tflite
 
 手势（hand_detection）所需的 TFLite 模型已由插件内置打包，无需手动放置。
 
-## 物体识别模型（YOLO11，由插件自动管理）
+## 物体识别模型（YOLO26，已内置，完全离线）
 
-物体识别使用官方 `ultralytics_yolo` 插件 + **YOLO11**（COCO 80 类，含 cup /
-bottle / cell phone / book / laptop / remote / banana 等常见手持物体）。
+物体识别使用官方 `ultralytics_yolo` 插件 + **YOLO26**（COCO 80 类，含 cup /
+bottle / cell phone / book / laptop / remote / banana 等常见手持物体）。类名
+中文显示由 `object_engine.dart` 的 `_cocoZh` 映射。
 
-模型**无需手动放入本目录**：`lib/services/object_engine.dart` 里 `modelPath`
-设为官方 ID `yolo11n`，插件会在首次运行时**自动下载并缓存**（因此首次启动需
-联网；之后离线可用）。类名中文显示由 `object_engine.dart` 的 `_cocoZh` 映射。
+### 当前内置模型
 
-### 改为完全离线（可选，推荐用于出厂固件）
+| 文件 | 量化 | 说明 |
+| --- | --- | --- |
+| `yolo26n_int8.tflite` | int8（量化） | **默认**。约 3MB。插件 0.6.5 原生后处理按 YOLO26 架构设计，匹配度最好。 |
 
-若设备首次启动无网络，可把导出的模型随包提供：
+`object_engine.dart` 的 `_modelCandidates` 设为官方 ID `yolo26n`，插件优先用本
+目录内置的 `yolo26n_int8.tflite`（离线可用），找不到才回退联网下载。
 
-1. 用 Ultralytics 导出 TFLite：`yolo export model=yolo11n.pt format=tflite`
-   （Android 用 `.tflite`；iOS 用 Core ML `.mlpackage`）。
-2. 放到 `assets/models/yolo11n.tflite`，并在 `pubspec.yaml` 的 assets 已含
-   `assets/models/`（无需新增）。
-3. 把 `object_engine.dart` 的 `_modelPath` 改为 `assets/models/yolo11n.tflite`。
+> ⚠️ **不要换成 `yolo11n`**：它是不同架构，且可下载的旧 v0.2.0 导出与插件
+> 0.6.5 的原生解码器不匹配，实测识别效果反而更差。提升精度要用**同架构**的
+> 非量化 yolo26n（见下）。
+
+### 想要更高精度：换同架构的非量化 yolo26n（可选）
+
+int8 量化的 nano 模型对相近小物体（水杯/书/手机）区分略弱。要更准，导出
+**非量化的 yolo26n**（保持同架构，避免换 yolo11 的劣化）：
+
+```bash
+# float16（精度≈float32，体积适中，推荐移动端）
+yolo export model=yolo26n.pt format=tflite half=True   # 生成 yolo26n_float*.tflite
+# 或 float32（最准、最大）
+yolo export model=yolo26n.pt format=tflite
+```
+
+导出后改名为 `yolo26n_float.tflite` 放入本目录，并把 `object_engine.dart` 的
+`_modelCandidates` 改为：
+
+```dart
+static const List<String> _modelCandidates = [
+  'assets/models/yolo26n_float.tflite', // 非量化,精度优先
+  'yolo26n',                             // 回退:内置 int8
+];
+```
+
+`pubspec.yaml` 已包含 `assets/models/`，无需改动。
 
 ### 想只认少数自定义物体 / 更高精度
 
-用自有数据训练 YOLO11（`yolo train ...`）后按上面方式导出替换即可，
+用自有数据训练 YOLO26（`yolo train ...`）后按上面方式导出替换即可，
 `_cocoZh` 按你的类名补充中文映射。
 
 若模型加载失败（如首次无网络），App 仍正常运行：物体识别停用，状态页提示

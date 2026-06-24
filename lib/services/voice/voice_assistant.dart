@@ -74,6 +74,15 @@ class VoiceAssistant extends ChangeNotifier {
   /// session_id 更新后回调(供 AppController 持久化以延续会话记忆)。
   Future<void> Function(String sessionId)? onSessionPersist;
 
+  /// 一轮对话完成且有有效回复时回调(供 AppController 持久化到人物日志)。
+  /// 携带本轮 STT 文本、机器人回复文本与响应的动作/表情状态。静默回复
+  /// (STT 空或 LLM 失败)不触发。
+  void Function({
+    required String userText,
+    required String replyText,
+    String? robotState,
+  })? onInteraction;
+
   /// 机器人最近一次回复携带的 FSM 状态(驱动虚拟形象，文档 §2.6)。
   String? _robotState;
   String? get robotState => _robotState;
@@ -319,6 +328,13 @@ class VoiceAssistant extends ChangeNotifier {
 
       _replyText = result.text;
       notifyListeners();
+
+      // 上报本轮交互到人物日志(持久化分析用):有效回复才记。
+      onInteraction?.call(
+        userText: result.sttText,
+        replyText: result.text,
+        robotState: result.robotState,
+      );
 
       // speaking:流式合成(文档 §3.6.1)收齐 PCM 后用 playTts 整段播放。
       // ttsEnabled=false 时仅显示文字。

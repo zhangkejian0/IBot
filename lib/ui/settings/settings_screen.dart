@@ -1,5 +1,6 @@
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart' show MaterialPageRoute;
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 
 import '../../core/app_controller.dart';
 import '../../core/app_scope.dart';
@@ -9,6 +10,7 @@ import '../../theme/app_theme.dart';
 import 'base_debug_screen.dart';
 import 'face_registration_screen.dart';
 import 'friend_list_sheet.dart';
+import 'persona_log_screen.dart';
 
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
@@ -236,6 +238,43 @@ class SettingsScreen extends StatelessWidget {
                               .updateSettings(() => s.objectEnabled = v)
                           : null,
                     ),
+                    CupertinoListTile.notched(
+                      backgroundColor: AppTheme.groupedBackground,
+                      leading: const _LeadingIcon(
+                          CupertinoIcons.camera_rotate_fill,
+                          AppTheme.accentPurple),
+                      title: const Text('摄像头',
+                          style: TextStyle(color: AppTheme.label)),
+                      subtitle: Text(
+                        s.useFrontCamera ? '前置（面向用户）' : '后置',
+                        style:
+                            const TextStyle(color: AppTheme.secondaryLabel),
+                      ),
+                      trailing: controller.isSwitchingCamera
+                          ? const CupertinoActivityIndicator()
+                          : CupertinoSlidingSegmentedControl<bool>(
+                              groupValue: s.useFrontCamera,
+                              children: const {
+                                true: Padding(
+                                  padding:
+                                      EdgeInsets.symmetric(horizontal: 6),
+                                  child: Text('前置',
+                                      style: TextStyle(fontSize: 13)),
+                                ),
+                                false: Padding(
+                                  padding:
+                                      EdgeInsets.symmetric(horizontal: 6),
+                                  child: Text('后置',
+                                      style: TextStyle(fontSize: 13)),
+                                ),
+                              },
+                              onValueChanged: (v) {
+                                if (v != null) {
+                                  controller.setCamera(useFront: v);
+                                }
+                              },
+                            ),
+                    ),
                   ],
                 ),
 
@@ -359,6 +398,8 @@ class SettingsScreen extends StatelessWidget {
                     ),
                   ],
                 ),
+
+                _PersonaLogSection(controller: controller),
 
                 const _AboutSection(),
               ],
@@ -1155,6 +1196,104 @@ class _VoicePickerSheet extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// 人物日志分组：持久化记录开关 + 局域网 HTTP 查看服务 + 本地查看入口。
+/// 订阅 controller 以反映服务地址等运行态变化。
+class _PersonaLogSection extends StatelessWidget {
+  const _PersonaLogSection({required this.controller});
+  final AppController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final s = controller.settings;
+    final url = controller.personaLogUrl;
+    return CupertinoListSection.insetGrouped(
+      backgroundColor: AppTheme.background,
+      decoration: const BoxDecoration(
+        color: AppTheme.groupedBackground,
+        borderRadius: BorderRadius.all(Radius.circular(12)),
+      ),
+      header: const _Header('人物日志'),
+      footer: const _Footer(
+          '按天持久化记录识别到的人物、表情、手势、物体与语音对话,用于分析人物。'
+          '开启「局域网查看服务」后,可在同一 Wi-Fi 下的电脑浏览器中打开下方地址查看日志。'),
+      children: [
+        _SwitchTile(
+          icon: CupertinoIcons.doc_text_fill,
+          color: AppTheme.accentGreen,
+          label: '持久化记录日志',
+          value: s.personaLogEnabled,
+          onChanged: (v) =>
+              controller.updateSettings(() => s.personaLogEnabled = v),
+        ),
+        _SwitchTile(
+          icon: CupertinoIcons.globe,
+          color: AppTheme.accent,
+          label: '局域网查看服务 (HTTP)',
+          value: s.personaLogServerEnabled,
+          onChanged: (v) => controller
+              .updateSettings(() => s.personaLogServerEnabled = v),
+        ),
+        if (s.personaLogServerEnabled)
+          CupertinoListTile.notched(
+            backgroundColor: AppTheme.groupedBackground,
+            leading: const _LeadingIcon(
+                CupertinoIcons.link, AppTheme.accentTeal),
+            title: const Text('访问地址',
+                style: TextStyle(color: AppTheme.label)),
+            subtitle: Text(
+              url ?? '启动中…',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: AppTheme.secondaryLabel),
+            ),
+            trailing: url == null
+                ? const CupertinoActivityIndicator()
+                : const Icon(CupertinoIcons.doc_on_doc,
+                    color: AppTheme.secondaryLabel, size: 18),
+            onTap: url == null
+                ? null
+                : () async {
+                    await Clipboard.setData(ClipboardData(text: url));
+                    if (!context.mounted) return;
+                    showCupertinoDialog<void>(
+                      context: context,
+                      builder: (ctx) => CupertinoAlertDialog(
+                        title: const Text('已复制地址'),
+                        content: Padding(
+                          padding: const EdgeInsets.only(top: 8),
+                          child: Text('$url\n\n'
+                              '在同一局域网的电脑浏览器中打开即可查看日志。'),
+                        ),
+                        actions: [
+                          CupertinoDialogAction(
+                            isDefaultAction: true,
+                            child: const Text('好'),
+                            onPressed: () => Navigator.of(ctx).pop(),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+          ),
+        CupertinoListTile.notched(
+          backgroundColor: AppTheme.groupedBackground,
+          leading: const _LeadingIcon(
+              CupertinoIcons.list_bullet_below_rectangle, AppTheme.accentPurple),
+          title: const Text('查看日志', style: TextStyle(color: AppTheme.label)),
+          subtitle: const Text('按天浏览本机记录',
+              style: TextStyle(color: AppTheme.secondaryLabel)),
+          trailing: const CupertinoListTileChevron(),
+          onTap: () => Navigator.of(context).push(
+            CupertinoPageRoute<void>(
+              builder: (_) => PersonaLogScreen(logger: controller.personaLogger),
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
