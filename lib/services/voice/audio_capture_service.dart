@@ -93,6 +93,10 @@ class AudioCaptureService {
   /// 用于「双击/唤醒后聆听一句话 → 整段上传 Pophie /api/chat」的流程。
   /// 必须在 [start] 之后调用(录音管线已在跑)。
   ///
+  /// 返回 [VadResult]:含 PCM 与 VAD 静音判定时长([VadResult.silenceMs],
+  /// 即说完话后等到 VAD 触发结束的时长,排查「即问即答」延迟用)。
+  /// 未采集到语音返回 null。
+  ///
   /// 阈值说明(均为 RMS 归一化到 0..1,分母 6000):
   /// - [speechThreshold] 起说话门槛。原 0.12 偏高,声音小/离麦远时达不到
   ///   → 偶发"未采集到语音"。降到 0.06 让正常说话能稳定触发。
@@ -101,7 +105,7 @@ class AudioCaptureService {
   ///   才上传),降到 700ms(Siri ~700ms、Google ~600ms 的业界值),
   ///   省 ~0.8s 端到端延迟;在"不误截停顿"与"快速响应"间取得平衡。
   /// - [onsetTimeout] 起始超时。原 6s 偏短(唤醒后停顿一下就超时),延到 10s。
-  Future<Uint8List?> captureUtterance({
+  Future<VadResult?> captureUtterance({
     Duration maxDuration = const Duration(seconds: 12),
     Duration silenceTimeout = const Duration(milliseconds: 700),
     Duration onsetTimeout = const Duration(seconds: 10),
@@ -109,7 +113,7 @@ class AudioCaptureService {
     double silenceThreshold = 0.04,
   }) async {
     if (!_running) return null;
-    final completer = Completer<Uint8List?>();
+    final completer = Completer<VadResult?>();
     final buffer = BytesBuilder();
     var speechStarted = false;
     DateTime? lastVoiceAt;
@@ -121,15 +125,22 @@ class AudioCaptureService {
     var maxObservedLevel = 0.0;
     var sampleCount = 0;
 
-    void finish(Uint8List? result) {
+    void finish(Uint8List? result, {DateTime? silenceStart}) {
       if (completer.isCompleted) return;
       ticker?.cancel();
       sub?.cancel();
+      // VAD 静音判定时长:从最后一次检测到语音 → 结束(说完话后的等待)。
+      final silenceMs = silenceStart != null
+          ? DateTime.now().difference(silenceStart).inMilliseconds
+          : null;
       debugPrint('[AudioCapture] utterance finished: '
           'speechStarted=$speechStarted bytes=${result?.length ?? 0} '
           'maxLevel=${maxObservedLevel.toStringAsFixed(3)} '
-          'samples=$sampleCount threshold=$speechThreshold');
-      completer.complete(result);
+          'samples=$sampleCount threshold=$speechThreshold '
+          'silenceMs=$silenceMs');
+      completer.complete(result == null
+          ? null
+          : VadResult(pcm: result, silenceMs: silenceMs));
     }
 
     sub = audioStream.listen(
@@ -144,14 +155,16 @@ class AudioCaptureService {
       },
       onError: (e) {
         debugPrint('[AudioCapture] utterance stream error: $e');
-        finish(speechStarted ? buffer.toBytes() : null);
+        finish(speechStarted ? buffer.toBytes() : null,
+            silenceStart: lastVoiceAt);
       },
     );
 
     ticker = Timer.periodic(const Duration(milliseconds: 100), (_) {
       final now = DateTime.now();
       if (now.difference(startAt) >= maxDuration) {
-        finish(speechStarted ? buffer.toBytes() : null);
+        finish(speechStarted ? buffer.toBytes() : null,
+            silenceStart: lastVoiceAt);
         return;
       }
       if (!speechStarted) {
@@ -160,7 +173,7 @@ class AudioCaptureService {
       }
       if (lastVoiceAt != null &&
           now.difference(lastVoiceAt!) >= silenceTimeout) {
-        finish(buffer.toBytes());
+        finish(buffer.toBytes(), silenceStart: lastVoiceAt);
       }
     });
 
@@ -190,4 +203,16 @@ class AudioCaptureService {
     await _audioStream.close();
     await _recorder.dispose();
   }
+}
+
+/// [AudioCaptureService.captureUtterance] 的返回结果。
+///
+/// [pcm] 为整段裸 PCM16(16kHz/mono);[silenceMs] 为 VAD 静音判定时长
+/// (说完话后等到 VAD 触发结束的时长,排查「即问即答」延迟用)。
+/// silenceMs 为 null 表示非正常结束(如到达 maxDuration 截断)。
+class VadResult {
+  const VadResult({required this.pcm, this.silenceMs});
+
+  final Uint8List pcm;
+  final int? silenceMs;
 }

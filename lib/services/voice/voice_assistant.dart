@@ -89,6 +89,11 @@ class VoiceAssistant extends ChangeNotifier {
 
   StreamSubscription<String>? _wakeSub;
 
+  // —— 分阶段耗时埋点(排查「即问即答」延迟)——
+  // 每轮对话开始时重置,各阶段用 [recordTiming] 记录,结束时 [logTimingSummary]
+  // 汇总打印。阶段定义见 [_runConversation] 注释。
+  _ConversationTimings? _timings;
+
   // —— 主动消息轮询(文档 §3.8)——
   /// 轮询定时器:总开关开启期间每 5s 拉一次 /api/proactive_messages。
   Timer? _proactiveTimer;
@@ -201,10 +206,15 @@ class VoiceAssistant extends ChangeNotifier {
   /// FSM 状态与 TTS 音频(见 docs/API对接文档.md §3.4)。
   Future<void> _runConversation() async {
     if (_state != VoiceState.idle) return; // 防重入
+    // 启动本轮耗时埋点(排查「即问即答」延迟,见 _ConversationTimings)。
+    _timings = _ConversationTimings();
+    final t = _timings!;
+    final wakeAt = t.startedAt; // 唤醒命中时刻(端到端延迟起点)
     try {
       // waking:短暂过渡。先暂停唤醒监听,避免把用户说的话再次当唤醒词。
       _setState(VoiceState.waking);
       await wakeWord.stop();
+      t.wakeMs = DateTime.now().difference(wakeAt).inMilliseconds;
 
       // listening:采集一句完整语音(静音 VAD 自动结束)。
       _setState(VoiceState.listening);
@@ -212,7 +222,12 @@ class VoiceAssistant extends ChangeNotifier {
       _replyText = '';
       _robotState = null;
       notifyListeners();
-      final pcm = await audio.captureUtterance();
+      final listenSw = Stopwatch()..start();
+      final vadResult = await audio.captureUtterance();
+      final pcm = vadResult?.pcm;
+      t.vadSilenceMs = vadResult?.silenceMs; // VAD 静音判定时长(刚性延迟)
+      listenSw.stop();
+      t.listenMs = listenSw.elapsedMilliseconds;
       Uint8List? wav;
       if (pcm == null || pcm.isEmpty) {
         debugPrint('[VoiceAssistant] no speech captured');
@@ -224,6 +239,8 @@ class VoiceAssistant extends ChangeNotifier {
         conversationLog.log('listen',
             '已采集语音 ${pcm.length} 字节 (PCM) → WAV ${wav.length} 字节');
       }
+      conversationLog.log('listen',
+          '聆听耗时 ${t.listenMs}ms${t.vadSilenceMs != null ? "(其中静音判定 ${t.vadSilenceMs}ms)" : ""}');
 
       // thinking:整段上传后端。有语音带 wavBytes,无语音但有感知仍发送。
       // 既无语音也无感知 → 跳过(没有有效输入)。
@@ -240,6 +257,7 @@ class VoiceAssistant extends ChangeNotifier {
           '上传 Pophie /api/chat (skipTts=true 流式优先'
           '${wav == null ? ', 纯感知无语音' : ''})…');
       PophieChatResult result;
+      final chatSw = Stopwatch()..start();
       try {
         result = await pophie.chat(
           wavBytes: wav,
@@ -251,10 +269,17 @@ class VoiceAssistant extends ChangeNotifier {
           skipTts: true,
         );
       } catch (e) {
+        chatSw.stop();
+        t.chatMs = chatSw.elapsedMilliseconds;
         debugPrint('[VoiceAssistant] chat request failed: $e');
-        conversationLog.log('think', 'Pophie 请求失败: $e', error: true);
+        conversationLog.log('think',
+            'Pophie 请求失败(${t.chatMs}ms): $e', error: true);
         return; // finally 会回到 idle 并恢复唤醒监听
       }
+      chatSw.stop();
+      t.chatMs = chatSw.elapsedMilliseconds;
+      conversationLog.log('think',
+          '/api/chat 耗时 ${t.chatMs}ms(STT+LLM)');
 
       if (result.sessionId != null) {
         await onSessionPersist?.call(result.sessionId!);
@@ -297,6 +322,9 @@ class VoiceAssistant extends ChangeNotifier {
       debugPrint('[VoiceAssistant] conversation error: $e');
       conversationLog.log('error', '对话异常: $e', error: true);
     } finally {
+      // 汇总本轮各阶段耗时(排查「即问即答」)。
+      _logTimingSummary();
+      _timings = null;
       _userText = '';
       _replyText = '';
       _robotState = null;
@@ -313,6 +341,17 @@ class VoiceAssistant extends ChangeNotifier {
       // 恢复唤醒监听,等待下一次唤醒。
       await _resumeWakeListening();
     }
+  }
+
+  /// 打印本轮对话各阶段耗时汇总(排查「即问即答」延迟)。
+  /// 在 _runConversation 的 finally 调用,一次对话一条汇总,便于定位瓶颈。
+  void _logTimingSummary() {
+    final t = _timings;
+    if (t == null) return;
+    final total = DateTime.now().difference(t.startedAt).inMilliseconds;
+    final msg = '耗时汇总: ${t.toString()} | 总轮次=${total}ms';
+    conversationLog.log('timing', msg);
+    debugPrint('[VoiceAssistant] $msg');
   }
 
   /// 流式合成并边收边播(文档 §3.6.1)。
@@ -361,7 +400,10 @@ class VoiceAssistant extends ChangeNotifier {
     await audio.stop();
     var chunkCount = 0;
     var started = false; // meta 是否已到(已 start 播放器)
+    final ttsSw = Stopwatch()..start(); // TTS 总耗时(发起到播完)
+    Stopwatch? firstPacketSw; // 从发起到首片到达
     try {
+      firstPacketSw = Stopwatch()..start();
       await pophie.ttsStream(
         text,
         voice: voice,
@@ -372,7 +414,16 @@ class VoiceAssistant extends ChangeNotifier {
         },
         onChunk: (pcm16) {
           if (chunkCount == 0) {
-            conversationLog.log('speak', '首个 PCM 分片到达,开始边收边播');
+            firstPacketSw!.stop();
+            final fpMs = firstPacketSw.elapsedMilliseconds;
+            _timings?.ttsFirstPacketMs = fpMs;
+            // 端到端首声:从本轮唤醒命中 → 用户听到首声(核心「即问即答」指标)。
+            _timings?.speakStartMs = _timings == null
+                ? null
+                : DateTime.now().difference(_timings!.startedAt).inMilliseconds;
+            conversationLog.log('speak',
+                '首个 PCM 分片到达,开始边收边播 (首包 ${fpMs}ms'
+                ', 端到端首声 ${_timings?.speakStartMs ?? "?"}ms)');
           }
           chunkCount++;
           // 入队并尝试立即喂入(首片即开口);队列满时由原生 feed 回调驱动。
@@ -382,7 +433,7 @@ class VoiceAssistant extends ChangeNotifier {
           debugPrint('[VoiceAssistant] tts stream done '
               'chunks=$chunkCount firstPacketMs=$firstPacketMs');
           conversationLog.log('speak',
-              '流式合成完成: $chunkCount 片, 首包延迟 ${firstPacketMs ?? "?"}ms');
+              '流式合成完成: $chunkCount 片, 服务端首包 ${firstPacketMs ?? "?"}ms');
           // 标记喂入结束:之后 waitForDone 会等队列+原生缓冲都排空。
           _streamingTts.markFeedingDone();
         },
@@ -391,9 +442,16 @@ class VoiceAssistant extends ChangeNotifier {
       if (started) {
         await _streamingTts.waitForDone();
         await _streamingTts.release();
-        conversationLog.log('speak', '流式播报完成');
+        ttsSw.stop();
+        _timings?.ttsTotalMs = ttsSw.elapsedMilliseconds;
+        conversationLog.log('speak',
+            '流式播报完成 (TTS 总耗时 ${ttsSw.elapsedMilliseconds}ms)');
+      } else {
+        ttsSw.stop();
       }
     } catch (e) {
+      ttsSw.stop();
+      _timings?.ttsTotalMs = ttsSw.elapsedMilliseconds;
       debugPrint('[VoiceAssistant] tts stream failed: $e — 回退批量 /api/tts');
       conversationLog.log('speak', '流式失败,回退批量: $e', error: true);
       // 流式途中可能已开口播放,先释放播放器再走批量。
@@ -623,5 +681,49 @@ class VoiceAssistant extends ChangeNotifier {
     speech.dispose();
     chat.dispose();
     super.dispose();
+  }
+}
+
+/// 一轮对话各阶段耗时(排查「即问即答」延迟)。
+///
+/// 阶段(对应 [_runConversation] 时序):
+/// - wake:唤醒命中 → 进入 waking(wakeWord.stop 完成)
+/// - listen:进入 listening → captureUtterance 返回(含 VAD 静音等待)
+/// - vadSilence:说完话后的静音判定时长(700ms 超时,刚性延迟)
+/// - chat:发起 /api/chat → 后端返回(STT + LLM 完成)
+/// - ttsFirstPacket:发起 /api/tts/stream → 首个 PCM 分片到达(首声延迟)
+/// - ttsTotal:TTS 流式总耗时(从开始到播完)
+/// - speakStart:唤醒命中 → 用户听到首声(端到端延迟,核心指标)
+///
+/// 记录方式:每阶段用 Stopwatch 测量,边界处 [record]。结束时 [summary]
+/// 输出可读摘要,一目了然哪个阶段是瓶颈。
+class _ConversationTimings {
+  /// 对话起点(唤醒命中时刻)。用于计算端到端延迟。
+  final DateTime startedAt = DateTime.now();
+
+  // 各阶段耗时(毫秒)。null 表示该阶段未到达(如静默回复无 tts)。
+  int? wakeMs;
+  int? listenMs;
+  int? vadSilenceMs; // VAD 静音判定(从说完话到 VAD 触发结束)
+  int? chatMs;
+  int? ttsFirstPacketMs;
+  int? ttsTotalMs;
+  /// 首声时刻相对唤醒命中的总延迟(核心「即问即答」指标)。
+  int? speakStartMs;
+
+  @override
+  String toString() {
+    final parts = <String>[];
+    void add(String label, int? ms) {
+      if (ms != null) parts.add('$label=${ms}ms');
+    }
+    add('wake', wakeMs);
+    add('listen', listenMs);
+    if (vadSilenceMs != null) parts.add('(含静音判定 ${vadSilenceMs}ms)');
+    add('chat', chatMs);
+    add('tts首包', ttsFirstPacketMs);
+    add('tts总', ttsTotalMs);
+    add('⏱端到端首声', speakStartMs);
+    return parts.join(' | ');
   }
 }
