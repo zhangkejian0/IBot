@@ -189,7 +189,10 @@ class _LogCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final e = entry;
     final headerBits = <String>[];
-    if (e.person != null) {
+    // 优先显示所有识别到的人物（多人脸场景）。
+    if (e.persons.length > 1) {
+      headerBits.add('${e.persons.join("、")}（${e.persons.length}人）');
+    } else if (e.person != null) {
       headerBits.add(e.relation != null
           ? '${e.person}（${e.relation}）'
           : e.person!);

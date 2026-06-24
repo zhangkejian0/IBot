@@ -28,7 +28,7 @@ class PophieConfig {
   });
 
   /// 默认后端地址(用户联调环境)。设置页可覆盖。
-  static const String defaultBaseUrl = 'http://192.168.23.163:8000';
+  static const String defaultBaseUrl = 'http://223.109.143.135:8000';
 
   bool get isValid => baseUrl.trim().isNotEmpty;
 

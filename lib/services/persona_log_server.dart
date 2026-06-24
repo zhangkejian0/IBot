@@ -94,6 +94,11 @@ class PersonaLogServer {
           await _writeJson(res, {'error': 'missing or invalid date'});
           return;
         }
+        if (request.method == 'DELETE') {
+          await logger.deleteDate(date);
+          await _writeJson(res, {'ok': true, 'deleted': date});
+          return;
+        }
         final entries = await logger.readDate(date);
         await _writeJson(res, {
           'date': date,
@@ -223,6 +228,8 @@ class PersonaLogServer {
   </select>
   <input id="kw" placeholder="搜索(人物/物体/文本)" style="width:200px" />
   <button id="refresh">刷新</button>
+  <button id="export">导出 JSON</button>
+  <button id="clear" style="border-color:var(--red);color:var(--red)">清除当日</button>
   <label class="chk"><input type="checkbox" id="auto" /> 自动刷新(5s)</label>
   <span class="spacer"></span>
 </header>
@@ -321,6 +328,50 @@ el('type').onchange=render;
 el('kw').oninput=render;
 el('auto').onchange=function(){
   if(this.checked){ timer=setInterval(loadLogs,5000); } else { clearInterval(timer); }
+};
+el('export').onclick=function(){
+  var date = el('date').value || 'unknown';
+  var type = el('type').value;
+  var kw = el('kw').value.trim().toLowerCase();
+  var filtered = [];
+  for(var i=0; i<allLogs.length; i++){
+    var e = allLogs[i];
+    if(type && e.type!==type) continue;
+    if(kw){
+      var hay = JSON.stringify(e).toLowerCase();
+      if(hay.indexOf(kw)<0) continue;
+    }
+    filtered.push(e);
+  }
+  var data = {date: date, exportedAt: new Date().toISOString(), count: filtered.length, logs: filtered};
+  var blob = new Blob([JSON.stringify(data, null, 2)], {type: 'application/json'});
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = 'xbot_logs_' + date + '.json';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+};
+el('clear').onclick=async function(){
+  var date = el('date').value;
+  if(!date || date.indexOf('-')<0){ alert('请先选择日期'); return; }
+  if(!confirm('确认清除 '+date+' 的全部日志？此操作不可恢复！')) return;
+  try{
+    var r = await fetch('/api/logs?date='+encodeURIComponent(date), {method:'DELETE'});
+    var j = await r.json();
+    if(j.ok){
+      allLogs = [];
+      render();
+      await loadDates();
+      alert('已清除 '+date+' 的日志');
+    } else {
+      alert('清除失败: '+(j.error||'未知错误'));
+    }
+  }catch(e){
+    alert('清除失败: '+e.message);
+  }
 };
 (async function(){ await loadDates(); await loadLogs(); })();
 </script>

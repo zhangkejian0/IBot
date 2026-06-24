@@ -656,11 +656,20 @@ class AppController extends ChangeNotifier {
     final held = _result.heldObject?.label;
     final faceCount = _result.faces.length;
 
+    // 收集所有识别到的人物（多人脸场景）。
+    final persons = <String>[];
+    for (final f in _result.faces) {
+      final name = f.identity?.person.name;
+      if (name != null && name.isNotEmpty && !persons.contains(name)) {
+        persons.add(name);
+      }
+    }
+
     // 空场景：什么都没识别到时不记录(减少噪声)。
     if (faceCount == 0 && objects.isEmpty && gesture == null) return;
 
-    final sig = '$person|$expression|$gesture|${objects.join(',')}'
-        '|$held|$faceCount';
+    final sig = '$person|${persons.join(",")}|$expression|$gesture'
+        '|${objects.join(',')}|$held|$faceCount';
     final now = DateTime.now();
     final changed = sig != _lastPerceptionSig;
     final elapsedOk = now.difference(_lastPerceptionLog) >= _perceptionMinInterval;
@@ -680,6 +689,7 @@ class AppController extends ChangeNotifier {
       timestamp: now,
       type: 'perception',
       person: person,
+      persons: persons,
       relation: identity?.person.relation.label,
       expression: expression,
       gesture: gesture,

@@ -15,6 +15,7 @@ class PersonaLogEntry {
     required this.timestamp,
     required this.type,
     this.person,
+    this.persons = const [],
     this.relation,
     this.expression,
     this.gesture,
@@ -35,8 +36,12 @@ class PersonaLogEntry {
   /// 记录类型：perception(感知) / conversation(对话) / event(系统事件)。
   final String type;
 
-  /// 识别到的主要人物姓名(身份识别命中)。
+  /// 识别到的主要人物姓名(身份识别命中，主脸)。
   final String? person;
+
+  /// 画面中所有识别到的人物姓名列表(多人脸场景)。
+  /// 包含主脸和其他被识别出的人物，按人脸面积降序排列。
+  final List<String> persons;
 
   /// 该人物与主人的关系标签(如「主人」「朋友」)。
   final String? relation;
@@ -80,6 +85,7 @@ class PersonaLogEntry {
       'type': type,
     };
     if (person != null) map['person'] = person;
+    if (persons.isNotEmpty) map['persons'] = persons;
     if (relation != null) map['relation'] = relation;
     if (expression != null) map['expression'] = expression;
     if (gesture != null) map['gesture'] = gesture;
@@ -101,6 +107,9 @@ class PersonaLogEntry {
           DateTime.tryParse(json['ts'] as String? ?? '') ?? DateTime.now(),
       type: json['type'] as String? ?? 'event',
       person: json['person'] as String?,
+      persons: (json['persons'] as List<dynamic>? ?? const [])
+          .map((e) => e.toString())
+          .toList(),
       relation: json['relation'] as String?,
       expression: json['expression'] as String?,
       gesture: json['gesture'] as String?,
