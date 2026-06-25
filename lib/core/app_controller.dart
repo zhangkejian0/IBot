@@ -120,8 +120,10 @@ class AppController extends ChangeNotifier {
   final PersonaLogger personaLogger = PersonaLogger();
 
   /// 人物日志 HTTP 浏览服务(局域网电脑端查看,方便调试)。
+  /// 注入 frameProvider 让网页能远程采样当前帧(POST /api/sample),
+  /// 这样人在设备前保持动作不动,在电脑网页上点按钮即可采样。
   late final PersonaLogServer personaLogServer =
-      PersonaLogServer(personaLogger);
+      PersonaLogServer(personaLogger, frameProvider: () => result);
   /// LLM 服务配置(DeepSeek 预设,可在设置页修改并持久化)。
   final LlmConfigStore llmConfigStore = LlmConfigStore();
 

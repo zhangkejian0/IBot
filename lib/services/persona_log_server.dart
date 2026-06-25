@@ -1,9 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' show Offset, Rect;
 
 import 'package:flutter/foundation.dart' show debugPrint;
 
+import '../models/detection.dart';
 import 'persona_logger.dart';
 
 /// 人物日志的 HTTP 浏览服务。
@@ -15,13 +17,19 @@ import 'persona_logger.dart';
 /// - `GET /`                      → 内嵌单页看板(下拉选日期 + 过滤 + 表格)
 /// - `GET /api/dates`             → 已有日志日期列表(JSON)
 /// - `GET /api/logs?date=Y-M-D`   → 指定日期全部记录(JSON 数组)
+/// - `POST /api/sample`           → 远程采样:抓取当前帧点位+动作标注存库
 /// - `GET /healthz`               → 健康检查
 ///
-/// 数据源为 [PersonaLogger]，服务只读，不写日志。
+/// 数据源为 [PersonaLogger]。采样能力由 [frameProvider] 提供(从 AppController
+/// 取实时帧),允许在电脑网页上远程触发,无需触碰设备(避免改变采样动作姿态)。
 class PersonaLogServer {
-  PersonaLogServer(this.logger);
+  PersonaLogServer(this.logger, {this.frameProvider});
 
   final PersonaLogger logger;
+
+  /// 取当前检测帧的回调(由 AppController 注入)。为 null 表示无采样能力。
+  /// 网页 POST /api/sample 时调用,远程抓取当前帧点位。
+  final DetectionResult Function()? frameProvider;
 
   HttpServer? _server;
 
@@ -107,6 +115,10 @@ class PersonaLogServer {
         });
         return;
       }
+      if (path == '/api/sample') {
+        await _handleSample(request);
+        return;
+      }
       res.statusCode = HttpStatus.notFound;
       res.write('404 Not Found');
       await res.close();
@@ -124,6 +136,117 @@ class PersonaLogServer {
     res.write(jsonEncode(data));
     await res.close();
   }
+
+  /// 远程采样:抓取当前帧的全部点位 + 用户标注的动作名,存成 type='sample'。
+  /// POST body: `{"action":"托腮"}`。
+  Future<void> _handleSample(HttpRequest request) async {
+    final res = request.response;
+    try {
+      // 解析动作名。
+      final body = await _readBody(request);
+      String action = '未标注';
+      try {
+        final map = jsonDecode(body);
+        if (map is Map && map['action'] is String) {
+          action = (map['action'] as String).trim();
+        }
+      } catch (_) {}
+      if (action.isEmpty) action = '未标注';
+
+      // 取当前帧。
+      final provider = frameProvider;
+      if (provider == null) {
+        await _writeJson(res, {'ok': false, 'error': '采样未启用(无帧数据源)'});
+        return;
+      }
+      final result = provider();
+      if (result.faces.isEmpty &&
+          result.hands.isEmpty &&
+          result.poses.isEmpty &&
+          result.objects.isEmpty) {
+        await _writeJson(res, {'ok': false, 'error': '当前无检测数据,请确认检测在运行'});
+        return;
+      }
+
+      // 序列化 + 存库。
+      final extra = _serializeFrame(result);
+      extra['action'] = action;
+      logger.log(PersonaLogEntry(
+        timestamp: DateTime.now(),
+        type: 'sample',
+        faceCount: result.faces.length,
+        note: '采样: $action',
+        extra: extra,
+      ));
+      await _writeJson(res, {
+        'ok': true,
+        'action': action,
+        'summary':
+            '脸 ${result.faces.length} · 手 ${result.hands.length} · '
+            '姿态 ${result.poses.length} · 物体 ${result.objects.length}',
+        'extra': extra,
+      });
+    } catch (e) {
+      debugPrint('[PersonaLogServer] sample error: $e');
+      await _writeJson(res, {'ok': false, 'error': '$e'});
+    }
+  }
+
+  /// 读取请求体(UTF-8 字符串)。
+  Future<String> _readBody(HttpRequest request) async {
+    final bytes = await request.fold<List<int>>(
+      <int>[],
+      (acc, d) => acc..addAll(d),
+    );
+    return utf8.decode(bytes, allowMalformed: true);
+  }
+
+  /// 把一帧 DetectionResult 的全部坐标序列化成 extra Map。
+  /// 与 App 内 PersonaLogScreen._serializeFrame 保持一致。
+  Map<String, dynamic> _serializeFrame(DetectionResult result) {
+    final face = result.face;
+    return {
+      'mirror': result.mirror,
+      'face': face == null
+          ? null
+          : {
+              'box': _rectToList(face.boundingBox),
+              'gazeX': _round(face.gazeX),
+              'gazeY': _round(face.gazeY),
+              'eyeBlink': _round(face.eyeBlink),
+              'mouthOpenness': _round(face.mouthOpenness),
+            },
+      'hands': result.hands
+          .map((h) => {
+                'handedness': h.handedness?.name,
+                'box': _rectToList(h.boundingBox),
+                'landmarks': h.landmarks.map(_offsetToList).toList(),
+              })
+          .toList(),
+      'objects': result.objects
+          .map((o) => {
+                'label': o.label,
+                'confidence': _round(o.confidence),
+                'box': _rectToList(o.boundingBox),
+                'heldByHand': o.heldByHand,
+              })
+          .toList(),
+      'poses': result.poses
+          .map((p) => {
+                'landmarks': p.landmarks.map(_offsetToList).toList(),
+                'visibilities':
+                    p.visibilities.map((v) => _round(v)).toList(),
+              })
+          .toList(),
+    };
+  }
+
+  List<double> _offsetToList(Offset o) => [_round(o.dx), _round(o.dy)];
+
+  List<double> _rectToList(Rect r) =>
+      [_round(r.left), _round(r.top), _round(r.right), _round(r.bottom)];
+
+  double _round(double v) => (v * 1000).roundToDouble() / 1000;
 
   static bool _validDate(String s) =>
       RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(s);
@@ -226,6 +349,8 @@ class PersonaLogServer {
     display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
   header h1 { font-size: 18px; margin: 0; font-weight: 600; }
   header .spacer { flex: 1; }
+  .sample-bar { display: inline-flex; align-items: center; gap: 6px; }
+  #sample.sample-active { opacity: .6; pointer-events: none; }
   select, input, button { background: var(--panel2); color: var(--txt);
     border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px;
     font-size: 14px; outline: none; }
@@ -252,6 +377,13 @@ class PersonaLogServer {
   .t-event { background: rgba(255,159,10,.15); color: var(--orange); }
   .t-state { background: rgba(255,69,58,.15); color: var(--red); }
   .t-activity { background: rgba(191,90,242,.15); color: var(--purple); }
+  .t-sample { background: rgba(100,210,255,.18); color: var(--teal); }
+  details.sample { margin-top: 4px; }
+  details.sample summary { cursor: pointer; color: var(--sub); font-size: 12px; }
+  .sample-json { background: var(--panel2); border: 1px solid var(--line);
+    border-radius: 6px; padding: 8px; margin: 6px 0 0; font-size: 11px;
+    color: var(--teal); white-space: pre-wrap; word-break: break-all;
+    max-height: 320px; overflow: auto; }
   .person { color: var(--purple); font-weight: 600; }
   .chips span { display: inline-block; background: var(--panel2);
     border: 1px solid var(--line); border-radius: 6px; padding: 1px 7px;
@@ -274,9 +406,14 @@ class PersonaLogServer {
     <option value="conversation">对话</option>
     <option value="state">状态</option>
     <option value="activity">活动</option>
+    <option value="sample">采样</option>
     <option value="event">事件</option>
   </select>
   <input id="kw" placeholder="搜索(人物/物体/文本)" style="width:200px" />
+  <span class="sample-bar">
+    <input id="action" placeholder="动作名" value="托腮" style="width:90px" />
+    <button id="sample" style="border-color:var(--green);color:var(--green);font-weight:600">📷 采样当前帧</button>
+  </span>
   <button id="refresh">刷新</button>
   <button id="export">导出 JSON</button>
   <button id="clear" style="border-color:var(--red);color:var(--red)">清除当日</button>
@@ -310,6 +447,14 @@ function fmtTime(ts){
 }
 function esc(s){ return (s==null?'':String(s))
   .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+// 采样记录的点位数量摘要。
+function poseSummary(ex){
+  var f = ex.face ? 1 : 0;
+  var h = (ex.hands||[]).length;
+  var p = (ex.poses||[]).length;
+  var o = (ex.objects||[]).length;
+  return '脸 '+f+' · 手 '+h+' · 姿态 '+p+' · 物体 '+o;
+}
 
 async function loadDates(){
   var r = await fetch('/api/dates'); var j = await r.json();
@@ -356,6 +501,16 @@ function render(){
     if(e.userText) talk += '<div class="user">🗣 '+esc(e.userText)+'</div>';
     if(e.replyText) talk += '<div class="reply">🤖 '+esc(e.replyText)+'</div>';
     if(e.robotState) talk += '<div class="muted">状态: '+esc(e.robotState)+'</div>';
+    // 采样记录:渲染标注动作名 + 可折叠的完整点位 JSON(便于复制分析)。
+    if(e.type==='sample' && e.extra){
+      var act = e.extra.action ? '🎬 '+esc(e.extra.action) : '采样';
+      talk += '<div class="person">'+act+'</div>';
+      var pos = poseSummary(e.extra);
+      if(pos) talk += '<div class="muted">'+pos+'</div>';
+      var json = esc(JSON.stringify(e.extra, null, 1));
+      talk += '<details class="sample"><summary>点位 JSON (点击展开/复制)</summary>'
+        + '<pre class="sample-json">'+json+'</pre></details>';
+    }
     if(e.note) talk += '<div class="note">💡 '+esc(e.note)+'</div>';
     var personCell = e.person ? '<span class="person">'+esc(e.person)+'</span>'
       + (e.relation? ' <span class="muted">('+esc(e.relation)+')</span>':'')
@@ -380,6 +535,35 @@ el('refresh').onclick=loadLogs;
 el('date').onchange=loadLogs;
 el('type').onchange=render;
 el('kw').oninput=render;
+// 远程采样:POST 动作名 → 服务端抓当前帧存库 → 刷新 + 弹出点位 JSON。
+el('sample').onclick=async function(){
+  var action = el('action').value.trim() || '未标注';
+  var btn = el('sample');
+  btn.classList.add('sample-active');
+  btn.textContent = '采样中…';
+  try{
+    var r = await fetch('/api/sample',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({action: action})
+    });
+    var j = await r.json();
+    if(j.ok){
+      // 刷新日志让采样记录立即可见。
+      await loadLogs();
+      // 弹出点位 JSON 预览,方便即时核对/复制。
+      var info = '🎬 '+j.action+'\n'+j.summary+'\n\n'+JSON.stringify(j.extra, null, 1);
+      alert(info);
+    } else {
+      alert('采样失败: '+(j.error||'未知错误'));
+    }
+  } catch(e){
+    alert('采样请求失败: '+e);
+  } finally {
+    btn.classList.remove('sample-active');
+    btn.textContent = '📷 采样当前帧';
+  }
+};
 el('auto').onchange=function(){
   if(this.checked){ timer=setInterval(loadLogs,5000); } else { clearInterval(timer); }
 };

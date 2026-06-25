@@ -1289,7 +1289,10 @@ class _PersonaLogSection extends StatelessWidget {
           trailing: const CupertinoListTileChevron(),
           onTap: () => Navigator.of(context).push(
             CupertinoPageRoute<void>(
-              builder: (_) => PersonaLogScreen(logger: controller.personaLogger),
+              builder: (_) => PersonaLogScreen(
+                logger: controller.personaLogger,
+                controller: controller,
+              ),
             ),
           ),
         ),

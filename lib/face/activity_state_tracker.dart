@@ -1,5 +1,5 @@
 import 'dart:math' as math;
-import 'dart:ui' show Offset;
+import 'dart:ui' show Offset, Rect;
 
 import '../models/detection.dart';
 
@@ -187,6 +187,7 @@ class ActivityStateTracker {
     this.window = const Duration(seconds: 5),
     this.minVisibility = 0.5,
     this.handNearMouthDist = 0.18,
+    this.cupNearFaceDist = 0.12,
     this.poorPostureTiltDeg = 25.0,
     this.talkMouthLow = 0.15,
     this.talkMouthHigh = 0.8,
@@ -208,6 +209,10 @@ class ActivityStateTracker {
 
   /// 「手靠近嘴」判定:鼻到腕归一化距离小于此值视为举到嘴边。
   final double handNearMouthDist;
+
+  /// 「杯子贴近脸」判定:杯子中心到脸部 box 的距离小于此值视为举到嘴边。
+  /// 真实采样杯子中心落在脸 box 内(距离≈0),0.12 留余量容杯子略偏。
+  final double cupNearFaceDist;
 
   /// 「坐姿不良」的躯干前倾角阈值(度)。
   final double poorPostureTiltDeg;
@@ -303,14 +308,20 @@ class ActivityStateTracker {
     double torsoTilt = 0;
     if (poseOk) {
       armRaised = _isArmRaised(lm, vis);
-      if (holdingDrinkware) {
-        nearMouth = _isHandNearFace(lm, vis);
-      } else if (hasFace) {
-        // 托腮判定:未持饮水容器时,检查手腕是否落在脸的侧下方(脸颊/下巴)。
-        onCheek = _isHandOnCheek(lm, vis);
-      }
       torsoTilt = _torsoTiltDeg(lm);
       shoulderTensed = _isShoulderTensed(lm, vis);
+    }
+    // 喝水判定:用杯子 box 与脸部 box 的贴近程度(不依赖 pose——实测喝水时
+    // pose 手腕距鼻常超阈值,但杯子本身紧贴脸下方)。杯子在脸附近即视为
+    // "举到嘴边"。
+    if (holdingDrinkware && hasFace) {
+      nearMouth = _isCupNearFace(result.heldObject!, face.boundingBox);
+    }
+    // 托腮判定:用 HandOverlay + FaceOverlay(不依赖 pose——实测托腮时 pose
+    // 常因手臂遮挡而检测不到,但手部检测稳定)。未持饮水容器时,若任一手
+    // 的指尖贴近脸部 box 且手腕在脸下方,判定为托腮。
+    if (!holdingDrinkware && hasFace && result.hands.isNotEmpty) {
+      onCheek = _isHandOnCheekByHand(result.hands, face.boundingBox);
     }
 
     return _Sample(
@@ -491,49 +502,66 @@ class ActivityStateTracker {
     return check(11, 15) || check(12, 16);
   }
 
-  /// 手是否靠近脸(嘴部/鼻子):鼻(0)到任一手腕(15/16)归一化距离<阈值。
-  /// 用于「喝水举到嘴边」。
-  bool _isHandNearFace(List<Offset> lm, List<double> vis) {
-    if (lm.length < 17) return false;
-    final nose = lm[0];
-    if (nose == Offset.zero) return false;
-    double visAt(int i) => i < vis.length ? vis[i] : 0;
-    double distTo(int wristIdx) {
-      if (visAt(wristIdx) <= minVisibility) return double.infinity;
-      final w = lm[wristIdx];
-      if (w == Offset.zero) return double.infinity;
-      return (w - nose).distance;
-    }
-    final d = math.min(distTo(15), distTo(16));
-    return d < handNearMouthDist;
+  /// 杯子是否贴近脸部(举到嘴边):用杯子 box 与脸部 box 的距离判定。
+  ///
+  /// 实测喝水时 pose 手腕距鼻常超 0.18 阈值(手腕在杯柄,距嘴较远),但
+  /// 杯子本身紧贴脸下方(两 box 重叠或间距≈0)。故改用杯子 box 贴近脸 box
+  /// 判定,比手腕近鼻更直接可靠,且不依赖 pose。
+  /// 真实采样:杯子 box 与脸 box 间距≈0(IoU≈0.4,大面积重叠)。
+  bool _isCupNearFace(ObjectOverlay cup, Rect faceBox) {
+    final d = _distToBox(
+      Offset(cup.boundingBox.center.dx, cup.boundingBox.center.dy),
+      faceBox,
+    );
+    // 杯子中心距脸 box < 0.12(杯子中心在脸下方略偏,贴近嘴部)。
+    return d < cupNearFaceDist;
   }
 
-  /// 是否托腮/撑脸:任一手腕落在「脸的侧下方」(脸颊/下巴区域)。
+  /// 是否托腮/撑脸:基于 HandOverlay(手部 21 点) + 脸部 box 判定。
   ///
-  /// 几何判定(以鼻为原点的相对区域):手腕需同时满足
-  ///  1. 在鼻的侧方(水平偏离 > 阈值),即落在左下或右下;
-  ///  2. 在鼻的下方(到嘴/下巴高度),即比鼻低;
-  ///  3. 离鼻不太远(在脸附近,排除手垂在身侧)。
-  /// 与 [_isHandNearFace](喝水:手在嘴正前方)的区别:托腮手偏到脸**侧**,
-  /// 而非嘴正前方;故要求水平偏离更大、可略低于鼻。关键点:nose=0。
-  bool _isHandOnCheek(List<Offset> lm, List<double> vis) {
-    if (lm.length < 17) return false;
-    final nose = lm[0];
-    if (nose == Offset.zero) return false;
-    double visAt(int i) => i < vis.length ? vis[i] : 0;
-    bool check(int wristIdx) {
-      if (visAt(wristIdx) <= minVisibility) return false;
-      final w = lm[wristIdx];
-      if (w == Offset.zero) return false;
-      final dx = (w.dx - nose.dx).abs(); // 水平偏离(归一化)
-      final dy = w.dy - nose.dy; // 相对鼻的垂直位移(正=下方)
-      final dist = (w - nose).distance;
-      // 侧方:水平偏离足够大(落在脸颊侧而非嘴正前);
-      // 下方:不低于鼻(到下巴/脸颊高度),但不过低(远离脸);
-      // 在脸附近:总距离有上限。
-      return dx >= 0.05 && dy >= -0.01 && dist < handNearMouthDist + 0.06;
+  /// 实测托腮时人体姿态(Pose)常因手臂遮挡而检测不到,但手部检测稳定,
+  /// 故改用手部关键点判定。HandLandmarkType 顺序:0=手腕,8=食指尖,
+  /// 12=中指尖。
+  ///
+  /// 托腮几何特征(由真实采样数据校准):
+  ///  1. 指尖(8/12)贴近脸部 box:指尖到 face box 的最短距离 < 阈值;
+  ///  2. 指尖垂直位置在脸的中下部(脸颊/下巴),而非额头上方;
+  ///  3. 手腕(0)在脸 box 下方或侧下方(撑住脸的姿态),而非脸上方(挥手)。
+  /// 与喝水区别:未持饮水容器(调用方已保证)。
+  bool _isHandOnCheekByHand(List<HandOverlay> hands, Rect faceBox) {
+    for (final h in hands) {
+      if (h.landmarks.length < 13) continue;
+      final wrist = h.landmarks[0];
+      final indexTip = h.landmarks[8]; // 食指尖
+      final middleTip = h.landmarks[12]; // 中指尖
+      if (wrist == Offset.zero || indexTip == Offset.zero) continue;
+      // 指尖到 face box 的最短距离(归一化)。
+      final tipDist = math.min(
+        _distToBox(indexTip, faceBox),
+        _distToBox(middleTip, faceBox),
+      );
+      // 指尖贴近脸(<0.06,实测采样约 0.01~0.05)。
+      if (tipDist >= 0.06) continue;
+      // 指尖垂直位置在脸的中下部:y 在 faceBox 上 1/3 到下边界之间。
+      final faceUpperThird = faceBox.top + faceBox.height / 3;
+      final tipY = (indexTip.dy + middleTip.dy) / 2;
+      if (tipY < faceUpperThird) continue; // 指尖在额头区域,不算托腮
+      // 手腕在脸下方或同高(撑脸姿态):手腕 y >= 脸上 1/4。
+      if (wrist.dy < faceBox.top + faceBox.height / 4) continue;
+      return true;
     }
-    return check(15) || check(16);
+    return false;
+  }
+
+  /// 点到矩形(归一化)的最短距离。点在矩形内则距离为 0。
+  double _distToBox(Offset p, Rect box) {
+    final dx = p.dx < box.left
+        ? box.left - p.dx
+        : (p.dx > box.right ? p.dx - box.right : 0.0);
+    final dy = p.dy < box.top
+        ? box.top - p.dy
+        : (p.dy > box.bottom ? p.dy - box.bottom : 0.0);
+    return math.sqrt(dx * dx + dy * dy);
   }
 
   /// 躯干前倾角(度):双肩中点与双髋中点的连线,相对竖直方向的倾角。
