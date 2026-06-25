@@ -14,20 +14,27 @@ class XBotApp extends StatefulWidget {
   State<XBotApp> createState() => _XBotAppState();
 }
 
-class _XBotAppState extends State<XBotApp> {
+class _XBotAppState extends State<XBotApp> with WidgetsBindingObserver {
   late final AppController _controller;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _controller = AppController();
     _controller.initialize();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _controller.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _controller.onAppLifecycleStateChanged(state);
   }
 
   @override

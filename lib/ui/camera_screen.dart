@@ -409,9 +409,12 @@ class _CameraPreviewCover extends StatelessWidget {
 
   static const double _basis = 1000;
 
-  bool get _isLandscape =>
-      controller.value.deviceOrientation == DeviceOrientation.landscapeLeft ||
-      controller.value.deviceOrientation == DeviceOrientation.landscapeRight;
+  bool get _isLandscape {
+    final o = controller.value.lockedCaptureOrientation ??
+        controller.value.deviceOrientation;
+    return o == DeviceOrientation.landscapeLeft ||
+        o == DeviceOrientation.landscapeRight;
+  }
 }
 
 class _StatusPanel extends StatelessWidget {

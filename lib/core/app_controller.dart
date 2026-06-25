@@ -420,8 +420,38 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  DeviceOrientation get _deviceOrientation =>
-      _camera?.value.deviceOrientation ?? DeviceOrientation.landscapeLeft;
+  /// 检测/覆盖层用的有效朝向。
+  ///
+  /// iOS 锁屏或进后台时 [CameraValue.deviceOrientation] 仍会随
+  /// UIDevice 变化(常为 portraitUp),但 [lockCaptureOrientation] 已把
+  /// AVCapture 取流锁在横屏 —— 若仍用 deviceOrientation 算旋转,
+  /// rotationForFrame 会误判为竖屏并额外旋转 90°,导致人脸/手势点位错乱。
+  /// 优先用已锁定的取流朝向,与原生 videoOrientation 保持一致。
+  DeviceOrientation get _deviceOrientation {
+    final cam = _camera;
+    if (cam == null) return DeviceOrientation.landscapeLeft;
+    return cam.value.lockedCaptureOrientation ??
+        cam.value.deviceOrientation;
+  }
+
+  /// 应用生命周期回调：解锁/回前台时重新锁定取流朝向并丢弃可能错位的检测结果。
+  Future<void> onAppLifecycleStateChanged(AppLifecycleState state) async {
+    if (state != AppLifecycleState.resumed) return;
+    await _relockCaptureOrientation();
+    if (_disposed) return;
+    _result = const DetectionResult();
+    notifyListeners();
+  }
+
+  Future<void> _relockCaptureOrientation() async {
+    final cam = _camera;
+    if (cam == null || !cam.value.isInitialized) return;
+    try {
+      await cam.lockCaptureOrientation(DeviceOrientation.landscapeLeft);
+    } catch (e) {
+      debugPrint('[AppController] relockCaptureOrientation failed: $e');
+    }
+  }
 
   /// 覆盖层是否水平镜像检测坐标以贴合预览（见 [CameraImageUtils.shouldFlipFrontCameraHorizontal]）。
   bool _effectiveMirrorOverlay() {
