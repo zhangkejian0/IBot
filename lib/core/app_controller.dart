@@ -153,6 +153,14 @@ class AppController extends ChangeNotifier {
   CameraController? get camera => _camera;
   int _sensorOrientation = 90;
   bool _isFrontCamera = true;
+
+  /// 当前锁定的取流朝向。强制横屏 App：始终为两个横屏方向之一，
+  /// 随物理设备旋转在 landscapeLeft / landscapeRight 间自适应，忽略竖屏。
+  /// 同时驱动预览旋转与检测坐标旋转（见 [_deviceOrientation]）。
+  DeviceOrientation _captureOrientation = DeviceOrientation.landscapeLeft;
+
+  /// 重新锁定取流朝向的异步进行中标记，避免方向监听回调重入。
+  bool _orientationLockInFlight = false;
   /// 是否为前置摄像头（用于注视水平镜像判断）。
   bool get isFrontCamera => _isFrontCamera;
 
@@ -452,8 +460,53 @@ class AppController extends ChangeNotifier {
     await controller.initialize();
     // 强制横屏全屏 app：锁定预览/取流朝向，使 CameraValue.deviceOrientation
     // 从首帧起即为 landscape，避免 portraitUp→landscape 的 1~2 秒旋转闪烁。
-    await controller.lockCaptureOrientation(DeviceOrientation.landscapeLeft);
+    // 初值取设备当前朝向(若已是横屏)，否则回退 landscapeLeft；之后由
+    // [_onCameraValueChanged] 监听物理旋转在两个横屏方向间自适应。
+    final reported = controller.value.deviceOrientation;
+    _captureOrientation = (reported == DeviceOrientation.landscapeRight)
+        ? DeviceOrientation.landscapeRight
+        : DeviceOrientation.landscapeLeft;
+    await controller.lockCaptureOrientation(_captureOrientation);
+    // 监听设备物理朝向变化：lockCaptureOrientation 仅固定取流，
+    // value.deviceOrientation 仍随加速度计更新，据此在横屏间重新锁定。
+    controller.addListener(_onCameraValueChanged);
     _camera = controller;
+  }
+
+  /// 相机状态变化回调：仅在两个横屏方向间自适应，忽略竖屏(锁屏/后台
+  /// 时可能误报 portraitUp)，从而保证 App 始终横屏不进竖屏。
+  void _onCameraValueChanged() {
+    final cam = _camera;
+    if (cam == null || !cam.value.isInitialized) return;
+    final reported = cam.value.deviceOrientation;
+    if (reported != DeviceOrientation.landscapeLeft &&
+        reported != DeviceOrientation.landscapeRight) {
+      return;
+    }
+    if (reported == _captureOrientation) return;
+    _captureOrientation = reported;
+    unawaited(_applyCaptureOrientation());
+  }
+
+  /// 把取流朝向重新锁定到 [_captureOrientation]。用 while 复检目标，
+  /// 覆盖「锁定 await 期间设备又转了一次」的竞态；完成后刷新预览/检测。
+  Future<void> _applyCaptureOrientation() async {
+    if (_orientationLockInFlight) return;
+    _orientationLockInFlight = true;
+    try {
+      final cam = _camera;
+      while (cam != null &&
+          !_disposed &&
+          cam.value.isInitialized &&
+          cam.value.lockedCaptureOrientation != _captureOrientation) {
+        await cam.lockCaptureOrientation(_captureOrientation);
+        if (!_disposed) notifyListeners();
+      }
+    } catch (e) {
+      debugPrint('[AppController] applyCaptureOrientation failed: $e');
+    } finally {
+      _orientationLockInFlight = false;
+    }
   }
 
   /// 是否正在切换摄像头(切换期间预览置黑、设置项禁用)。
@@ -479,6 +532,7 @@ class AppController extends ChangeNotifier {
     await _stopSampling();
     try {
       if (old != null) {
+        old.removeListener(_onCameraValueChanged);
         if (old.value.isStreamingImages) {
           await old.stopImageStream().catchError((_) {});
         }
@@ -508,12 +562,9 @@ class AppController extends ChangeNotifier {
   /// AVCapture 取流锁在横屏 —— 若仍用 deviceOrientation 算旋转,
   /// rotationForFrame 会误判为竖屏并额外旋转 90°,导致人脸/手势点位错乱。
   /// 优先用已锁定的取流朝向,与原生 videoOrientation 保持一致。
-  DeviceOrientation get _deviceOrientation {
-    final cam = _camera;
-    if (cam == null) return DeviceOrientation.landscapeLeft;
-    return cam.value.lockedCaptureOrientation ??
-        cam.value.deviceOrientation;
-  }
+  /// 直接返回 [_captureOrientation]：它始终为最新的横屏锁定方向，
+  /// 比 value.lockedCaptureOrientation 少一帧异步延迟，且永不为竖屏。
+  DeviceOrientation get _deviceOrientation => _captureOrientation;
 
   /// 应用生命周期回调：解锁/回前台时重新锁定取流朝向并丢弃可能错位的检测结果。
   Future<void> onAppLifecycleStateChanged(AppLifecycleState state) async {
@@ -528,7 +579,9 @@ class AppController extends ChangeNotifier {
     final cam = _camera;
     if (cam == null || !cam.value.isInitialized) return;
     try {
-      await cam.lockCaptureOrientation(DeviceOrientation.landscapeLeft);
+      // 回前台沿用上次的横屏朝向(此刻 deviceOrientation 可能仍误报竖屏)；
+      // 设备方向监听随后会按真实物理朝向再校正。
+      await cam.lockCaptureOrientation(_captureOrientation);
     } catch (e) {
       debugPrint('[AppController] relockCaptureOrientation failed: $e');
     }
@@ -1678,6 +1731,7 @@ class AppController extends ChangeNotifier {
     final cam = _camera;
     _camera = null;
     if (cam != null) {
+      cam.removeListener(_onCameraValueChanged);
       if (cam.value.isStreamingImages) {
         cam.stopImageStream().catchError((_) {});
       }
