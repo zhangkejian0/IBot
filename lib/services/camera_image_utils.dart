@@ -1,5 +1,6 @@
 import 'dart:io' show Platform;
 import 'dart:math' as math;
+import 'dart:typed_data';
 import 'dart:ui';
 
 import 'package:camera/camera.dart';
@@ -49,22 +50,61 @@ class CameraImageUtils {
   /// 人脸 MediaPipe 插件多余的 X 翻转在 [FaceEngine] 中单独撤销。
   static bool get shouldFlipFrontCameraHorizontal => !Platform.isIOS;
 
+  /// 把相机帧抽取成可跨 isolate 发送的载荷（只含原始平面字节 + 元数据）。
+  ///
+  /// **必须在主 isolate、且在任何 `await` 之前**同步调用：相机底层缓冲会在
+  /// 帧回调返回（或 await 让出事件循环）后被原生层回收，过后再读 [image] 的
+  /// 平面字节会得到失效数据。抽取后即可安全交给 [Isolate.run] 做转换。
+  static CameraConvertPayload payloadFrom(CameraImage image, int rotationDegrees) {
+    return CameraConvertPayload(
+      planes: image.planes.map((p) => p.bytes).toList(growable: false),
+      bytesPerRow: image.planes.map((p) => p.bytesPerRow).toList(growable: false),
+      bytesPerPixel:
+          image.planes.map((p) => p.bytesPerPixel ?? 1).toList(growable: false),
+      width: image.width,
+      height: image.height,
+      formatGroup: image.format.group,
+      rotation: rotationDegrees,
+    );
+  }
+
   /// 转换并按 [rotationDegrees] 摆正为竖直图像。失败返回 null。
+  ///
+  /// 注意：这是 **CPU 密集的逐像素 YUV→RGB 转换**，在主 isolate 直接调用会
+  /// 卡 UI 线程。需要在主 isolate 调用时，应改用 [payloadFrom] +
+  /// [uprightRgbaFromPayload] 配合 [Isolate.run] 放到后台执行。
   static img.Image? toUprightImage(CameraImage image, int rotationDegrees) {
+    return _toUpright(payloadFrom(image, rotationDegrees));
+  }
+
+  /// 在后台 isolate 执行：把相机载荷转为「摆正后的 RGBA 字节」+ 尺寸。
+  /// 纯函数、只依赖可发送入参，可安全用于 [Isolate.run]。
+  static UprightRgba? uprightRgbaFromPayload(CameraConvertPayload payload) {
+    final rgb = _toUpright(payload);
+    if (rgb == null) return null;
+    final bytes = rgb.getBytes(order: img.ChannelOrder.rgba);
+    return UprightRgba(bytes: bytes, width: rgb.width, height: rgb.height);
+  }
+
+  static img.Image? _toUpright(CameraConvertPayload p) {
     img.Image? rgb;
-    switch (image.format.group) {
+    switch (p.formatGroup) {
       case ImageFormatGroup.yuv420:
-        rgb = _fromYuv420(image);
+        if (p.planes.length == 2) {
+          rgb = _fromNv12(p);
+        } else if (p.planes.length >= 3) {
+          rgb = _fromYuv3Plane(p);
+        }
         break;
       case ImageFormatGroup.bgra8888:
-        rgb = _fromBgra8888(image);
+        rgb = _fromBgra8888(p);
         break;
       default:
         rgb = null;
     }
     if (rgb == null) return null;
-    if (rotationDegrees % 360 != 0) {
-      rgb = img.copyRotate(rgb, angle: rotationDegrees);
+    if (p.rotation % 360 != 0) {
+      rgb = img.copyRotate(rgb, angle: p.rotation);
     }
     return rgb;
   }
@@ -88,29 +128,16 @@ class CameraImageUtils {
     return img.copyCrop(upright, x: left, y: top, width: cropW, height: cropH);
   }
 
-  static img.Image? _fromYuv420(CameraImage image) {
-    // iOS camera 插件 yuv420 为 NV12（2 平面）；Android 多为 3 平面 NV21/I420。
-    if (image.planes.length == 2) {
-      return _fromNv12(image);
-    }
-    if (image.planes.length >= 3) {
-      return _fromYuv3Plane(image);
-    }
-    return null;
-  }
-
   /// NV12：plane0=Y，plane1=交错 UV（iOS 默认）。
-  static img.Image _fromNv12(CameraImage image) {
+  static img.Image _fromNv12(CameraConvertPayload image) {
     final width = image.width;
     final height = image.height;
     final out = img.Image(width: width, height: height);
 
-    final yPlane = image.planes[0];
-    final uvPlane = image.planes[1];
-    final yRowStride = yPlane.bytesPerRow;
-    final uvRowStride = uvPlane.bytesPerRow;
-    final yBytes = yPlane.bytes;
-    final uvBytes = uvPlane.bytes;
+    final yRowStride = image.bytesPerRow[0];
+    final uvRowStride = image.bytesPerRow[1];
+    final yBytes = image.planes[0];
+    final uvBytes = image.planes[1];
 
     for (var y = 0; y < height; y++) {
       final yRow = y * yRowStride;
@@ -137,22 +164,18 @@ class CameraImageUtils {
   }
 
   /// 3 平面 YUV420（Android 常见 I420 / NV21 布局）。
-  static img.Image _fromYuv3Plane(CameraImage image) {
+  static img.Image _fromYuv3Plane(CameraConvertPayload image) {
     final width = image.width;
     final height = image.height;
     final out = img.Image(width: width, height: height);
 
-    final yPlane = image.planes[0];
-    final uPlane = image.planes[1];
-    final vPlane = image.planes[2];
+    final yRowStride = image.bytesPerRow[0];
+    final uvRowStride = image.bytesPerRow[1];
+    final uvPixelStride = image.bytesPerPixel[1];
 
-    final yRowStride = yPlane.bytesPerRow;
-    final uvRowStride = uPlane.bytesPerRow;
-    final uvPixelStride = uPlane.bytesPerPixel ?? 1;
-
-    final yBytes = yPlane.bytes;
-    final uBytes = uPlane.bytes;
-    final vBytes = vPlane.bytes;
+    final yBytes = image.planes[0];
+    final uBytes = image.planes[1];
+    final vBytes = image.planes[2];
 
     for (var y = 0; y < height; y++) {
       final yRow = y * yRowStride;
@@ -178,14 +201,50 @@ class CameraImageUtils {
     return out;
   }
 
-  static img.Image _fromBgra8888(CameraImage image) {
-    final plane = image.planes.first;
+  static img.Image _fromBgra8888(CameraConvertPayload image) {
     return img.Image.fromBytes(
       width: image.width,
       height: image.height,
-      bytes: plane.bytes.buffer,
-      rowStride: plane.bytesPerRow,
+      bytes: image.planes.first.buffer,
+      rowStride: image.bytesPerRow.first,
       order: img.ChannelOrder.bgra,
     );
   }
+}
+
+/// 可跨 isolate 发送的相机帧载荷：只含原始平面字节与必要元数据。
+///
+/// 由 [CameraImageUtils.payloadFrom] 在主 isolate 同步抽取，
+/// 再交给 [Isolate.run] + [CameraImageUtils.uprightRgbaFromPayload] 后台转换。
+class CameraConvertPayload {
+  final List<Uint8List> planes;
+  final List<int> bytesPerRow;
+  final List<int> bytesPerPixel;
+  final int width;
+  final int height;
+  final ImageFormatGroup formatGroup;
+  final int rotation;
+
+  const CameraConvertPayload({
+    required this.planes,
+    required this.bytesPerRow,
+    required this.bytesPerPixel,
+    required this.width,
+    required this.height,
+    required this.formatGroup,
+    required this.rotation,
+  });
+}
+
+/// 摆正后的 RGBA 字节 + 尺寸（[CameraImageUtils.uprightRgbaFromPayload] 的产物）。
+class UprightRgba {
+  final Uint8List bytes;
+  final int width;
+  final int height;
+
+  const UprightRgba({
+    required this.bytes,
+    required this.width,
+    required this.height,
+  });
 }

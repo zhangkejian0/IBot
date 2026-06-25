@@ -247,13 +247,22 @@ class AppController extends ChangeNotifier {
   DateTime _lastIdentityRun = DateTime.fromMillisecondsSinceEpoch(0);
   static const Duration _identityInterval = Duration(milliseconds: 1200);
 
-  // 帧级检测节流:人脸(MediaPipe + ML Kit)/手势默认每帧都跑,~30fps 下
-  // 既吃 CPU 又让原生库(TFLite/ML Kit)日志狂刷。这里按时间间隔跳过整帧,
-  // 跳过的帧直接复用上一帧 DetectionResult——UI 注视/表情照常驱动,不会闪烁。
-  // 200ms ≈ 5fps,显著降低 CPU 负载;注视/表情靠 JS 侧 spring/EMA 平滑补偿,
-  // 身份识别另有 _identityInterval 节流。
-  DateTime _lastDetectRun = DateTime.fromMillisecondsSinceEpoch(0);
-  static const Duration _detectInterval = Duration(milliseconds: 200);
+  // —— 按需采样（替代持续帧流），避免平台主线程被相机/原生推理长期占用 ——
+  //
+  // webview_flutter 在 Android 走 Hybrid Composition，WebView 合成发生在
+  // Android 主线程；而 camera 的持续 startImageStream 每帧都把 YUV 经平台通道
+  // 投递到 Dart 并触发 MediaPipe/MLKit 原生推理，同样占用主线程 —— 两者抢同
+  // 一线程导致 WebView 周期性掉帧（实测注释掉帧流即彻底不卡）。
+  //
+  // 方案：平时不开帧流（主线程空闲 → WebView 流畅），用定时器每隔 [_sampleInterval]
+  // 临时开流抓「一帧」后立即 stopImageStream，再处理这一帧。把对主线程的占用
+  // 压成短促、稀疏的脉冲。注视/表情靠 JS 侧 spring 平滑补偿低采样率。
+  Timer? _sampleTimer;
+  // 本轮采样是否仍在等待「那一帧」（startImageStream 后、抓到首帧前为 true）。
+  bool _sampling = false;
+  // 采样间隔（≈3.3fps）。陪伴场景的信息采集与注视跟随足够；调大更省、更流畅，
+  // 调小更跟手。可按设备实测在 250~600ms 之间权衡。
+  static const Duration _sampleInterval = Duration(milliseconds: 300);
 
   // 物体检测独立节流:物体移动远比注视/表情慢,没必要每个检测帧都跑。
   // 用更长的间隔(默认 500ms ≈ 2fps)进一步降低原生调用频率与每帧 RGBA 取字节
@@ -376,7 +385,7 @@ class AppController extends ChangeNotifier {
       await ownerProfileStore.load();
 
       _setLoading(1.0, '准备就绪');
-      await _camera?.startImageStream(_onFrame);
+      _startSampling();
 
       // 固定额外等待：摄像头首帧与各模型推理管道仍需少量时间稳定，
       // 缓冲后再进入下一阶段，避免开场即出现掉帧/未识别。
@@ -463,6 +472,8 @@ class AppController extends ChangeNotifier {
     // 预览先置黑,避免 UI 继续引用即将释放的控制器。
     _camera = null;
     notifyListeners();
+    // 停掉采样定时器并关闭旧镜头帧流，避免切换期间残留回调。
+    await _stopSampling();
     try {
       if (old != null) {
         if (old.value.isStreamingImages) {
@@ -477,7 +488,7 @@ class AppController extends ChangeNotifier {
       _behaviorTracker.reset();
       _activityTracker.reset();
       await _initCamera();
-      await _camera?.startImageStream(_onFrame);
+      _startSampling();
     } catch (e) {
       debugPrint('[AppController] switchCamera failed: $e');
       _errorMessage = '切换摄像头失败：$e';
@@ -529,17 +540,56 @@ class AppController extends ChangeNotifier {
   /// 与 FaceEngine / HandEngine 完全一致的旋转基准：前置摄像头为
   /// `(sensorOrientation + deviceRotation) % 360`，后置为相减。
   /// 身份识别裁剪必须用同一旋转，否则裁剪框与归一化坐标空间错位。
+  /// 启动按需采样定时器（替代持续 startImageStream）。
+  void _startSampling() {
+    _sampleTimer?.cancel();
+    _sampleTimer = Timer.periodic(_sampleInterval, (_) => _sampleOnce());
+  }
+
+  /// 停止采样并确保帧流已关闭。
+  Future<void> _stopSampling() async {
+    _sampleTimer?.cancel();
+    _sampleTimer = null;
+    _sampling = false;
+    final cam = _camera;
+    if (cam != null && cam.value.isStreamingImages) {
+      await cam.stopImageStream().catchError((_) {});
+    }
+  }
+
+  /// 一次采样：临时开流，抓到首帧后立即停流并处理这一帧。
+  /// 期间若上一轮仍在采样/处理，或帧流尚未停妥，则跳过本次（下个 tick 重试）。
+  Future<void> _sampleOnce() async {
+    if (_disposed || _sampling || _processing) return;
+    if (_phase != AppPhase.ready && _phase != AppPhase.onboarding) return;
+    final cam = _camera;
+    if (cam == null || !cam.value.isInitialized) return;
+    // 上一轮的 stopImageStream 可能尚未完成：等下个 tick，避免重复开流报错。
+    if (cam.value.isStreamingImages) return;
+    _sampling = true;
+    try {
+      await cam.startImageStream(_onFrame);
+    } catch (e) {
+      _sampling = false;
+      debugPrint('[Sampler] startImageStream failed: $e');
+    }
+  }
+
+  /// 帧流回调：只取本轮的「第一帧」，随即停流并处理，避免持续占用主线程。
+  ///
+  /// 帧处理在 ready（主界面）与 onboarding（激活向导的人脸录入）阶段都需运行：
+  /// 向导的人脸录入依赖 captureFaceSample，它靠 _processFrame 内的 needCapture 分支满足。
   void _onFrame(CameraImage image) {
-    // 帧处理在 ready（主界面）与 onboarding（激活向导的人脸录入）阶段都需运行：
-    // 向导的人脸录入依赖 captureFaceSample，它靠 _onFrame 内的 needCapture 分支满足。
+    // 只消费本轮首帧：后续在 stopImageStream 完成前到达的帧直接忽略。
+    if (!_sampling) return;
+    _sampling = false;
+    // 尽快停流，把主线程让回给 WebView 合成。
+    final cam = _camera;
+    if (cam != null && cam.value.isStreamingImages) {
+      unawaited(cam.stopImageStream().catchError((_) {}));
+    }
     if (_disposed || _processing) return;
     if (_phase != AppPhase.ready && _phase != AppPhase.onboarding) return;
-    // 帧级检测节流:未到间隔的帧跳过整帧检测。不重置图像(直接 return),
-    // 上一帧 DetectionResult 保留,UI/虚拟宠物继续用旧值驱动注视与表情,
-    // 视觉上不会闪烁,只是检测频率降到 ~15fps。
-    final now = DateTime.now();
-    if (now.difference(_lastDetectRun) < _detectInterval) return;
-    _lastDetectRun = now;
     _processing = true;
     _processFrame(image).whenComplete(() {
       if (!_disposed) _processing = false;
@@ -573,27 +623,14 @@ class AppController extends ChangeNotifier {
           identityDue ||
           needCapture ||
           objectDue;
-      img.Image? upright;
-      if (needsUpright) {
-        try {
-          upright = CameraImageUtils.toUprightImage(image, detectionRotation);
-        } catch (e, st) {
-          debugPrint('[Frame] toUprightImage error: $e\n$st');
-        }
-      }
 
-      // ML Kit 人脸与物体引擎吃的都是「摆正后的 RGBA 字节」：同帧只取一次字节，
-      // 两个引擎共享，避免重复的 getBytes 分配（降低主 isolate 负载/卡顿）。
-      Uint8List? uprightRgba;
-      int upW = 0, upH = 0;
-      if (upright != null && (settings.faceEnabled || objectDue)) {
-        upW = upright.width;
-        upH = upright.height;
-        uprightRgba = upright.getBytes(order: img.ChannelOrder.rgba);
-      }
-
-      // FaceEngine 一次 detectFromCamera 同时产出人脸(478 点)与人体姿态
-      // (33 点),face/pose 任一启用即调用。返回聚合结果,下方分别取 .face / .poses。
+      // —— 关键：所有对原始相机帧 [image] 的读取必须在任何 await 之前同步发起 ——
+      // 相机底层缓冲在帧回调返回(或 await 让出事件循环)后会被原生层回收。下面的
+      // toUprightImage 现在会 await(Isolate.run)，故先把 native 人脸/手势引擎启动
+      // (它们在各自首个 await 前同步读取 image.planes)，并同步抽取摆正所需载荷，
+      // 之后再 await，避免读取到失效缓冲。
+      //
+      // FaceEngine 一次 detectFromCamera 同时产出人脸(478 点)与人体姿态(33 点)。
       final faceEngineFuture = (settings.faceEnabled || settings.poseEnabled)
           ? faceEngine.process(
               image,
@@ -602,9 +639,6 @@ class AppController extends ChangeNotifier {
               deviceOrientation: _deviceOrientation,
             )
           : Future<FaceEngineResult?>.value(null);
-      final mlkitFuture = settings.faceEnabled && uprightRgba != null
-          ? mlkitFaceEngine.processRgba(uprightRgba, upW, upH)
-          : Future<List<Rect>>.value(const []);
       final handFuture = settings.handEnabled
           ? handEngine.process(
               image,
@@ -613,6 +647,45 @@ class AppController extends ChangeNotifier {
               deviceOrientation: _deviceOrientation,
             )
           : Future<List<HandOverlay>>.value(const []);
+      final convertPayload = needsUpright
+          ? CameraImageUtils.payloadFrom(image, detectionRotation)
+          : null;
+
+      // YUV→RGB 逐像素转换 + 旋转 + getBytes 放到后台 Isolate 执行。
+      // 原先在主 isolate 同步执行：medium(~480p) 下每检测帧要遍历 30 万+ 像素做
+      // 浮点 YUV→RGB，再 copyRotate 全图、再 getBytes 拷贝，单帧数十毫秒，会
+      // 周期性卡住 UI 线程 → 平台视图(WebView)合成掉帧，虚拟表情顿挫。改到
+      // Isolate.run 后，主 isolate 只做一次入参/结果的内存拷贝，避开像素循环。
+      img.Image? upright;
+      Uint8List? uprightRgba;
+      int upW = 0, upH = 0;
+      if (convertPayload != null) {
+        try {
+          final res = await Isolate.run(
+              () => CameraImageUtils.uprightRgbaFromPayload(convertPayload));
+          if (_disposed) return;
+          if (res != null) {
+            uprightRgba = res.bytes;
+            upW = res.width;
+            upH = res.height;
+            // 复用同一份 RGBA 字节包装成 img.Image 供裁剪/编码使用（仅包裹
+            // buffer，无像素循环），供身份识别 / 录入的 cropNormalized 用。
+            upright = img.Image.fromBytes(
+              width: upW,
+              height: upH,
+              bytes: res.bytes.buffer,
+              order: img.ChannelOrder.rgba,
+            );
+          }
+        } catch (e, st) {
+          debugPrint('[Frame] upright convert error: $e\n$st');
+        }
+      }
+
+      // ML Kit 多脸检测吃「摆正后的 RGBA 字节」，依赖上面的后台转换结果。
+      final mlkitFuture = settings.faceEnabled && uprightRgba != null
+          ? mlkitFaceEngine.processRgba(uprightRgba, upW, upH)
+          : Future<List<Rect>>.value(const []);
 
       // 物体检测（YOLO11）：后台 fire-and-forget,**不**并入本帧 await。
       // 原因:predict 走「JPEG 编码 + 原生解码 + 推理」,耗时远高于人脸/手势;
@@ -1595,6 +1668,8 @@ class AppController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _sampleTimer?.cancel();
+    _sampleTimer = null;
     final cam = _camera;
     _camera = null;
     if (cam != null) {
