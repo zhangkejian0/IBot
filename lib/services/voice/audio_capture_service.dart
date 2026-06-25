@@ -181,6 +181,63 @@ class AudioCaptureService {
     return completer.future;
   }
 
+  /// 等待「安静窗口」:持续监听 [audioStream],当连续 [window] 时长的帧 RMS
+  /// 都低于 [threshold] 时返回 true(确认安静);超过 [timeout] 仍未达成返回
+  /// false(仍吵/仍在发声)。必须在 [start] 之后调用。
+  ///
+  /// 用途:打断后重新聆听前的**静默冷却确认**——确认扬声器残余/环境噪声已
+  /// 消散,避免把上一轮 TTS 的尾音/回声当成新一轮用户语音采集上传(否则会
+  /// 与"打断后立即重听"叠加形成回声自激死循环)。
+  ///
+  /// 复用 [_rmsLevel] 归一化算法(分母 6000)。[threshold] 默认 0.04,与
+  /// [captureUtterance] 的续说话门槛 [silenceThreshold] 一致。
+  Future<bool> waitForSilence({
+    Duration window = const Duration(milliseconds: 1000),
+    double threshold = 0.04,
+    Duration timeout = const Duration(seconds: 3),
+  }) async {
+    if (!_running) return true; // 未采集,视为已安静
+    final completer = Completer<bool>();
+    StreamSubscription<Uint8List>? sub;
+    Timer? deadline;
+    DateTime? quietSince;
+    final startAt = DateTime.now();
+
+    void resolve(bool ok) {
+      if (completer.isCompleted) return;
+      deadline?.cancel();
+      sub?.cancel();
+      completer.complete(ok);
+    }
+
+    sub = audioStream.listen((bytes) {
+      if (completer.isCompleted) return;
+      final lvl = _rmsLevel(bytes);
+      if (lvl < threshold) {
+        // 静音:记录/保持安静起点。
+        quietSince ??= DateTime.now();
+        if (DateTime.now().difference(quietSince!) >= window) {
+          resolve(true);
+        }
+      } else {
+        // 出声:重置安静计时(要求连续 window 时长的安静)。
+        quietSince = null;
+      }
+    }, onError: (e) {
+      debugPrint('[AudioCapture] waitForSilence stream error: $e');
+      resolve(true); // 出错不阻塞,放行让上层按正常流程处理
+    });
+
+    // 兜底超时:超时仍未达到连续安静窗口 → 视为环境仍吵,返回 false。
+    deadline = Timer(timeout, () {
+      debugPrint('[AudioCapture] waitForSilence timeout(${timeout.inSeconds}s) '
+          '— 仍未安静(自 $startAt 起),返回 false');
+      resolve(false);
+    });
+
+    return completer.future;
+  }
+
   /// 由一段 16-bit PCM 字节计算 RMS 音量,归一化到 0..1。
   /// bytes 长度可能为奇数(非完整帧),按完整 Int16 取样。
   double _rmsLevel(Uint8List bytes) {

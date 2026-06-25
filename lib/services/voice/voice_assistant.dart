@@ -58,12 +58,26 @@ class VoiceAssistant extends ChangeNotifier {
   /// 详见 [BargeInDetector](抗回声:高阈值+连续帧+冷却期)。
   late final BargeInDetector _bargeIn = BargeInDetector();
 
-  /// 打断功能总开关。默认开;若实测 AEC/SCO 通路有异常,可关回退为播放时停麦。
-  bool bargeInEnabled = true;
+  /// 打断功能总开关。**默认关(半双工)**:播报时停麦,从物理上杜绝扬声器
+  /// 回声被误判为"用户打断"导致的自激死循环(详见 [_runConversation] 注释
+  /// 与 [BargeInDetector] 的回声局限说明)。即便开启,也受「打断后静默冷却 +
+  /// 连续降级」保护([_resumeOrRelisten] 中 [AudioCaptureService.waitForSilence]
+  /// + [_consecutiveBargeIns]),最多重听一次,不会无限循环。
+  bool bargeInEnabled = false;
 
   /// 本轮是否因用户打断而中止播放(_runConversation finally 据此决定是否
   /// 立即重新聆听,而非只恢复唤醒监听)。
   bool _bargeInTriggered = false;
+
+  /// 连续因打断而重听的次数(防回声自激死循环的降级计数)。每被打断一次 +1,
+  /// 正常完成一轮(未被打断)清零。超过 [_maxBargeInRelistens] 则不再重听,
+  /// 强制降级回唤醒监听。详见 [_resumeOrRelisten]。
+  int _consecutiveBargeIns = 0;
+
+  /// 允许的最大「打断后重听」次数。默认 1:打断 → 静默冷却 → 重听一次;若
+  /// 该轮再被打断(极可能是回声而非真用户)则降级回唤醒监听,确保即便开启
+  /// 打断也不会"打断→重听→又被回声打断"无限循环。
+  static const int _maxBargeInRelistens = 1;
 
   /// 端侧感知上下文提供者:由 AppController 注入，读取当前人脸表情/身份/手势，
   /// 随对话发给后端(文档 §2.4)。
@@ -228,6 +242,12 @@ class VoiceAssistant extends ChangeNotifier {
   ///
   /// 与旧的分段式(ASR→LLM→TTS)不同:后端一次完成全部处理并回传文本、表情、
   /// FSM 状态与 TTS 音频(见 docs/API对接文档.md §3.4)。
+  ///
+  /// **回声自激防护**:默认半双工([bargeInEnabled]=false),播报期停麦,扬声器
+  /// 回声无法进入录音通路 → 不会误触发打断 → 不会"打断→重听→又被回声打断"
+  /// 死循环。即便开启打断,finally 块走 [_resumeOrRelisten]:静默冷却确认 +
+  /// 连续打断降级([_consecutiveBargeIns] ≤ [_maxBargeInRelistens]),最多重听
+  /// 一次,物理上不可能无限循环。
   Future<void> _runConversation() async {
     if (_state != VoiceState.idle) return; // 防重入
     // 启动本轮耗时埋点(排查「即问即答」延迟,见 _ConversationTimings)。
@@ -372,6 +392,13 @@ class VoiceAssistant extends ChangeNotifier {
       audio.level.value = 0.0;
       final wasBarged = _bargeInTriggered;
       _bargeInTriggered = false;
+      // 连续打断计数:被打断则自增(供 _resumeOrRelisten 降级判定),
+      // 正常完成一轮则清零(用户确实在正常对话)。
+      if (wasBarged) {
+        _consecutiveBargeIns++;
+      } else {
+        _consecutiveBargeIns = 0;
+      }
       _setState(VoiceState.idle);
       conversationLog.log('end', '一轮对话结束,回到 idle');
       // 一轮对话结束回到 idle:若有排队的主动消息(对话期间收到的),补播。
@@ -384,14 +411,13 @@ class VoiceAssistant extends ChangeNotifier {
         // _playStreamingTts 播放时停了麦(barge-in 模式)或播完停麦(回退模式),
         // 这里重启麦克风,恢复唤醒监听与聆听的前置条件。
         await audio.start();
-        // 恢复唤醒监听,等待下一次唤醒。
-        await _resumeWakeListening();
-        // 打断(barge-in)后立即重新聆听,不等用户再说唤醒词:
-        // _runConversation 防重入要求 _state==idle(已在上面置位),直接重启一轮。
-        // 麦克风已在上面 audio.start() 恢复(captureUtterance 依赖)。
+        // 打断(barge-in)后不直接立即重听,而是走 _resumeOrRelisten:
+        // 静默冷却确认 + 连续打断降级,避免"打断→重听→又被回声打断"死循环。
+        // 未被打断则正常恢复唤醒监听。
         if (wasBarged) {
-          conversationLog.log('wake', '打断后立即重新聆听');
-          _runConversation();
+          await _resumeOrRelisten(_runConversation);
+        } else {
+          await _resumeWakeListening();
         }
       }
     }
@@ -452,14 +478,17 @@ class VoiceAssistant extends ChangeNotifier {
     }
 
     // —— 打断(barge-in)策略 ——
-    // 播放期间**保持麦克风开启** + 启 [BargeInDetector],用户开口即停 TTS
-    // 重新聆听。需确保麦已 start(可能上一阶段已 stop)。靠已启用的平台 AEC
-    // + BargeInDetector 的高阈值/连续帧抗回声。
+    // 默认 [bargeInEnabled]=false(半双工):播放时**停麦**(audio.stop),
+    // 扬声器声音不会进入录音通路,从根上杜绝回声自激死循环。播完由调用方
+    // finally 的 audio.start() 恢复。
+    // 开启打断(bargeInEnabled=true)时:播放期间保持麦克风开启 + 启
+    // [BargeInDetector],用户开口即停 TTS。打断后的恢复/重听由 finally 块的
+    // [_resumeOrRelisten] 统一处理(静默冷却 + 连续降级,防自激)。
     if (bargeInEnabled) {
       await audio.start();
       _bargeIn.start(audio.audioStream);
     } else {
-      // 关闭打断:回退为播放时停麦(消除 AEC/SCO 竞态)。
+      // 关闭打断(默认):播放时停麦,消除回声自激与 AEC/SCO 竞态。
       await audio.stop();
     }
 
@@ -696,6 +725,43 @@ class VoiceAssistant extends ChangeNotifier {
     }
   }
 
+  /// 打断(barge-in)后的恢复/重听决策(防回声自激死循环的**核心安全网**)。
+  ///
+  /// 背景:默认半双工([bargeInEnabled]=false)时播报期停麦,不存在回声打断,
+  /// 此方法仅在开启打断时发挥作用。即便开启打断,本方法确保「打断→重听」
+  /// 不会无限循环:
+  ///
+  /// 1. **连续打断降级**:本轮被打断则 [_consecutiveBargeIns] 已在调用方自增。
+  ///    若已超过 [_maxBargeInRelistens](默认 1),视为回声误触发,放弃重听,
+  ///    直接恢复唤醒监听(回到待唤醒态,需用户再说唤醒词)。
+  /// 2. **静默冷却确认**:允许重听时,先调 [AudioCaptureService.waitForSilence]
+  ///    等待连续 ~1s 静音(确认扬声器残余/回声消散)。等待失败(超时仍吵)也
+  ///    放弃重听降级回唤醒。这避免把上一轮 TTS 尾音/回声当成新一轮用户语音。
+  /// 3. 通过上述确认才 [relisten](重新跑一轮 [captureUtterance])。
+  ///
+  /// 调用前提:_state 已置 idle(防重入闸门),麦克风已 `audio.start()`。
+  Future<void> _resumeOrRelisten(void Function() relisten) async {
+    // 1) 连续打断降级:超过上限不再重听。
+    if (_consecutiveBargeIns > _maxBargeInRelistens) {
+      conversationLog.log('wake',
+          '连续打断 $_consecutiveBargeIns 次超过上限,降级回唤醒监听(防自激)',
+          error: true);
+      await _resumeWakeListening();
+      return;
+    }
+    // 2) 静默冷却确认:等扬声器残余/环境噪声消散。
+    final quiet = await audio.waitForSilence();
+    if (!quiet) {
+      conversationLog.log('wake',
+          '打断后静默冷却超时(环境仍吵),降级回唤醒监听', error: true);
+      await _resumeWakeListening();
+      return;
+    }
+    // 3) 确认为真用户打断,重新聆听一轮。
+    conversationLog.log('wake', '静默冷却完成,重新聆听');
+    relisten();
+  }
+
   void _setState(VoiceState s) {
     if (_state == s) return;
     _state = s;
@@ -771,17 +837,24 @@ class VoiceAssistant extends ChangeNotifier {
     } finally {
       final wasBarged = _bargeInTriggered;
       _bargeInTriggered = false;
+      // 连续打断计数(同主对话范式):被打断自增,正常完成清零。
+      if (wasBarged) {
+        _consecutiveBargeIns++;
+      } else {
+        _consecutiveBargeIns = 0;
+      }
       _replyText = '';
       audio.level.value = 0.0;
       _setState(VoiceState.idle);
       // _playStreamingTts 播放时停了麦,这里重启(唤醒与聆听前置条件)。
       await audio.start();
-      // 恢复唤醒监听。
-      await _resumeWakeListening();
-      // 打断后立即重新聆听(同主对话范式),不等唤醒词。
+      // 打断后走 _resumeOrRelisten(静默冷却 + 连续降级,防回声自激死循环);
+      // 未被打断则正常恢复唤醒监听。
       if (wasBarged) {
-        conversationLog.log('wake', '主动播报被打断,立即重新聆听');
-        _runConversation();
+        await _resumeOrRelisten(_runConversation);
+      } else {
+        // 恢复唤醒监听。
+        await _resumeWakeListening();
       }
     }
   }
