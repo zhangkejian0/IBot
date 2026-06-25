@@ -64,6 +64,11 @@ class HandEngine {
     final w = size.width <= 0 ? image.width.toDouble() : size.width;
     final h = size.height <= 0 ? image.height.toDouble() : size.height;
 
+    // iOS 前置取流已由 AVCaptureConnection.isVideoMirrored 水平镜像，
+    // MediaPipe 的 handedness 相对真实左右手会颠倒；Android 取流未镜像、
+    // 覆盖层单独翻转坐标，handedness 无需校正（见 CameraImageUtils 注释）。
+    final swapHandedness = Platform.isIOS && isFrontCamera;
+
     return hands.map((hand) {
       // 按关键点类型索引摆放，便于按骨架连线绘制。
       final ordered = List<Offset>.filled(21, Offset.zero);
@@ -89,11 +94,17 @@ class HandEngine {
       return HandOverlay(
         landmarks: ordered,
         boundingBox: Rect.fromLTRB(minX, minY, maxX, maxY),
-        handedness: hand.handedness,
+        handedness: _correctHandedness(hand.handedness, swap: swapHandedness),
         gesture: hand.gesture?.type,
         gestureConfidence: hand.gesture?.confidence ?? 0,
       );
     }).toList();
+  }
+
+  /// 水平镜像帧上 MediaPipe handedness 与真实左右手相反，需对调。
+  static Handedness? _correctHandedness(Handedness? h, {required bool swap}) {
+    if (!swap || h == null) return h;
+    return h == Handedness.left ? Handedness.right : Handedness.left;
   }
 
   Future<void> dispose() async {
