@@ -81,6 +81,9 @@ class DisplaySettings {
   bool wakeWordEnabled = true;
   /// 是否启用 TTS 语音播报(关闭则回复仅以文字显示)。
   bool ttsEnabled = true;
+  /// 是否启用流式 STT 对话模式(WS /api/stt/stream,边录边识别、多轮复用)。
+  /// 关闭则回退「整段录音 → /api/chat 批量 STT」的单轮模式。默认开。
+  bool streamingSttEnabled = true;
   /// 是否启用「注视触发对话」:持续注视机器人超过一定时长后,无需唤醒词
   /// 自动发起一轮语音交互。需 voiceEnabled 开启才生效。默认开。
   bool gazeTriggerEnabled = true;
@@ -1516,6 +1519,7 @@ class AppController extends ChangeNotifier {
     if (!v.isAvailable) return; // 无麦克风权限或未就绪,跳过
     v.wakeWordEnabled = settings.wakeWordEnabled;
     v.ttsEnabled = settings.ttsEnabled;
+    v.streamingSttEnabled = settings.streamingSttEnabled;
     // 唤醒词变更即时下发(开放词表支持运行时改词)。
     if (settings.wakeWord != v.wakeWord.keyword) {
       v.wakeWord.setKeyword(settings.wakeWord);
@@ -1540,9 +1544,10 @@ class AppController extends ChangeNotifier {
     final v = voiceAssistant;
     // 无麦克风权限等不可用情况:不开启(与 _syncVoiceAssistant 行为一致)。
     if (!v.isAvailable) return;
-    // 同步当前设置(TTS/唤醒词),与 _syncVoiceAssistant 前半段保持一致。
+    // 同步当前设置(TTS/唤醒词/流式 STT),与 _syncVoiceAssistant 前半段保持一致。
     v.wakeWordEnabled = settings.wakeWordEnabled;
     v.ttsEnabled = settings.ttsEnabled;
+    v.streamingSttEnabled = settings.streamingSttEnabled;
     if (settings.wakeWord != v.wakeWord.keyword) {
       v.wakeWord.setKeyword(settings.wakeWord);
     }

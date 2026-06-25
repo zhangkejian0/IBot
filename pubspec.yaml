@@ -79,6 +79,7 @@ dependencies:
   # 见 plugins/flutter_bluetooth_serial/。
   flutter_bluetooth_serial:
     path: plugins/flutter_bluetooth_serial
+  web_socket_channel: ^3.0.3
 
 dev_dependencies:
   flutter_test:

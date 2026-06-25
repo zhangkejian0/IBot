@@ -198,6 +198,18 @@ class SettingsScreen extends StatelessWidget {
                               controller.updateSettings(() => s.ttsEnabled = v)
                           : null,
                     ),
+                    _SwitchTile(
+                      icon: CupertinoIcons.dot_radiowaves_left_right,
+                      color: AppTheme.accent,
+                      label: '流式对话模式',
+                      value: s.streamingSttEnabled,
+                      // 边录边识别、多轮复用同一连接(WS)。关闭则整段录完再上传。
+                      onChanged: (s.voiceEnabled &&
+                              controller.voiceAssistant.isAvailable)
+                          ? (v) => controller
+                              .updateSettings(() => s.streamingSttEnabled = v)
+                          : null,
+                    ),
                   ],
                 ),
 

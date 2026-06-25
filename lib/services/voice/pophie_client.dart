@@ -571,6 +571,157 @@ class PophieClient {
     );
   }
 
+  /// 流式聊天(文档 §3.4.1 `POST /api/chat/stream`,对话模式推荐)。
+  ///
+  /// 请求体与 [chat] 相同;响应为 `application/x-ndjson` 行流,逐行推送 LLM
+  /// 生成过程:`speak`(可按句提前 TTS 的片段)→ `done`(完整 ChatResponse)。
+  /// 每收到一个 `speak` 即回调 [onSpeak](text),上层应对每段调 `/api/tts/stream`
+  /// 边收边播,以降低首句 TTS 延迟。
+  ///
+  /// 与对话模式配合:STT `final` 后仅传 [text](+ [perception]),不传 [wavBytes]。
+  /// 返回值为 `done.response` 解析出的 [PophieChatResult](`stt` 通常为空,识别
+  /// 已在 WS 阶段完成);若流中无 `done` 行则返回静默空结果。
+  ///
+  /// 任何网络错误、非 2xx、或流中 `error` 行,均**抛异常**(由上层回退批量 [chat])。
+  /// [cancelToken] 可中断正在进行的下载(打断场景)。
+  Future<PophieChatResult> chatStream({
+    String? text,
+    Uint8List? wavBytes,
+    PophiePerception? perception,
+    String? userId,
+    bool? skipTts,
+    required void Function(String segment) onSpeak,
+    CancelToken? cancelToken,
+  }) async {
+    final input = <String, dynamic>{
+      'text': text ?? '',
+    };
+    if (wavBytes != null && wavBytes.isNotEmpty) {
+      input['audio'] = {
+        'format': 'wav',
+        'encoding': 'base64',
+        'sample_rate': 16000,
+        'data': base64Encode(wavBytes),
+      };
+    }
+    if (perception != null && !perception.isEmpty) {
+      input['perception'] = perception.toJson();
+    }
+    if (_config.voiceId.isNotEmpty) input['voice_id'] = _config.voiceId;
+    if (skipTts != null) input['skip_tts'] = skipTts;
+
+    final body = <String, dynamic>{
+      'robot_id': _config.robotId,
+      if (_config.sessionId != null) 'session_id': _config.sessionId,
+      if (userId != null && userId.isNotEmpty) 'user_id': userId,
+      'input': input,
+    };
+
+    final Response<ResponseBody> response;
+    try {
+      response = await _dio.post<ResponseBody>(
+        '${_config.baseUrl}/api/chat/stream',
+        data: body,
+        cancelToken: cancelToken,
+        options: Options(
+          contentType: Headers.jsonContentType,
+          responseType: ResponseType.stream,
+          // LLM 流式生成本身长时,放宽接收超时;首个 speak 到达后即有数据。
+          receiveTimeout: const Duration(seconds: 60),
+          headers: {'Accept': 'application/x-ndjson'},
+        ),
+      );
+    } on DioException catch (e) {
+      if (e.type == DioExceptionType.cancel) rethrow;
+      final code = e.response?.statusCode;
+      throw Exception(
+          '/api/chat/stream 请求失败 ${code ?? ""} ${e.message ?? e.type}');
+    }
+
+    PophieChatResult? result;
+    void handle(String line) {
+      if (line.isEmpty) return;
+      Map<String, dynamic> obj;
+      try {
+        obj = jsonDecode(line) as Map<String, dynamic>;
+      } catch (e) {
+        debugPrint('[Pophie] chatStream bad ndjson line: $line ($e)');
+        return;
+      }
+      switch (obj['type'] as String?) {
+        case 'speak':
+          final t = obj['text'] as String?;
+          if (t != null && t.isNotEmpty) onSpeak(t);
+          break;
+        case 'done':
+          final resp = (obj['response'] as Map?)?.cast<String, dynamic>();
+          if (resp != null) result = _parseChatResponse(resp);
+          break;
+        case 'error':
+          throw Exception(
+              '/api/chat/stream 失败: ${obj['message'] ?? "未知错误"}');
+        default:
+          debugPrint('[Pophie] chatStream unknown ndjson type: ${obj['type']}');
+      }
+    }
+
+    final stream = response.data!.stream;
+    var lineBuf = '';
+    await for (final chunk in stream) {
+      lineBuf += utf8.decode(chunk);
+      var nl = lineBuf.indexOf('\n');
+      while (nl >= 0) {
+        final line = lineBuf.substring(0, nl).trim();
+        lineBuf = lineBuf.substring(nl + 1);
+        nl = lineBuf.indexOf('\n');
+        handle(line);
+      }
+    }
+    final tail = lineBuf.trim();
+    if (tail.isNotEmpty) handle(tail);
+
+    return result ??
+        const PophieChatResult(
+          text: '',
+          facialExpression: 'neutral',
+          robotState: 'idle',
+          sttText: '',
+        );
+  }
+
+  /// 把 `/api/chat`(或 `/api/chat/stream` 的 `done.response`)响应体解析为
+  /// [PophieChatResult]。顺带保存回传的 `session_id` 供复用。
+  PophieChatResult _parseChatResponse(Map<String, dynamic> data) {
+    final sid = data['session_id'] as String?;
+    if (sid != null) sessionId = sid;
+
+    final output = (data['output'] as Map?)?.cast<String, dynamic>() ?? const {};
+    final stt = (data['stt'] as Map?)?.cast<String, dynamic>();
+
+    Uint8List? audioBytes;
+    String? audioFormat;
+    final audio = (output['audio'] as Map?)?.cast<String, dynamic>();
+    if (audio != null && audio['data'] is String) {
+      try {
+        audioBytes = base64Decode(audio['data'] as String);
+        audioFormat = audio['format'] as String? ?? 'wav';
+      } catch (e) {
+        debugPrint('[Pophie] audio decode failed: $e');
+      }
+    }
+
+    return PophieChatResult(
+      text: (output['text'] as String?) ?? '',
+      facialExpression: (output['facial_expression'] as String?) ?? 'neutral',
+      robotState: (output['robot_state'] as String?) ?? 'idle',
+      sttText: (stt?['text'] as String?) ?? '',
+      audioBytes: audioBytes,
+      audioFormat: audioFormat,
+      voice: (output['voice'] as Map?)?.cast<String, dynamic>(),
+      sessionId: sid,
+    );
+  }
+
   // —— 主人档案（文档 §3.16）——
   // 首次激活向导完成时同步主人文本档案到后端。人脸数据绝不上传（端侧本地比对），
   // 这里只传 §2.8 的 5 个字段。全部 best-effort：失败返回 false，不抛异常，

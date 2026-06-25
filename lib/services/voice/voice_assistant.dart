@@ -12,6 +12,7 @@ import 'chat_service.dart';
 import 'conversation_logger.dart';
 import 'pophie_client.dart';
 import 'speech_service.dart';
+import 'stt_stream_client.dart';
 import 'streaming_tts_player.dart';
 import 'voice_state.dart';
 import 'wake_word_service.dart';
@@ -145,6 +146,16 @@ class VoiceAssistant extends ChangeNotifier {
   /// 是否启用语音播报(TTS)。关闭时回复仅以文字显示。
   bool ttsEnabled = true;
 
+  /// 是否启用**流式 STT 对话模式**(文档 §3.5.1 `WS /api/stt/stream`)。
+  /// 开启(默认)后唤醒/触发即建立 WebSocket,边录边识别(partial/final),
+  /// 多轮复用同一连接,识别完成走 `/api/chat/stream` + `/api/tts/stream`;
+  /// 关闭则回退「整段录音 → `/api/chat` 批量 STT」的单轮模式([_runConversation])。
+  bool streamingSttEnabled = true;
+
+  /// 当前活跃的流式 STT 客户端(对话模式期间非空)。供 [stop] 主动关闭以打断
+  /// `await sessionDone`,使流式对话循环及时退出。
+  SttStreamClient? _activeStt;
+
   /// 由 AppController 在获取麦克风权限后调用,标记可用性。
   void markAvailable() {
     _available = true;
@@ -211,7 +222,14 @@ class VoiceAssistant extends ChangeNotifier {
     await _wakeSub?.cancel();
     _wakeSub = null;
     await wakeWord.stop();
+    // 主动关闭流式 STT(若在对话模式中),触发 closed 事件让对话循环退出。
+    try {
+      await _activeStt?.close(sendEndFrame: true);
+    } catch (_) {}
     await speech.stopSpeaking();
+    try {
+      await _streamingTts.release();
+    } catch (_) {}
     try {
       await _player.stop();
     } catch (_) {}
@@ -235,7 +253,11 @@ class VoiceAssistant extends ChangeNotifier {
   void _onWake(String keyword) {
     debugPrint('[VoiceAssistant] wake word: $keyword');
     conversationLog.log('wake', '唤醒词: $keyword');
-    _runConversation();
+    if (streamingSttEnabled) {
+      _runStreamingConversation();
+    } else {
+      _runConversation();
+    }
   }
 
   /// 一轮对话:聆听整段语音 → 发 Pophie /api/chat(STT+LLM+TTS) → 播报。
@@ -419,6 +441,339 @@ class VoiceAssistant extends ChangeNotifier {
         } else {
           await _resumeWakeListening();
         }
+      }
+    }
+  }
+
+  // ================= 流式 STT 对话模式(文档 §3.5.1 + §3.4.1 + §3.6.1) =========
+  //
+  // 与上面的单轮批量模式([_runConversation])相对:唤醒/触发后建立
+  // [SttStreamClient] WebSocket,持续把麦克风 PCM 分片上行做实时识别;每个
+  // `final`(text 非空)即一句用户发言,经 `/api/chat/stream` 流式拿回复、每个
+  // `speak` 分句走 `/api/tts/stream` 边收边播,播完回到聆听(同一 WS 多轮复用)。
+  // 退出:服务端 `session_end`(空闲超时)/`error`、总开关 [stop]、或 WS 关闭。
+
+  /// 流式对话主循环(端侧推荐,见文件顶部小节注释)。
+  ///
+  /// **半双工**:整轮 LLM + TTS 期间停麦并暂停上行 chunk(避免扬声器回声被
+  /// 误识别;当前版本不支持 barge-in)。播完重启麦克风继续聆听。
+  ///
+  /// **连接失败降级**:WS 建连失败时回退一轮批量 [_runConversation],保证可用性。
+  Future<void> _runStreamingConversation() async {
+    if (_state != VoiceState.idle) return; // 防重入
+    _setState(VoiceState.waking);
+    await wakeWord.stop();
+
+    final stt = SttStreamClient(pophie.config.baseUrl);
+    _activeStt = stt;
+    final sessionDone = Completer<void>();
+    StreamSubscription<Uint8List>? chunkSub;
+    StreamSubscription<SttEvent>? evSub;
+    var listening = false; // 是否在向 WS 上行 chunk(聆听相位)
+    var handlingTurn = false; // 是否正在处理一轮(LLM + TTS,期间忽略识别事件)
+    var fallbackToBatch = false; // 连接失败 → finally 里降级跑一轮批量
+    // —— 残留/重复 final 过滤(防「没说话却自问自答」死循环)——
+    // 连续会话里,一轮结束恢复上行后,服务端常把上一段缓冲尾音补发成 final。
+    // 这种 final **不属于新的聆听窗口**:本窗口内没有新的 partial。故只接受
+    // 「本窗口内收到过 partial」的 final;并额外抑制短时间内重复的相同文本。
+    var sawPartialSinceListen = false; // 当前聆听窗口内是否收到过 partial
+    String? lastHandledText; // 上一条已处理的 final 文本(去重)
+    DateTime? lastHandledAt; // 上一条已处理的时刻(去重时间窗)
+
+    void finishSession() {
+      if (!sessionDone.isCompleted) sessionDone.complete();
+    }
+
+    try {
+      // 麦克风需在跑(唤醒期间通常已开)。
+      if (!audio.isRunning) await audio.start();
+
+      conversationLog.log('listen', '连接流式 STT WebSocket…');
+      try {
+        await stt.connect();
+      } catch (e) {
+        conversationLog.log('error', '流式 STT 连接失败,本轮回退批量模式: $e',
+            error: true);
+        fallbackToBatch = true;
+        return; // 跳到 finally
+      }
+
+      evSub = stt.events.listen((ev) {
+        switch (ev.type) {
+          case SttEventType.meta:
+            conversationLog.log('listen',
+                'STT meta: silenceCommit=${ev.silenceCommitMs}ms '
+                'idle=${ev.conversationIdleSec}s');
+            break;
+          case SttEventType.ready:
+            listening = true;
+            sawPartialSinceListen = false; // 新聆听窗口
+            _userText = '';
+            _replyText = '';
+            _robotState = null;
+            _setState(VoiceState.listening);
+            conversationLog.log('listen', 'STT ready,开始聆听');
+            notifyListeners();
+            break;
+          case SttEventType.partial:
+            if (handlingTurn) break;
+            final p = (ev.text ?? '').trim();
+            // 非空 partial 才视为「本窗口有真实新语音」(用于门控 final)。
+            if (p.isNotEmpty) sawPartialSinceListen = true;
+            // 中间结果驱动「聆听中」字幕;勿触发 LLM。
+            _userText = ev.text ?? '';
+            notifyListeners();
+            break;
+          case SttEventType.finalResult:
+            if (handlingTurn) break;
+            final t = (ev.text ?? '').trim();
+            if (t.isEmpty) break; // 空 final:继续聆听,不刷新
+            // 残留 final 过滤①:本聆听窗口内没收到过 partial → 多半是上一段
+            // 缓冲尾音被补发的残留 final,丢弃(否则会「没说话却自问自答」)。
+            if (!sawPartialSinceListen) {
+              conversationLog.log('listen',
+                  '忽略无 partial 的 final(疑似残留尾音): "$t"', error: true);
+              break;
+            }
+            // 残留 final 过滤②:与上一条相同文本且间隔很短 → 视为重复,丢弃。
+            final now = DateTime.now();
+            if (t == lastHandledText &&
+                lastHandledAt != null &&
+                now.difference(lastHandledAt!).inSeconds < 8) {
+              conversationLog.log('listen',
+                  '忽略重复 final(疑似残留): "$t"', error: true);
+              break;
+            }
+            lastHandledText = t;
+            lastHandledAt = now;
+            handlingTurn = true;
+            listening = false; // 暂停上行,进入 thinking/speaking
+            sawPartialSinceListen = false; // 本句已消费
+            // 异步处理本轮;完成后恢复聆听(若会话仍在)。
+            () async {
+              try {
+                await _handleStreamingTurn(t, ev.voice);
+              } catch (e) {
+                conversationLog.log('error', '处理对话轮异常: $e', error: true);
+              } finally {
+                handlingTurn = false;
+                if (_running && !sessionDone.isCompleted) {
+                  _userText = '';
+                  _replyText = '';
+                  // 重新计时去重窗口起点,并要求下一句必须有新的 partial。
+                  lastHandledAt = DateTime.now();
+                  sawPartialSinceListen = false;
+                  listening = true;
+                  _setState(VoiceState.listening);
+                  conversationLog.log('listen', '回到聆听(多轮复用同一 WS)');
+                  notifyListeners();
+                }
+              }
+            }();
+            break;
+          case SttEventType.sessionEnd:
+            conversationLog.log(
+                'end', '服务端结束会话: ${ev.message ?? "空闲超时"}');
+            finishSession();
+            break;
+          case SttEventType.error:
+            conversationLog.log('error', 'STT 错误: ${ev.message}', error: true);
+            finishSession();
+            break;
+          case SttEventType.closed:
+            finishSession();
+            break;
+        }
+      });
+
+      stt.start(sampleRate: 16000);
+
+      // 把麦克风 PCM 分片转发到 WS(仅聆听相位、未在处理轮、会话未结束时)。
+      chunkSub = audio.audioStream.listen((bytes) {
+        if (listening && !handlingTurn && !sessionDone.isCompleted) {
+          stt.sendChunk(bytes);
+        }
+      });
+
+      // 等待会话结束(session_end / error / closed / stop 关闭)。
+      await sessionDone.future;
+    } catch (e) {
+      conversationLog.log('error', '流式对话异常: $e', error: true);
+    } finally {
+      _activeStt = null;
+      await chunkSub?.cancel();
+      await evSub?.cancel();
+      await stt.close(sendEndFrame: true);
+      _userText = '';
+      _replyText = '';
+      _robotState = null;
+      audio.externalLevel = false;
+      audio.level.value = 0.0;
+      _setState(VoiceState.idle);
+    }
+
+    // —— 会话收尾(放在 try/finally 之外,避免在 finally 中改变控制流)——
+    // 连接失败:降级跑一轮批量对话(它会自行恢复唤醒监听 / 补播主动消息)。
+    if (fallbackToBatch && _running) {
+      if (!audio.isRunning) await audio.start();
+      await _runConversation();
+      return;
+    }
+
+    conversationLog.log('end', '流式对话结束,回到 idle');
+    // 对话期间排队的主动消息补播;否则恢复唤醒监听。
+    if (_proactiveQueue.isNotEmpty && _running) {
+      final next = _proactiveQueue.removeAt(0);
+      if (!audio.isRunning) await audio.start();
+      _playProactive(next);
+    } else {
+      if (_running && !audio.isRunning) await audio.start();
+      await _resumeWakeListening();
+    }
+  }
+
+  /// 处理流式对话的一轮:STT `final` 文本 → `/api/chat/stream` 流式回复 →
+  /// 每个 `speak` 分句走 `/api/tts/stream` 边收边播(文档 §3.4.1 + §3.6.1)。
+  ///
+  /// 半双工:进入即停麦,播完恢复麦克风(供下一轮聆听)。流式聊天失败时回退
+  /// 批量 `/api/chat`。[voice] 为 STT `final` 携带的语音侧道,写入感知由
+  /// [perceptionProvider] 统一构造时无法注入(端侧感知独立),此处仅记录日志。
+  Future<void> _handleStreamingTurn(
+      String text, Map<String, dynamic>? voice) async {
+    _userText = text;
+    _replyText = '';
+    notifyListeners();
+    conversationLog.log('listen',
+        '识别完成: "$text"${voice != null ? " | voice=$voice" : ""}');
+
+    _setState(VoiceState.thinking);
+    // 半双工:停麦,避免扬声器回声进入录音通路被误识别(当前不支持 barge-in)。
+    await audio.stop();
+
+    final perception = perceptionProvider?.call();
+    final userId = userIdProvider?.call();
+
+    // speak 分句队列:chatStream 边生成边入队,播放 worker 边取边播(降首句延迟)。
+    final speakCtrl = StreamController<String>();
+    final Future<void> playFuture = ttsEnabled
+        ? _speakStreaming(speakCtrl.stream)
+        : speakCtrl.stream.drain<void>();
+
+    var anySpeak = false;
+    String replyText = '';
+    String? robotState;
+    try {
+      conversationLog.log('think', 'POST /api/chat/stream (流式)…');
+      final chatSw = Stopwatch()..start();
+      final result = await pophie.chatStream(
+        text: text,
+        perception: perception,
+        userId: userId,
+        skipTts: true,
+        onSpeak: (seg) {
+          final s = seg.trim();
+          if (s.isEmpty) return;
+          anySpeak = true;
+          conversationLog.log('speak', '分句: $s');
+          if (!speakCtrl.isClosed) speakCtrl.add(seg);
+        },
+      );
+      chatSw.stop();
+      replyText = result.text;
+      robotState = result.robotState;
+      conversationLog.log('think',
+          '/api/chat/stream 完成 ${chatSw.elapsedMilliseconds}ms | '
+          'LLM="$replyText" | robotState=$robotState');
+      if (result.sessionId != null) {
+        await onSessionPersist?.call(result.sessionId!);
+      }
+      // 服务端未分句(无 speak)但有完整回复:兜底整段播一次。
+      if (!anySpeak &&
+          ttsEnabled &&
+          replyText.trim().isNotEmpty &&
+          !speakCtrl.isClosed) {
+        speakCtrl.add(replyText);
+      }
+    } catch (e) {
+      conversationLog.log('think', '流式聊天失败,回退批量 /api/chat: $e',
+          error: true);
+      try {
+        final r = await pophie.chat(
+          text: text,
+          perception: perception,
+          userId: userId,
+          skipTts: true,
+        );
+        replyText = r.text;
+        robotState = r.robotState;
+        if (r.sessionId != null) await onSessionPersist?.call(r.sessionId!);
+        if (ttsEnabled && r.text.trim().isNotEmpty && !speakCtrl.isClosed) {
+          speakCtrl.add(r.text);
+        }
+      } catch (e2) {
+        conversationLog.log('think', '批量回退也失败: $e2', error: true);
+      }
+    } finally {
+      await speakCtrl.close();
+    }
+
+    // 等待全部分句播完(队列 + 原生缓冲排空)。
+    await playFuture;
+
+    _robotState = robotState;
+    if (replyText.trim().isNotEmpty) {
+      _replyText = replyText;
+      notifyListeners();
+      onInteraction?.call(
+        userText: text,
+        replyText: replyText,
+        robotState: robotState,
+      );
+    } else {
+      conversationLog.log('think', '静默回复(空 STT 或 LLM 失败),不播报',
+          error: true);
+    }
+
+    // 恢复麦克风供下一轮聆听(调用方在 finally 把 listening 置回 true)。
+    audio.externalLevel = false;
+    audio.level.value = 0.0;
+    if (_running) await audio.start();
+  }
+
+  /// 顺序播放流式 `speak` 分句:对每段调 `/api/tts/stream`,复用同一
+  /// [StreamingTtsPlayer] 跨分句无缝衔接(首段 `meta` 启动播放器,后续分句持续
+  /// 喂入,全部播完后统一 markFeedingDone + waitForDone + release)。
+  ///
+  /// 调用前调用方已停麦(半双工);本方法只负责播放,不管理麦克风。
+  Future<void> _speakStreaming(Stream<String> segments) async {
+    var started = false;
+    try {
+      await for (final seg in segments) {
+        if (!_running) break;
+        if (_state != VoiceState.speaking) _setState(VoiceState.speaking);
+        try {
+          await pophie.ttsStream(
+            seg,
+            onMeta: (format, sampleRate) async {
+              if (!started) {
+                await _streamingTts.start(sampleRate);
+                started = true;
+              }
+            },
+            onChunk: (pcm16) {
+              if (started) _streamingTts.feedChunk(pcm16);
+            },
+            onDone: (_) {},
+          );
+        } catch (e) {
+          conversationLog.log('speak', '分句合成失败,跳过: $e', error: true);
+        }
+      }
+    } finally {
+      if (started) {
+        _streamingTts.markFeedingDone();
+        await _streamingTts.waitForDone();
+        await _streamingTts.release();
       }
     }
   }
