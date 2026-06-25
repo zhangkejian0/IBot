@@ -34,6 +34,7 @@ import '../services/voice/llm_config.dart';
 import '../services/voice/pophie_client.dart';
 import '../services/voice/pophie_config.dart';
 import '../services/voice/voice_assistant.dart';
+import '../services/voice/voice_state.dart';
 import 'package:hand_detection/hand_detection.dart' show GestureType;
 
 /// 应用整体阶段。
@@ -79,6 +80,9 @@ class DisplaySettings {
   bool wakeWordEnabled = true;
   /// 是否启用 TTS 语音播报(关闭则回复仅以文字显示)。
   bool ttsEnabled = true;
+  /// 是否启用「注视触发对话」:持续注视机器人超过一定时长后,无需唤醒词
+  /// 自动发起一轮语音交互。需 voiceEnabled 开启才生效。默认开。
+  bool gazeTriggerEnabled = true;
   /// 唤醒词(可在设置页修改,运行时生效)。
   String wakeWord = '你好';
   /// 云端服务 API Key(阿里云 ASR/TTS、LLM;阶段 3+ 使用,首版可留空占位)。
@@ -191,6 +195,22 @@ class AppController extends ChangeNotifier {
 
   /// 当前时序聚合后的日常活动快照(活动 + 已持续时长),供 UI/交互消费。
   ActivitySnapshot get activity => _activity;
+
+  // —— 注视触发对话(无需唤醒词,持续注视机器人自动发起交互) ——
+  // 正视机器人的 gaze 特征点(由真实采样校准):
+  //   gazeX ≈ -0.27, gazeY ≈ +0.31(正视摄像头时 blendshape 的系统偏移)。
+  //   判定:gaze 到此点的距离 < [_gazeTriggerRadius]。
+  //   阈值依据:9 组采样(5正视/4非正视),正视距离<0.10,非正视>0.21,间隔干净。
+  static const double _gazeCenterX = -0.27;
+  static const double _gazeCenterY = 0.31;
+  static const double _gazeTriggerRadius = 0.15;
+  /// 持续注视多久(秒)后触发对话。
+  static const int _gazeTriggerSeconds = 5;
+  /// 触发后冷却时长(秒),期间不再因注视触发(避免刚说完又触发)。
+  static const int _gazeCooldownSeconds = 60;
+
+  DateTime? _gazeLookingSince; // 开始持续注视的时刻
+  DateTime? _gazeLastTrigger; // 上次触发时刻(冷却用)
 
   // 区域检测器：用于调试可视化
   final GazeZoneDetector _gazeZoneDetector = GazeZoneDetector();
@@ -709,6 +729,8 @@ class AppController extends ChangeNotifier {
       _activity = _activityTracker.update(_result, DateTime.now());
       _maybeLogActivity(_activity);
       _maybeLogPerception();
+      // 注视触发:持续正视机器人超过阈值时长,无需唤醒词自动发起对话。
+      _maybeGazeTrigger();
       if (!_disposed) notifyListeners();
     } catch (e) {
       debugPrint('processFrame error: $e');
@@ -831,6 +853,50 @@ class AppController extends ChangeNotifier {
       note: '${tr.from.label}→${tr.to.label}'
           '（上一活动持续 ${tr.previousDuration.inSeconds} 秒）',
     ));
+  }
+
+  /// 注视触发:持续正视机器人超过 [_gazeTriggerSeconds] 秒,且度过冷却期,
+  /// 且语音助手空闲可交互时,自动发起一轮对话(无需唤醒词)。
+  ///
+  /// 判定依据(由真实采样校准):正视摄像头时 gaze 落在
+  /// (_gazeCenterX, _gazeCenterY) 附近 < [_gazeTriggerRadius]。
+  /// 需 settings.gazeTriggerEnabled 且 voiceEnabled 开启。
+  void _maybeGazeTrigger() {
+    // 前置:开关 + 语音助手在运行且空闲(不在对话中)。
+    if (!settings.gazeTriggerEnabled || !settings.voiceEnabled) return;
+    final voice = voiceAssistant;
+    if (!voice.isRunning || voice.state != VoiceState.idle) return;
+
+    final now = DateTime.now();
+    // 冷却期:距上次触发不足 _gazeCooldownSeconds 秒则不触发。
+    if (_gazeLastTrigger != null &&
+        now.difference(_gazeLastTrigger!).inSeconds < _gazeCooldownSeconds) {
+      return;
+    }
+
+    final face = _result.face;
+    final looking = face != null && _isLookingAtRobot(face);
+    if (looking) {
+      _gazeLookingSince ??= now;
+      final held = now.difference(_gazeLookingSince!).inSeconds;
+      if (held >= _gazeTriggerSeconds) {
+        // 持续注视达标:触发对话,记录时刻进入冷却,重置注视计时。
+        _gazeLookingSince = null;
+        _gazeLastTrigger = now;
+        debugPrint('[AppController] 注视触发对话(持续正视 $held秒)');
+        voice.triggerManually();
+      }
+    } else {
+      // 未正视:重置注视计时(要求连续注视,中断需重新计时)。
+      _gazeLookingSince = null;
+    }
+  }
+
+  /// 是否正视机器人:gaze 落在正视特征点附近。
+  bool _isLookingAtRobot(FaceOverlay face) {
+    final dx = face.gazeX - _gazeCenterX;
+    final dy = face.gazeY - _gazeCenterY;
+    return math.sqrt(dx * dx + dy * dy) < _gazeTriggerRadius;
   }
 
   /// 后台执行一次 YOLO 物体检测：在 Isolate 里把摆正图编码为 JPEG（重计算,
