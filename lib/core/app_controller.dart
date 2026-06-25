@@ -25,6 +25,7 @@ import '../services/hand_engine.dart';
 import '../services/mlkit_face_engine.dart';
 import '../services/object_engine.dart';
 import '../services/owner_profile_store.dart';
+import '../services/network_logger.dart';
 import '../services/persona_log_server.dart';
 import '../services/persona_logger.dart';
 import '../services/person_repository.dart';
@@ -95,6 +96,10 @@ class DisplaySettings {
   /// 日志 HTTP 浏览服务开关：开启后可在同一局域网的电脑上访问查看日志。
   /// 默认开启:陪伴场景常需在电脑上实时查看人物日志,免去每次手动开。
   bool personaLogServerEnabled = true;
+
+  /// 网络交互日志开关：开启后按天持久化记录发给后端(Pophie)的请求/响应,
+  /// 便于调试「语音交互到底提交了哪些信息」。可在网页端 /net 查看。默认开。
+  bool networkLogEnabled = true;
 }
 
 /// 一次人脸采样的结果（用于「认识我」录入）。
@@ -123,11 +128,18 @@ class AppController extends ChangeNotifier {
   /// 人物行为日志记录器(按天持久化,供后续分析人物)。
   final PersonaLogger personaLogger = PersonaLogger();
 
+  /// 网络交互日志记录器(按天持久化,记录发给后端的请求/响应,供调试)。
+  final NetworkLogger networkLogger = NetworkLogger();
+
   /// 人物日志 HTTP 浏览服务(局域网电脑端查看,方便调试)。
   /// 注入 frameProvider 让网页能远程采样当前帧(POST /api/sample),
   /// 这样人在设备前保持动作不动,在电脑网页上点按钮即可采样。
-  late final PersonaLogServer personaLogServer =
-      PersonaLogServer(personaLogger, frameProvider: () => result);
+  /// 同时注入 networkLogger,开放 `/net` 网络交互日志看板。
+  late final PersonaLogServer personaLogServer = PersonaLogServer(
+    personaLogger,
+    frameProvider: () => result,
+    netLogger: networkLogger,
+  );
   /// LLM 服务配置(DeepSeek 预设,可在设置页修改并持久化)。
   final LlmConfigStore llmConfigStore = LlmConfigStore();
 
@@ -200,16 +212,28 @@ class AppController extends ChangeNotifier {
   // 正视机器人的 gaze 特征点(由真实采样校准):
   //   gazeX ≈ -0.27, gazeY ≈ +0.31(正视摄像头时 blendshape 的系统偏移)。
   //   判定:gaze 到此点的距离 < [_gazeTriggerRadius]。
-  //   阈值依据:9 组采样(5正视/4非正视),正视距离<0.10,非正视>0.21,间隔干净。
+  //   阈值依据:9 组采样(5正视/4非正视),正视距离 0.01~0.097,非正视>0.21。
+  //
+  // **多重门槛**(实测单看 gaze 半径仍偏易触发,故叠加收紧):
+  //   1. gaze 半径收紧到 0.10(正视最远 0.097,留极小余量,排除"大致朝前");
+  //   2. 持续时长 8 秒(路过/偶然对视凑不够);
+  //   3. 同时要求行为态 focused(人静止专注,排除边走边瞥);
+  //   4. 人脸较居中(排除侧着脸正对镜头的误判);
+  //   5. 容错:允许短暂出圆 ≤1.5s 不重置(自然注视会有瞬间偏移)。
   static const double _gazeCenterX = -0.27;
   static const double _gazeCenterY = 0.31;
-  static const double _gazeTriggerRadius = 0.15;
+  static const double _gazeTriggerRadius = 0.10;
   /// 持续注视多久(秒)后触发对话。
-  static const int _gazeTriggerSeconds = 5;
+  static const int _gazeTriggerSeconds = 8;
   /// 触发后冷却时长(秒),期间不再因注视触发(避免刚说完又触发)。
   static const int _gazeCooldownSeconds = 60;
+  /// 容错:短暂出圆不超过此时长(秒)不重置注视计时(自然注视有瞬间偏移)。
+  static const int _gazeToleranceSeconds = 1;
+  /// 人脸需较居中:face 中心 x 在 [0.5±_faceCenterTolerance] 范围内。
+  static const double _faceCenterTolerance = 0.22;
 
   DateTime? _gazeLookingSince; // 开始持续注视的时刻
+  DateTime? _gazeLostSince; // 最近一次离开正视圆的时刻(容错用)
   DateTime? _gazeLastTrigger; // 上次触发时刻(冷却用)
 
   // 区域检测器：用于调试可视化
@@ -328,6 +352,9 @@ class AppController extends ChangeNotifier {
       // 初始化人物日志记录器(按天持久化)。失败不阻断主流程。
       personaLogger.enabled = settings.personaLogEnabled;
       await personaLogger.initialize();
+      // 初始化网络交互日志记录器(按天持久化,记录发给后端的请求/响应)。
+      networkLogger.enabled = settings.networkLogEnabled;
+      await networkLogger.initialize();
       // 默认开启日志 HTTP 浏览服务(可在设置页关闭)。
       if (settings.personaLogServerEnabled) {
         unawaited(startPersonaLogServer());
@@ -341,6 +368,8 @@ class AppController extends ChangeNotifier {
       // 加载 Pophie 后端配置并注入。语音对话全程走 /api/chat(STT+LLM+TTS)。
       await pophieConfigStore.load();
       voiceAssistant.pophie.configure(pophieConfigStore.config);
+      // 挂载网络交互日志拦截器,记录所有发往后端的请求/响应供调试。
+      voiceAssistant.pophie.attachNetworkLogger(networkLogger);
       _wireVoicePerception();
 
       // 加载主人档案（决定是否进入首次激活向导）。文件存在=已注册。
@@ -858,9 +887,8 @@ class AppController extends ChangeNotifier {
   /// 注视触发:持续正视机器人超过 [_gazeTriggerSeconds] 秒,且度过冷却期,
   /// 且语音助手空闲可交互时,自动发起一轮对话(无需唤醒词)。
   ///
-  /// 判定依据(由真实采样校准):正视摄像头时 gaze 落在
-  /// (_gazeCenterX, _gazeCenterY) 附近 < [_gazeTriggerRadius]。
-  /// 需 settings.gazeTriggerEnabled 且 voiceEnabled 开启。
+  /// 多重门槛(实测单看 gaze 半径偏易触发,故叠加收紧,详见常量区注释):
+  /// gaze 在正视圆内 + 行为态 focused + 人脸居中,三者同时满足才累计注视时长。
   void _maybeGazeTrigger() {
     // 前置:开关 + 语音助手在运行且空闲(不在对话中)。
     if (!settings.gazeTriggerEnabled || !settings.voiceEnabled) return;
@@ -877,7 +905,9 @@ class AppController extends ChangeNotifier {
     final face = _result.face;
     final looking = face != null && _isLookingAtRobot(face);
     if (looking) {
+      // 容错:若之前短暂出圆(≤容错秒数),不重置,继续累计。
       _gazeLookingSince ??= now;
+      _gazeLostSince = null;
       final held = now.difference(_gazeLookingSince!).inSeconds;
       if (held >= _gazeTriggerSeconds) {
         // 持续注视达标:触发对话,记录时刻进入冷却,重置注视计时。
@@ -887,16 +917,26 @@ class AppController extends ChangeNotifier {
         voice.triggerManually();
       }
     } else {
-      // 未正视:重置注视计时(要求连续注视,中断需重新计时)。
-      _gazeLookingSince = null;
+      // 未正视:记录离开时刻;超过容错秒数才真正重置(允许瞬间偏移)。
+      _gazeLostSince ??= now;
+      if (now.difference(_gazeLostSince!).inSeconds > _gazeToleranceSeconds) {
+        _gazeLookingSince = null;
+      }
     }
   }
 
-  /// 是否正视机器人:gaze 落在正视特征点附近。
+  /// 是否正视机器人(多重门槛):gaze 落在正视圆内 + 行为态 focused + 人脸居中。
   bool _isLookingAtRobot(FaceOverlay face) {
+    // 1. gaze 在正视特征点附近(收紧半径 0.10)。
     final dx = face.gazeX - _gazeCenterX;
     final dy = face.gazeY - _gazeCenterY;
-    return math.sqrt(dx * dx + dy * dy) < _gazeTriggerRadius;
+    if (math.sqrt(dx * dx + dy * dy) >= _gazeTriggerRadius) return false;
+    // 2. 行为态为专注(人静止专注,排除边走动边瞥一眼)。
+    if (_behavior.state != BehaviorState.focused) return false;
+    // 3. 人脸较居中(排除侧着脸正对镜头的误判)。
+    final cx = face.boundingBox.center.dx;
+    if ((cx - 0.5).abs() > _faceCenterTolerance) return false;
+    return true;
   }
 
   /// 后台执行一次 YOLO 物体检测：在 Isolate 里把摆正图编码为 JPEG（重计算,
@@ -1136,6 +1176,8 @@ class AppController extends ChangeNotifier {
     _syncVoiceAssistant();
     // 人物日志记录开关实时生效。
     personaLogger.enabled = settings.personaLogEnabled;
+    // 网络交互日志开关实时生效。
+    networkLogger.enabled = settings.networkLogEnabled;
     // 日志 HTTP 服务按开关启停。
     if (settings.personaLogServerEnabled && _personaLogUrl == null) {
       startPersonaLogServer();
@@ -1573,6 +1615,7 @@ class AppController extends ChangeNotifier {
     staticServer.stop();
     personaLogServer.stop();
     personaLogger.dispose();
+    networkLogger.dispose();
     super.dispose();
   }
 }

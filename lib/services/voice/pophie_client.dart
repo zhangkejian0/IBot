@@ -5,6 +5,8 @@ import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 
 import '../../models/owner_profile.dart';
+import '../network_logger.dart';
+import 'network_log_interceptor.dart';
 import 'pophie_config.dart';
 
 /// 用户侧多模态感知上下文(文档 §2.4)。仅携带非空字段。
@@ -238,6 +240,16 @@ class PophieClient {
     robotId: 'robot-default',
   );
   PophieConfig get config => _config;
+
+  /// 挂载网络交互日志记录器(由 AppController 注入)。挂上后所有发往后端的
+  /// 请求/响应/错误都会写入 [NetworkLogger]，供调试查看「提交了哪些信息」。
+  /// 幂等：重复调用只会保留一个拦截器。
+  void attachNetworkLogger(NetworkLogger logger) {
+    _dio.interceptors
+        .removeWhere((i) => i is NetworkLogInterceptor);
+    _dio.interceptors.add(NetworkLogInterceptor(logger));
+    debugPrint('[Pophie] network logger attached');
+  }
 
   /// 注入/更新配置(由 AppController 从 [PophieConfigStore] 注入)。
   void configure(PophieConfig config) {

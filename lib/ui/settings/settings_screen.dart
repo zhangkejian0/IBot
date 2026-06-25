@@ -1219,7 +1219,9 @@ class _PersonaLogSection extends StatelessWidget {
       header: const _Header('人物日志'),
       footer: const _Footer(
           '按天持久化记录识别到的人物、表情、手势、物体与语音对话,用于分析人物。'
-          '开启「局域网查看服务」后,可在同一 Wi-Fi 下的电脑浏览器中打开下方地址查看日志。'),
+          '开启「局域网查看服务」后,可在同一 Wi-Fi 下的电脑浏览器中打开下方地址查看日志。'
+          '「网络交互日志」额外记录每次发给后端的请求/响应(自动折叠 base64 音频等大字段),'
+          '便于调试语音交互到底提交了哪些信息;可在网页 /net 查看并按日删除。'),
       children: [
         _SwitchTile(
           icon: CupertinoIcons.doc_text_fill,
@@ -1296,6 +1298,58 @@ class _PersonaLogSection extends StatelessWidget {
             ),
           ),
         ),
+        _SwitchTile(
+          icon: CupertinoIcons.cloud_upload_fill,
+          color: AppTheme.accentTeal,
+          label: '记录网络交互日志',
+          value: s.networkLogEnabled,
+          onChanged: (v) =>
+              controller.updateSettings(() => s.networkLogEnabled = v),
+        ),
+        if (s.personaLogServerEnabled && s.networkLogEnabled)
+          CupertinoListTile.notched(
+            backgroundColor: AppTheme.groupedBackground,
+            leading: const _LeadingIcon(
+                CupertinoIcons.globe, AppTheme.accentTeal),
+            title: const Text('网络日志地址',
+                style: TextStyle(color: AppTheme.label)),
+            subtitle: Text(
+              url == null ? '启动中…' : '$url/net',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: AppTheme.secondaryLabel),
+            ),
+            trailing: url == null
+                ? const CupertinoActivityIndicator()
+                : const Icon(CupertinoIcons.doc_on_doc,
+                    color: AppTheme.secondaryLabel, size: 18),
+            onTap: url == null
+                ? null
+                : () async {
+                    final netUrl = '$url/net';
+                    await Clipboard.setData(ClipboardData(text: netUrl));
+                    if (!context.mounted) return;
+                    showCupertinoDialog<void>(
+                      context: context,
+                      builder: (ctx) => CupertinoAlertDialog(
+                        title: const Text('已复制地址'),
+                        content: Padding(
+                          padding: const EdgeInsets.only(top: 8),
+                          child: Text('$netUrl\n\n'
+                              '在同一局域网的电脑浏览器中打开,即可查看发给后端的'
+                              '请求/响应等网络交互详情。'),
+                        ),
+                        actions: [
+                          CupertinoDialogAction(
+                            isDefaultAction: true,
+                            child: const Text('好'),
+                            onPressed: () => Navigator.of(ctx).pop(),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+          ),
       ],
     );
   }

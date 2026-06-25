@@ -6,6 +6,7 @@ import 'dart:ui' show Offset, Rect;
 import 'package:flutter/foundation.dart' show debugPrint;
 
 import '../models/detection.dart';
+import 'network_logger.dart';
 import 'persona_logger.dart';
 
 /// 人物日志的 HTTP 浏览服务。
@@ -14,18 +15,27 @@ import 'persona_logger.dart';
 /// 方便调试时查看/分析按天归档的日志，无需把设备连数据线导文件。
 ///
 /// 路由：
-/// - `GET /`                      → 内嵌单页看板(下拉选日期 + 过滤 + 表格)
-/// - `GET /api/dates`             → 已有日志日期列表(JSON)
-/// - `GET /api/logs?date=Y-M-D`   → 指定日期全部记录(JSON 数组)
-/// - `POST /api/sample`           → 远程采样:抓取当前帧点位+动作标注存库
-/// - `GET /healthz`               → 健康检查
+/// - `GET /`                          → 人物日志看板(下拉选日期 + 过滤 + 表格)
+/// - `GET /api/dates`                 → 已有人物日志日期列表(JSON)
+/// - `GET /api/logs?date=Y-M-D`       → 指定日期全部人物日志(JSON 数组)
+/// - `DELETE /api/logs?date=Y-M-D`    → 删除指定日期人物日志
+/// - `POST /api/sample`               → 远程采样:抓取当前帧点位+动作标注存库
+/// - `GET /net`                       → 网络交互日志看板(发给后端的请求/响应)
+/// - `GET /api/net/dates`             → 已有网络日志日期列表(JSON)
+/// - `GET /api/net/logs?date=Y-M-D`   → 指定日期全部网络交互日志(JSON 数组)
+/// - `DELETE /api/net/logs?date=Y-M-D`→ 删除指定日期网络交互日志
+/// - `GET /healthz`                   → 健康检查
 ///
-/// 数据源为 [PersonaLogger]。采样能力由 [frameProvider] 提供(从 AppController
-/// 取实时帧),允许在电脑网页上远程触发,无需触碰设备(避免改变采样动作姿态)。
+/// 数据源为 [PersonaLogger](人物日志)与可选的 [netLogger](网络交互日志)。
+/// 采样能力由 [frameProvider] 提供(从 AppController 取实时帧),允许在电脑网页上
+/// 远程触发,无需触碰设备(避免改变采样动作姿态)。
 class PersonaLogServer {
-  PersonaLogServer(this.logger, {this.frameProvider});
+  PersonaLogServer(this.logger, {this.frameProvider, this.netLogger});
 
   final PersonaLogger logger;
+
+  /// 网络交互日志记录器(可选)。注入后开放 `/net` 看板与 `/api/net/*` 接口。
+  final NetworkLogger? netLogger;
 
   /// 取当前检测帧的回调(由 AppController 注入)。为 null 表示无采样能力。
   /// 网页 POST /api/sample 时调用,远程抓取当前帧点位。
@@ -117,6 +127,49 @@ class PersonaLogServer {
       }
       if (path == '/api/sample') {
         await _handleSample(request);
+        return;
+      }
+      // —— 网络交互日志 ——
+      if (path == '/net' || path == '/net/' || path == '/net.html') {
+        res.headers.contentType = ContentType.html;
+        res.write(_netDashboardHtml);
+        await res.close();
+        return;
+      }
+      if (path == '/api/net/dates') {
+        final net = netLogger;
+        if (net == null) {
+          await _writeJson(res, {'dates': const [], 'dir': null});
+          return;
+        }
+        final dates = await net.availableDates();
+        await _writeJson(res, {'dates': dates, 'dir': net.directoryPath});
+        return;
+      }
+      if (path == '/api/net/logs') {
+        final net = netLogger;
+        if (net == null) {
+          res.statusCode = HttpStatus.serviceUnavailable;
+          await _writeJson(res, {'error': 'network log not enabled'});
+          return;
+        }
+        final date = request.uri.queryParameters['date'];
+        if (date == null || !_validDate(date)) {
+          res.statusCode = HttpStatus.badRequest;
+          await _writeJson(res, {'error': 'missing or invalid date'});
+          return;
+        }
+        if (request.method == 'DELETE') {
+          await net.deleteDate(date);
+          await _writeJson(res, {'ok': true, 'deleted': date});
+          return;
+        }
+        final entries = await net.readDate(date);
+        await _writeJson(res, {
+          'date': date,
+          'count': entries.length,
+          'logs': entries.map((e) => e.toJson()).toList(),
+        });
         return;
       }
       res.statusCode = HttpStatus.notFound;
@@ -419,6 +472,7 @@ class PersonaLogServer {
   <button id="clear" style="border-color:var(--red);color:var(--red)">清除当日</button>
   <label class="chk"><input type="checkbox" id="auto" /> 自动刷新(5s)</label>
   <span class="spacer"></span>
+  <a href="/net" style="color:var(--accent);text-decoration:none;font-size:14px;font-weight:600">🌐 网络交互日志 →</a>
 </header>
 <div class="stats" id="stats"></div>
 <div class="wrap">
@@ -610,6 +664,231 @@ el('clear').onclick=async function(){
   }catch(e){
     alert('清除失败: '+e.message);
   }
+};
+(async function(){ await loadDates(); await loadLogs(); })();
+</script>
+</body>
+</html>''';
+
+  /// 网络交互日志看板：纯静态 HTML + 原生 JS(无外部依赖)，深色主题。
+  /// 展示每次发往后端的 method/url/状态/耗时，并可展开请求体/响应体 JSON，
+  /// 方便调试「语音交互到底提交了哪些信息」。支持按端点/关键词过滤、删除当日。
+  static const String _netDashboardHtml = r'''<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>XBot 网络交互日志</title>
+<style>
+  :root {
+    --bg: #0b0c10; --panel: #16181d; --panel2: #1e2127; --line: #2a2e36;
+    --txt: #e6e8ec; --sub: #9aa0aa; --dim: #6b7280;
+    --accent: #4f9cf9; --green: #30d158; --orange: #ff9f0a; --purple: #bf5af2;
+    --yellow: #ffd60a; --teal: #64d2ff; --red: #ff453a;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--txt);
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+  header { position: sticky; top: 0; z-index: 10; background: var(--panel);
+    border-bottom: 1px solid var(--line); padding: 14px 20px;
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  header h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  select, input, button { background: var(--panel2); color: var(--txt);
+    border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px;
+    font-size: 14px; outline: none; }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  a.nav { color: var(--accent); text-decoration: none; font-size: 14px; font-weight: 600; }
+  label.chk { font-size: 13px; color: var(--sub); display: flex;
+    align-items: center; gap: 5px; cursor: pointer; }
+  .stats { padding: 8px 20px; color: var(--sub); font-size: 13px;
+    border-bottom: 1px solid var(--line); display: flex; gap: 18px; flex-wrap: wrap; }
+  .stats b { color: var(--txt); }
+  .wrap { padding: 14px 20px 60px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: var(--dim); font-weight: 500; padding: 8px 10px;
+    border-bottom: 1px solid var(--line); position: sticky; top: 0;
+    background: var(--bg); white-space: nowrap; }
+  td { padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tr:hover td { background: var(--panel); }
+  .time { color: var(--sub); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .tag { display: inline-block; padding: 1px 8px; border-radius: 20px;
+    font-size: 11px; font-weight: 600; }
+  .m-GET { background: rgba(48,209,88,.15); color: var(--green); }
+  .m-POST { background: rgba(79,156,249,.15); color: var(--accent); }
+  .m-PUT { background: rgba(255,159,10,.15); color: var(--orange); }
+  .m-DELETE { background: rgba(255,69,58,.15); color: var(--red); }
+  .ok { color: var(--green); font-weight: 600; }
+  .bad { color: var(--red); font-weight: 600; }
+  .path { color: var(--teal); word-break: break-all; }
+  .dur { color: var(--sub); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .err { color: var(--red); }
+  details { margin-top: 4px; }
+  details summary { cursor: pointer; color: var(--sub); font-size: 12px; }
+  pre.json { background: var(--panel2); border: 1px solid var(--line);
+    border-radius: 6px; padding: 8px; margin: 6px 0 0; font-size: 11px;
+    color: var(--teal); white-space: pre-wrap; word-break: break-all;
+    max-height: 360px; overflow: auto; }
+  .muted { color: var(--dim); }
+  .empty { text-align: center; color: var(--dim); padding: 60px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🌐 XBot 网络交互日志</h1>
+  <select id="date"></select>
+  <select id="method">
+    <option value="">全部方法</option>
+    <option value="GET">GET</option>
+    <option value="POST">POST</option>
+    <option value="PUT">PUT</option>
+    <option value="DELETE">DELETE</option>
+  </select>
+  <input id="kw" placeholder="搜索(路径/内容)" style="width:220px" />
+  <button id="refresh">刷新</button>
+  <button id="export">导出 JSON</button>
+  <button id="clear" style="border-color:var(--red);color:var(--red)">清除当日</button>
+  <label class="chk"><input type="checkbox" id="auto" /> 自动刷新(5s)</label>
+  <span style="flex:1"></span>
+  <a class="nav" href="/">← 人物日志</a>
+</header>
+<div class="stats" id="stats"></div>
+<div class="wrap">
+  <table>
+    <thead><tr>
+      <th style="width:90px">时间</th>
+      <th style="width:70px">方法</th>
+      <th style="width:60px">状态</th>
+      <th>路径</th>
+      <th style="width:80px">耗时</th>
+      <th style="width:90px">体量</th>
+      <th>请求 / 响应</th>
+    </tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div class="empty" id="empty" style="display:none">暂无记录</div>
+</div>
+<script>
+var allLogs = [];
+function el(id){ return document.getElementById(id); }
+function fmtTime(ts){
+  try { var d = new Date(ts);
+    return d.toLocaleTimeString('zh-CN', {hour12:false}) +
+      '.' + String(d.getMilliseconds()).padStart(3,'0');
+  } catch(e){ return ts; }
+}
+function esc(s){ return (s==null?'':String(s))
+  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function fmtBytes(n){
+  if(n==null) return '';
+  if(n<1024) return n+' B';
+  if(n<1048576) return (n/1024).toFixed(1)+' KB';
+  return (n/1048576).toFixed(2)+' MB';
+}
+async function loadDates(){
+  var r = await fetch('/api/net/dates'); var j = await r.json();
+  var sel = el('date'); sel.innerHTML = '';
+  (j.dates||[]).forEach(function(d){
+    var o = document.createElement('option'); o.value=d; o.textContent=d;
+    sel.appendChild(o);
+  });
+  if((j.dates||[]).length===0){
+    var o=document.createElement('option'); o.textContent='(无日志)'; sel.appendChild(o);
+  }
+}
+async function loadLogs(){
+  var date = el('date').value;
+  if(!date || date.indexOf('-')<0){ allLogs=[]; render(); return; }
+  var r = await fetch('/api/net/logs?date='+encodeURIComponent(date));
+  var j = await r.json(); allLogs = j.logs||[]; render();
+}
+function jsonBlock(label, val){
+  if(val==null) return '';
+  var txt = (typeof val === 'string') ? val : JSON.stringify(val, null, 1);
+  return '<details><summary>'+label+'</summary><pre class="json">'+esc(txt)+'</pre></details>';
+}
+function render(){
+  var method = el('method').value;
+  var kw = el('kw').value.trim().toLowerCase();
+  var rows = el('rows'); rows.innerHTML='';
+  var shown = 0, errs = 0;
+  for(var i=allLogs.length-1; i>=0; i--){
+    var e = allLogs[i];
+    if(method && e.method!==method) continue;
+    if(kw){
+      var hay = JSON.stringify(e).toLowerCase();
+      if(hay.indexOf(kw)<0) continue;
+    }
+    shown++;
+    if(e.error || (e.statusCode && e.statusCode>=400)) errs++;
+    var status = e.error ? '<span class="bad">ERR</span>'
+      : (e.statusCode!=null
+          ? '<span class="'+(e.statusCode<400?'ok':'bad')+'">'+e.statusCode+'</span>'
+          : '<span class="muted">-</span>');
+    var bytes = '';
+    if(e.requestBytes!=null) bytes += '<div class="muted">↑ '+fmtBytes(e.requestBytes)+'</div>';
+    if(e.responseBytes!=null) bytes += '<div class="muted">↓ '+fmtBytes(e.responseBytes)+'</div>';
+    var detail = '';
+    if(e.error) detail += '<div class="err">⚠ '+esc(e.error)+'</div>';
+    detail += jsonBlock('请求头', e.requestHeaders);
+    detail += jsonBlock('请求体', e.requestBody);
+    detail += jsonBlock('响应头', e.responseHeaders);
+    detail += jsonBlock('响应体', e.responseBody);
+    var tr = document.createElement('tr');
+    tr.innerHTML =
+      '<td class="time">'+fmtTime(e.ts)+'</td>'+
+      '<td><span class="tag m-'+esc(e.method)+'">'+esc(e.method)+'</span></td>'+
+      '<td>'+status+'</td>'+
+      '<td class="path">'+esc(e.path||e.url)+'</td>'+
+      '<td class="dur">'+(e.durationMs!=null? e.durationMs+' ms':'')+'</td>'+
+      '<td>'+bytes+'</td>'+
+      '<td>'+detail+'</td>';
+    rows.appendChild(tr);
+  }
+  el('empty').style.display = shown? 'none':'block';
+  el('stats').innerHTML = '共 <b>'+allLogs.length+'</b> 条 / 显示 <b>'+shown+
+    '</b> 条 · 异常 <b>'+errs+'</b> 条';
+}
+var timer=null;
+el('refresh').onclick=loadLogs;
+el('date').onchange=loadLogs;
+el('method').onchange=render;
+el('kw').oninput=render;
+el('auto').onchange=function(){
+  if(this.checked){ timer=setInterval(loadLogs,5000); } else { clearInterval(timer); }
+};
+el('export').onclick=function(){
+  var date = el('date').value || 'unknown';
+  var method = el('method').value;
+  var kw = el('kw').value.trim().toLowerCase();
+  var filtered = [];
+  for(var i=0; i<allLogs.length; i++){
+    var e = allLogs[i];
+    if(method && e.method!==method) continue;
+    if(kw){
+      var hay = JSON.stringify(e).toLowerCase();
+      if(hay.indexOf(kw)<0) continue;
+    }
+    filtered.push(e);
+  }
+  var data = {date: date, exportedAt: new Date().toISOString(), count: filtered.length, logs: filtered};
+  var blob = new Blob([JSON.stringify(data, null, 2)], {type: 'application/json'});
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url; a.download = 'xbot_net_logs_' + date + '.json';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+};
+el('clear').onclick=async function(){
+  var date = el('date').value;
+  if(!date || date.indexOf('-')<0){ alert('请先选择日期'); return; }
+  if(!confirm('确认清除 '+date+' 的全部网络日志？此操作不可恢复！')) return;
+  try{
+    var r = await fetch('/api/net/logs?date='+encodeURIComponent(date), {method:'DELETE'});
+    var j = await r.json();
+    if(j.ok){ allLogs=[]; render(); await loadDates(); alert('已清除 '+date+' 的日志'); }
+    else { alert('清除失败: '+(j.error||'未知错误')); }
+  }catch(e){ alert('清除失败: '+e.message); }
 };
 (async function(){ await loadDates(); await loadLogs(); })();
 </script>
