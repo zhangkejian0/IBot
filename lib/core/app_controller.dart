@@ -44,6 +44,7 @@ class DisplaySettings {
   bool handEnabled = true;
   bool identityEnabled = true;
   bool objectEnabled = true;
+  bool poseEnabled = true;
 
   // 调试模式：开启时显示摄像头的人脸/手势识别画面，关闭时显示虚拟宠物网页。
   bool debugMode = false;
@@ -52,6 +53,7 @@ class DisplaySettings {
   bool showFaceMesh = true;
   bool showFaceBox = true;
   bool showHandSkeleton = true;
+  bool showPoseSkeleton = true;
   bool showLandmarkIndices = false;
   bool showExpression = true;
   bool showGesture = true;
@@ -493,14 +495,16 @@ class AppController extends ChangeNotifier {
         uprightRgba = upright.getBytes(order: img.ChannelOrder.rgba);
       }
 
-      final faceFuture = settings.faceEnabled
+      // FaceEngine 一次 detectFromCamera 同时产出人脸(478 点)与人体姿态
+      // (33 点),face/pose 任一启用即调用。返回聚合结果,下方分别取 .face / .poses。
+      final faceEngineFuture = (settings.faceEnabled || settings.poseEnabled)
           ? faceEngine.process(
               image,
               _sensorOrientation,
               isFrontCamera: _isFrontCamera,
               deviceOrientation: _deviceOrientation,
             )
-          : Future<FaceOverlay?>.value(null);
+          : Future<FaceEngineResult?>.value(null);
       final mlkitFuture = settings.faceEnabled && uprightRgba != null
           ? mlkitFaceEngine.processRgba(uprightRgba, upW, upH)
           : Future<List<Rect>>.value(const []);
@@ -524,7 +528,11 @@ class AppController extends ChangeNotifier {
         unawaited(_runObjectDetection(uprightRgba, upW, upH));
       }
 
-      final mediapipeFace = await faceFuture; // 主脸：478 点 + 表情
+      final faceEngineResult = await faceEngineFuture; // 人脸 + 人体聚合
+      final mediapipeFace = faceEngineResult?.face; // 主脸：478 点 + 表情
+      final poseResult = settings.poseEnabled
+          ? (faceEngineResult?.poses ?? const <PoseOverlay>[])
+          : const <PoseOverlay>[];
       final mlkitBoxes = await mlkitFuture; // 多脸归一化框（主脸在前）
       final handResult = await handFuture;
 
@@ -640,6 +648,7 @@ class AppController extends ChangeNotifier {
         faces: resultFaces,
         hands: handResult,
         objects: objects,
+        poses: poseResult,
         mirror: mirror,
       );
       // 时序行为聚合：喂入本帧，得到稳定的行为状态(含状态转移事件)。

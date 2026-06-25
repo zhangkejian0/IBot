@@ -493,6 +493,14 @@ class _StatusPanel extends StatelessWidget {
               : AppTheme.accentOrange,
         ));
 
+        rows.add(_line(
+          icon: CupertinoIcons.person_crop_circle,
+          text: r.poses.isEmpty ? '未检测到人体' : '骨骼：${r.poses.length} 个人',
+          color: r.poses.isEmpty
+              ? AppTheme.tertiaryLabel
+              : AppTheme.accent,
+        ));
+
         // 物体识别：优先展示手持物体，其次列出可见物体名。
         final held = r.heldObject;
         final objNames = <String>[];

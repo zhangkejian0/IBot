@@ -7,6 +7,7 @@ import '../models/detection.dart';
 import '../models/expression.dart';
 import '../models/hand_gesture.dart';
 import '../models/person.dart';
+import '../models/pose_landmarks.dart';
 import '../theme/app_theme.dart';
 
 /// 调试覆盖层：绘制人脸关键点 / 人脸框 / 表情 / 身份，以及手部骨架 / 手势。
@@ -47,6 +48,11 @@ class DetectionOverlayPainter extends CustomPainter {
     if (settings.showObject) {
       for (final obj in result.objects) {
         _paintObject(canvas, size, obj);
+      }
+    }
+    if (settings.showPoseSkeleton) {
+      for (final pose in result.poses) {
+        _paintPose(canvas, size, pose);
       }
     }
     for (final face in result.faces) {
@@ -305,6 +311,40 @@ class DetectionOverlayPainter extends CustomPainter {
     }
     final box = _mapRect(hand.boundingBox, size);
     _paintChips(canvas, chips, Offset(box.left, box.top - 6), above: true);
+  }
+
+  /// 绘制人体 33 点骨骼(范式同 [_paintHand])。
+  /// 骨头线用 [AppTheme.accent](蓝)、关节圆点用 [AppTheme.accentGreen](绿),
+  /// 与手骨架(橙/黄)区分。
+  void _paintPose(Canvas canvas, Size size, PoseOverlay pose) {
+    if (pose.landmarks.length < 33) return;
+
+    final bonePaint = Paint()
+      ..color = AppTheme.accent
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2.6
+      ..strokeCap = StrokeCap.round;
+    for (final c in poseConnections) {
+      final a = pose.landmarks[c[0]];
+      final b = pose.landmarks[c[1]];
+      // 关节点未识别时为 Offset.zero(原点),跳过以免画出穿屏长线。
+      if (a == Offset.zero || b == Offset.zero) continue;
+      canvas.drawLine(_map(a, size), _map(b, size), bonePaint);
+    }
+
+    final jointPaint = Paint()
+      ..color = AppTheme.accentGreen
+      ..style = PaintingStyle.fill;
+    for (var i = 0; i < pose.landmarks.length; i++) {
+      final pt = pose.landmarks[i];
+      if (pt == Offset.zero) continue;
+      final mapped = _map(pt, size);
+      canvas.drawCircle(mapped, 3.6, jointPaint);
+      if (settings.showLandmarkIndices) {
+        _paintText(canvas, '$i', mapped + const Offset(3, -3),
+            color: Colors.white, fontSize: 8);
+      }
+    }
   }
 
   void _paintChips(Canvas canvas, List<_Chip> chips, Offset anchor,
