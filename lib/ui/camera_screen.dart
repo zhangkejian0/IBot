@@ -147,7 +147,6 @@ class _VirtualPetWebView extends StatefulWidget {
 }
 
 class _VirtualPetWebViewState extends State<_VirtualPetWebView> {
-  static const EmotionMapper _mapper = EmotionMapper();
   // 同一状态至少保持这么久再允许切换，避免表情抖动导致 FSM 频繁跳变。
   static const Duration _minDwell = Duration(milliseconds: 600);
 
@@ -300,10 +299,9 @@ class _VirtualPetWebViewState extends State<_VirtualPetWebView> {
       _zoneDetector.reset();
     }
 
-    // 情绪状态（带 dwell 去抖）。
-    // 用时序聚合后的稳定结果驱动，而非单帧表情：
-    //  - 困倦 → 困倦态；专注 → 注视态（行为态优先）；
-    //  - 其余用窗口「主导表情」（置信度加权投票）映射，避免单帧误判导致表情乱跳。
+    // 状态映射：仅保留注意力态(困倦/专注)驱动,不再用检测到的人脸情绪
+    // 映射虚拟表情(初期的情绪映射测试功能已下线)。其余态固定 idle 待机,
+    // 避免单帧情绪抖动导致表情乱跳。情绪检测本身仍用于人物日志记录。
     String stateJs = '';
     if (face != null) {
       final behavior = widget.controller.behavior;
@@ -316,7 +314,7 @@ class _VirtualPetWebViewState extends State<_VirtualPetWebView> {
           state = FaceState.gazing;
           break;
         default:
-          state = _mapper.map(behavior.dominantExpression);
+          state = FaceState.idle;
       }
       final now = DateTime.now();
       final changed = state != _lastSent;

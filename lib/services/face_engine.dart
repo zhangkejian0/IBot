@@ -171,6 +171,10 @@ class FaceEngine {
       final blinkR = (b[FaceBlendshape.eyeBlinkRight] ?? 0).clamp(0.0, 1.0);
       final eyeBlink = (blinkL + blinkR) / 2.0;
 
+      // 嘴部张开（jawOpen，0..1）。供活动状态机判定「交谈」「打哈欠」。
+      final mouthOpenness =
+          (b[FaceBlendshape.jawOpen] ?? 0).clamp(0.0, 1.0).toDouble();
+
       faceOverlay = FaceOverlay(
         landmarks: points,
         boundingBox: Rect.fromLTRB(minX, minY, maxX, maxY),
@@ -178,6 +182,7 @@ class FaceEngine {
         gazeX: gazeX,
         gazeY: gazeY,
         eyeBlink: eyeBlink,
+        mouthOpenness: mouthOpenness,
       );
     }
 
@@ -190,6 +195,7 @@ class FaceEngine {
       final pose = result.pose;
       if (pose != null && pose.landmarks.isNotEmpty) {
         final ordered = List<Offset>.filled(33, Offset.zero);
+        final vis = List<double>.filled(33, 0.0);
         double minX = 1, minY = 1, maxX = 0, maxY = 0;
         var any = false;
         for (final lm in pose.landmarks) {
@@ -199,6 +205,7 @@ class FaceEngine {
           final idx = lm.index;
           if (idx >= 0 && idx < ordered.length) {
             ordered[idx] = Offset(x, y);
+            vis[idx] = (lm.visibility ?? 0).clamp(0.0, 1.0).toDouble();
           }
           any = true;
           if (x < minX) minX = x;
@@ -209,6 +216,7 @@ class FaceEngine {
         if (any) {
           poses.add(PoseOverlay(
             landmarks: ordered,
+            visibilities: vis,
             boundingBox: Rect.fromLTRB(minX, minY, maxX, maxY),
           ));
         }

@@ -10,6 +10,7 @@ import 'package:flutter/services.dart' show DeviceOrientation;
 import 'package:image/image.dart' as img;
 import 'package:permission_handler/permission_handler.dart';
 
+import '../face/activity_state_tracker.dart';
 import '../face/behavior_state_tracker.dart';
 import '../face/gaze_zone_detector.dart';
 import '../models/detection.dart';
@@ -88,7 +89,8 @@ class DisplaySettings {
   /// 持久化记录开关：开启后按天记录识别到的人物/物体/表情/对话等。默认开。
   bool personaLogEnabled = true;
   /// 日志 HTTP 浏览服务开关：开启后可在同一局域网的电脑上访问查看日志。
-  bool personaLogServerEnabled = false;
+  /// 默认开启:陪伴场景常需在电脑上实时查看人物日志,免去每次手动开。
+  bool personaLogServerEnabled = true;
 }
 
 /// 一次人脸采样的结果（用于「认识我」录入）。
@@ -179,6 +181,14 @@ class AppController extends ChangeNotifier {
 
   /// 当前时序聚合后的行为快照(状态 + 已持续时长 + 主导表情)，供 UI/交互消费。
   BehaviorSnapshot get behavior => _behavior;
+
+  // 日常活动状态机:与注意力状态机正交的另一维度(喝水/坐姿/交谈/看手机/
+  // 打哈欠/举手),从人脸+物体+姿态多模态信号聚合而来。
+  final ActivityStateTracker _activityTracker = ActivityStateTracker();
+  ActivitySnapshot _activity = ActivitySnapshot.initial;
+
+  /// 当前时序聚合后的日常活动快照(活动 + 已持续时长),供 UI/交互消费。
+  ActivitySnapshot get activity => _activity;
 
   // 区域检测器：用于调试可视化
   final GazeZoneDetector _gazeZoneDetector = GazeZoneDetector();
@@ -296,6 +306,10 @@ class AppController extends ChangeNotifier {
       // 初始化人物日志记录器(按天持久化)。失败不阻断主流程。
       personaLogger.enabled = settings.personaLogEnabled;
       await personaLogger.initialize();
+      // 默认开启日志 HTTP 浏览服务(可在设置页关闭)。
+      if (settings.personaLogServerEnabled) {
+        unawaited(startPersonaLogServer());
+      }
 
       // 加载 LLM 配置(DeepSeek 预设),并注入语音助手的对话服务。
       // 预置 Key 仅在首次落盘时使用,之后以设置页录入为准。
@@ -405,10 +419,12 @@ class AppController extends ChangeNotifier {
         }
         await old.dispose();
       }
-      // 复位上一镜头遗留的识别缓存。
+      // 复位上一镜头遗留的识别缓存与状态机上下文(切换镜头后坐标空间已变)。
       _slots.clear();
       _lastObjects = const [];
       _lastPerceptionSig = '';
+      _behaviorTracker.reset();
+      _activityTracker.reset();
       await _initCamera();
       await _camera?.startImageStream(_onFrame);
     } catch (e) {
@@ -597,6 +613,8 @@ class AppController extends ChangeNotifier {
               // 注视只主脸（MediaPipe）携带，随嫁接一并保留。
               gazeX: mediapipeFace.gazeX,
               gazeY: mediapipeFace.gazeY,
+              eyeBlink: mediapipeFace.eyeBlink,
+              mouthOpenness: mediapipeFace.mouthOpenness,
             );
           }
         }
@@ -662,6 +680,7 @@ class AppController extends ChangeNotifier {
                 gazeX: f.gazeX,
                 gazeY: f.gazeY,
                 eyeBlink: f.eyeBlink,
+                mouthOpenness: f.mouthOpenness,
               ));
       }
 
@@ -684,6 +703,9 @@ class AppController extends ChangeNotifier {
       // 时序行为聚合：喂入本帧，得到稳定的行为状态(含状态转移事件)。
       _behavior = _behaviorTracker.update(_result, DateTime.now());
       _maybeLogBehavior(_behavior);
+      // 日常活动聚合:从人脸+物体+姿态推断当前在做什么(喝水/交谈/看手机…)。
+      _activity = _activityTracker.update(_result, DateTime.now());
+      _maybeLogActivity(_activity);
       _maybeLogPerception();
       if (!_disposed) notifyListeners();
     } catch (e) {
@@ -786,6 +808,26 @@ class AppController extends ChangeNotifier {
       sustainedExpression: snapshot.dominantExpression.label,
       note: '${tr.from.label}→${tr.to.label}'
           '（上一状态持续 ${tr.previousDuration.inSeconds} 秒）',
+    ));
+  }
+
+  /// 记录日常活动状态转移:仅在活动发生变化时落盘一条 type='activity'。
+  /// 与注意力状态(type='state')正交,记录「正在做什么」(喝水/交谈/看手机…)。
+  void _maybeLogActivity(ActivitySnapshot snapshot) {
+    if (!settings.personaLogEnabled || !personaLogger.enabled) return;
+    final tr = snapshot.transition;
+    if (tr == null) return;
+    final identity = _result.face?.identity;
+    personaLogger.log(PersonaLogEntry(
+      timestamp: DateTime.now(),
+      type: 'activity',
+      person: identity?.person.name,
+      relation: identity?.person.relation.label,
+      faceCount: _result.faces.length,
+      behaviorState: tr.to.label,
+      behaviorDurationSeconds: tr.previousDuration.inSeconds,
+      note: '${tr.from.label}→${tr.to.label}'
+          '（上一活动持续 ${tr.previousDuration.inSeconds} 秒）',
     ));
   }
 

@@ -250,6 +250,8 @@ class PersonaLogServer {
   .t-perception { background: rgba(100,210,255,.15); color: var(--teal); }
   .t-conversation { background: rgba(48,209,88,.15); color: var(--green); }
   .t-event { background: rgba(255,159,10,.15); color: var(--orange); }
+  .t-state { background: rgba(255,69,58,.15); color: var(--red); }
+  .t-activity { background: rgba(191,90,242,.15); color: var(--purple); }
   .person { color: var(--purple); font-weight: 600; }
   .chips span { display: inline-block; background: var(--panel2);
     border: 1px solid var(--line); border-radius: 6px; padding: 1px 7px;
@@ -270,6 +272,8 @@ class PersonaLogServer {
     <option value="">全部类型</option>
     <option value="perception">感知</option>
     <option value="conversation">对话</option>
+    <option value="state">状态</option>
+    <option value="activity">活动</option>
     <option value="event">事件</option>
   </select>
   <input id="kw" placeholder="搜索(人物/物体/文本)" style="width:200px" />

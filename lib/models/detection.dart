@@ -39,6 +39,10 @@ class FaceOverlay {
   /// 供时序行为聚合判定「困倦」（长时间近乎闭眼）。仅主脸携带，其余脸为 0。
   final double eyeBlink;
 
+  /// 嘴部张开程度（jawOpen blendshape，0..1，1=大张嘴）。
+  /// 供活动状态机判定「交谈/说话」「打哈欠」(张嘴幅度+节奏)。仅主脸携带。
+  final double mouthOpenness;
+
   const FaceOverlay({
     required this.landmarks,
     required this.boundingBox,
@@ -47,6 +51,7 @@ class FaceOverlay {
     this.gazeX = 0,
     this.gazeY = 0,
     this.eyeBlink = 0,
+    this.mouthOpenness = 0,
   });
 }
 
@@ -101,8 +106,12 @@ class ObjectOverlay {
 /// 23-32 下肢),骨架连线见 `pose_landmarks.dart` 的 [poseConnections]。
 /// 由 [FaceEngine] 产出(与 [FaceOverlay] 共享同一次 MediaPipe 调用)。
 class PoseOverlay {
-  /// 33 个归一化关键点(0..1),按 [PoseLandmarkIndex] 顺序摆放。
+  /// 33 个归一化关键点(0..1)，按 [PoseLandmarkIndex] 顺序摆放。
   final List<Offset> landmarks;
+
+  /// 33 个关键点的可见度(0..1)，与 [landmarks] 同序。
+  /// 未被识别的点为 0；活动状态机据此门控几何判定(如举手要求 visibility>0.5)。
+  final List<double> visibilities;
 
   /// 所有关键点的归一化外接框。
   final Rect boundingBox;
@@ -110,6 +119,7 @@ class PoseOverlay {
   const PoseOverlay({
     required this.landmarks,
     required this.boundingBox,
+    this.visibilities = const [],
   });
 }
 

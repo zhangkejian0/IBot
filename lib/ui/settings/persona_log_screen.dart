@@ -95,6 +95,10 @@ class _PersonaLogScreenState extends State<PersonaLogScreen> {
         return AppTheme.accentGreen;
       case 'event':
         return AppTheme.accentOrange;
+      case 'state':
+        return AppTheme.accentRed;
+      case 'activity':
+        return AppTheme.accentPurple;
       default:
         return AppTheme.secondaryLabel;
     }
@@ -108,6 +112,10 @@ class _PersonaLogScreenState extends State<PersonaLogScreen> {
         return '对话';
       case 'event':
         return '事件';
+      case 'state':
+        return '状态';
+      case 'activity':
+        return '活动';
       default:
         return type;
     }
