@@ -19,6 +19,7 @@ import '../models/expression.dart';
 import '../models/hand_gesture.dart';
 import '../models/owner_profile.dart';
 import '../models/person.dart';
+import '../services/battery_monitor.dart';
 import '../services/camera_image_utils.dart';
 import '../services/face_engine.dart';
 import '../services/face_recognition_service.dart';
@@ -49,6 +50,9 @@ class DisplaySettings {
   bool identityEnabled = true;
   bool objectEnabled = true;
   bool poseEnabled = true;
+
+  /// 主页显示整机累计耗电统计（运行时长/消耗 mAh）。默认关闭。
+  bool batteryStatsEnabled = false;
 
   // 调试模式：开启时显示摄像头的人脸/手势识别画面，关闭时显示虚拟宠物网页。
   bool debugMode = false;
@@ -128,6 +132,8 @@ class AppController extends ChangeNotifier {
   final StaticServer staticServer = StaticServer();
   final BaseService baseService = BaseService();
   final VoiceAssistant voiceAssistant = VoiceAssistant();
+  /// 整机累计耗电统计（主页可选显示）。
+  final BatteryMonitor batteryMonitor = BatteryMonitor();
 
   /// 人物行为日志记录器(按天持久化,供后续分析人物)。
   final PersonaLogger personaLogger = PersonaLogger();
@@ -1270,6 +1276,12 @@ class AppController extends ChangeNotifier {
     } else if (!settings.personaLogServerEnabled && _personaLogUrl != null) {
       stopPersonaLogServer();
     }
+    // 耗电统计开关:开启即以当前电量为起点开始计量,关闭则停止。
+    if (settings.batteryStatsEnabled && !batteryMonitor.isRunning) {
+      batteryMonitor.start();
+    } else if (!settings.batteryStatsEnabled && batteryMonitor.isRunning) {
+      batteryMonitor.stop();
+    }
     notifyListeners();
   }
 
@@ -1716,6 +1728,7 @@ class AppController extends ChangeNotifier {
       }
       cam.dispose();
     }
+    batteryMonitor.dispose();
     faceEngine.dispose();
     handEngine.dispose();
     mlkitFaceEngine.dispose();

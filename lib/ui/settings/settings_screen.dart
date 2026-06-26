@@ -296,6 +296,28 @@ class SettingsScreen extends StatelessWidget {
                     color: AppTheme.groupedBackground,
                     borderRadius: BorderRadius.all(Radius.circular(12)),
                   ),
+                  header: const _Header('耗电统计'),
+                  footer: const _Footer(
+                      '在主页显示整机累计耗电（运行时长/消耗 mAh），每分钟刷新；'
+                      '点按面板可重置计量。注意为整机数据，且充电时无意义。'),
+                  children: [
+                    _SwitchTile(
+                      icon: CupertinoIcons.battery_25,
+                      color: AppTheme.accentGreen,
+                      label: '主页显示耗电统计',
+                      value: s.batteryStatsEnabled,
+                      onChanged: (v) => controller
+                          .updateSettings(() => s.batteryStatsEnabled = v),
+                    ),
+                  ],
+                ),
+
+                CupertinoListSection.insetGrouped(
+                  backgroundColor: AppTheme.background,
+                  decoration: const BoxDecoration(
+                    color: AppTheme.groupedBackground,
+                    borderRadius: BorderRadius.all(Radius.circular(12)),
+                  ),
                   header: const _Header('调试显示（第一版）'),
                   footer: const _Footer(
                       '调试阶段会在画面上叠加人脸关键点、人脸框、手部骨架与各类标签。'),
