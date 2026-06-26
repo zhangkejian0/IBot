@@ -229,6 +229,38 @@ class SettingsScreen extends StatelessWidget {
                     color: AppTheme.groupedBackground,
                     borderRadius: BorderRadius.all(Radius.circular(12)),
                   ),
+                  header: const _Header('省电'),
+                  footer: const _Footer(
+                      '省电模式：无人脸时自动降低检测频率、手势降频，并允许屏幕息屏；'
+                      '有人靠近或语音活跃会自动恢复。关闭则全程全速运行（更耗电）。\n'
+                      '耗电统计：在主页显示整机累计耗电（运行时长/消耗 mAh），'
+                      '每分钟刷新。注意为整机数据，且充电时无意义。'),
+                  children: [
+                    _SwitchTile(
+                      icon: CupertinoIcons.bolt_fill,
+                      color: AppTheme.accentGreen,
+                      label: '省电模式（空闲降频）',
+                      value: s.powerSaveEnabled,
+                      onChanged: (v) => controller
+                          .updateSettings(() => s.powerSaveEnabled = v),
+                    ),
+                    _SwitchTile(
+                      icon: CupertinoIcons.battery_25,
+                      color: AppTheme.accentYellow,
+                      label: '主页显示耗电统计',
+                      value: s.batteryStatsEnabled,
+                      onChanged: (v) => controller
+                          .updateSettings(() => s.batteryStatsEnabled = v),
+                    ),
+                  ],
+                ),
+
+                CupertinoListSection.insetGrouped(
+                  backgroundColor: AppTheme.background,
+                  decoration: const BoxDecoration(
+                    color: AppTheme.groupedBackground,
+                    borderRadius: BorderRadius.all(Radius.circular(12)),
+                  ),
                   header: const _Header('调试显示（第一版）'),
                   footer: const _Footer(
                       '调试阶段会在画面上叠加人脸关键点、人脸框、手部骨架与各类标签。'),

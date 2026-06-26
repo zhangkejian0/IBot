@@ -1,12 +1,149 @@
 import 'dart:io' show Platform;
 import 'dart:math' as math;
+import 'dart:typed_data';
 import 'dart:ui';
 
 import 'package:camera/camera.dart';
+import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/services.dart' show DeviceOrientation;
 import 'package:hand_detection/hand_detection.dart'
     show CameraFrameRotation, rotationForFrame;
 import 'package:image/image.dart' as img;
+
+/// 一帧相机图像的「可发送」快照：仅含原始字节与元数据，不含 [CameraImage]
+/// 这类不可跨 isolate 传递的对象。用于把昂贵的 YUV→RGB + 旋转放到后台 isolate
+/// （[CameraImageUtils.toUprightImageAsync]）执行，避免阻塞 UI 线程。
+class UprightFrame {
+  final int width;
+  final int height;
+  final int rotationDegrees;
+
+  /// [CameraImage.format].group.name，如 `yuv420` / `bgra8888`。
+  final String formatGroup;
+
+  final List<Uint8List> planeBytes;
+  final List<int> bytesPerRow;
+  final List<int?> bytesPerPixel;
+
+  const UprightFrame({
+    required this.width,
+    required this.height,
+    required this.rotationDegrees,
+    required this.formatGroup,
+    required this.planeBytes,
+    required this.bytesPerRow,
+    required this.bytesPerPixel,
+  });
+}
+
+/// 把 [UprightFrame] 转成摆正后的 RGB [img.Image]。失败返回 null。
+///
+/// 顶层函数（非类成员）以便作为 [compute] 的入口在独立 isolate 中运行。
+img.Image? buildUpright(UprightFrame f) {
+  img.Image? rgb;
+  switch (f.formatGroup) {
+    case 'yuv420':
+      if (f.planeBytes.length == 2) {
+        rgb = _fromNv12(f);
+      } else if (f.planeBytes.length >= 3) {
+        rgb = _fromYuv3Plane(f);
+      }
+      break;
+    case 'bgra8888':
+      rgb = _fromBgra8888(f);
+      break;
+    default:
+      rgb = null;
+  }
+  if (rgb == null) return null;
+  if (f.rotationDegrees % 360 != 0) {
+    rgb = img.copyRotate(rgb, angle: f.rotationDegrees);
+  }
+  return rgb;
+}
+
+/// NV12：plane0=Y，plane1=交错 UV（iOS 默认）。
+img.Image _fromNv12(UprightFrame f) {
+  final width = f.width;
+  final height = f.height;
+  final out = img.Image(width: width, height: height);
+
+  final yBytes = f.planeBytes[0];
+  final uvBytes = f.planeBytes[1];
+  final yRowStride = f.bytesPerRow[0];
+  final uvRowStride = f.bytesPerRow[1];
+
+  for (var y = 0; y < height; y++) {
+    final yRow = y * yRowStride;
+    final uvRow = (y >> 1) * uvRowStride;
+    for (var x = 0; x < width; x++) {
+      final yIndex = yRow + x;
+      final uvIndex = uvRow + (x & ~1);
+      if (yIndex >= yBytes.length || uvIndex + 1 >= uvBytes.length) {
+        continue;
+      }
+      final yp = yBytes[yIndex];
+      final u = uvBytes[uvIndex] - 128;
+      final v = uvBytes[uvIndex + 1] - 128;
+      out.setPixelRgb(
+        x,
+        y,
+        (yp + 1.402 * v).round().clamp(0, 255),
+        (yp - 0.344136 * u - 0.714136 * v).round().clamp(0, 255),
+        (yp + 1.772 * u).round().clamp(0, 255),
+      );
+    }
+  }
+  return out;
+}
+
+/// 3 平面 YUV420（Android 常见 I420 / NV21 布局）。
+img.Image _fromYuv3Plane(UprightFrame f) {
+  final width = f.width;
+  final height = f.height;
+  final out = img.Image(width: width, height: height);
+
+  final yBytes = f.planeBytes[0];
+  final uBytes = f.planeBytes[1];
+  final vBytes = f.planeBytes[2];
+
+  final yRowStride = f.bytesPerRow[0];
+  final uvRowStride = f.bytesPerRow[1];
+  final uvPixelStride = f.bytesPerPixel[1] ?? 1;
+
+  for (var y = 0; y < height; y++) {
+    final yRow = y * yRowStride;
+    final uvRow = (y >> 1) * uvRowStride;
+    for (var x = 0; x < width; x++) {
+      final yIndex = yRow + x;
+      final uvIndex = uvRow + (x >> 1) * uvPixelStride;
+      if (yIndex >= yBytes.length ||
+          uvIndex >= uBytes.length ||
+          uvIndex >= vBytes.length) {
+        continue;
+      }
+      final yp = yBytes[yIndex];
+      final up = uBytes[uvIndex] - 128;
+      final vp = vBytes[uvIndex] - 128;
+
+      final r = (yp + 1.402 * vp).round().clamp(0, 255);
+      final g = (yp - 0.344136 * up - 0.714136 * vp).round().clamp(0, 255);
+      final b = (yp + 1.772 * up).round().clamp(0, 255);
+      out.setPixelRgb(x, y, r, g, b);
+    }
+  }
+  return out;
+}
+
+img.Image _fromBgra8888(UprightFrame f) {
+  return img.Image.fromBytes(
+    width: f.width,
+    height: f.height,
+    bytes: f.planeBytes.first.buffer,
+    rowStride: f.bytesPerRow.first,
+    order: img.ChannelOrder.bgra,
+  );
+}
 
 /// 相机帧像素转换工具。
 ///
@@ -49,25 +186,31 @@ class CameraImageUtils {
   /// 人脸 MediaPipe 插件多余的 X 翻转在 [FaceEngine] 中单独撤销。
   static bool get shouldFlipFrontCameraHorizontal => !Platform.isIOS;
 
-  /// 转换并按 [rotationDegrees] 摆正为竖直图像。失败返回 null。
-  static img.Image? toUprightImage(CameraImage image, int rotationDegrees) {
-    img.Image? rgb;
-    switch (image.format.group) {
-      case ImageFormatGroup.yuv420:
-        rgb = _fromYuv420(image);
-        break;
-      case ImageFormatGroup.bgra8888:
-        rgb = _fromBgra8888(image);
-        break;
-      default:
-        rgb = null;
-    }
-    if (rgb == null) return null;
-    if (rotationDegrees % 360 != 0) {
-      rgb = img.copyRotate(rgb, angle: rotationDegrees);
-    }
-    return rgb;
-  }
+  /// 从 [CameraImage] 抽取可发送的帧快照。
+  static UprightFrame _frameOf(CameraImage image, int rotationDegrees) =>
+      UprightFrame(
+        width: image.width,
+        height: image.height,
+        rotationDegrees: rotationDegrees,
+        formatGroup: image.format.group.name,
+        planeBytes: image.planes.map((p) => p.bytes).toList(),
+        bytesPerRow: image.planes.map((p) => p.bytesPerRow).toList(),
+        bytesPerPixel: image.planes.map((p) => p.bytesPerPixel).toList(),
+      );
+
+  /// 同步转换并按 [rotationDegrees] 摆正为竖直图像。失败返回 null。
+  ///
+  /// 注意：这是主线程上的逐像素 YUV→RGB，开销很大。需要离屏识别（身份/录入）
+  /// 时应优先用 [toUprightImageAsync] 把转换放到后台 isolate，避免卡顿。
+  static img.Image? toUprightImage(CameraImage image, int rotationDegrees) =>
+      buildUpright(_frameOf(image, rotationDegrees));
+
+  /// 在后台 isolate 中转换并摆正，不阻塞 UI 线程。失败返回 null。
+  static Future<img.Image?> toUprightImageAsync(
+    CameraImage image,
+    int rotationDegrees,
+  ) =>
+      compute(buildUpright, _frameOf(image, rotationDegrees));
 
   /// 按归一化矩形（0..1）从竖直图像中裁剪人脸区域，并向外扩展 [paddingRatio]。
   static img.Image cropNormalized(
@@ -86,106 +229,5 @@ class CameraImageUtils {
     final cropW = math.max(1, right - left);
     final cropH = math.max(1, bottom - top);
     return img.copyCrop(upright, x: left, y: top, width: cropW, height: cropH);
-  }
-
-  static img.Image? _fromYuv420(CameraImage image) {
-    // iOS camera 插件 yuv420 为 NV12（2 平面）；Android 多为 3 平面 NV21/I420。
-    if (image.planes.length == 2) {
-      return _fromNv12(image);
-    }
-    if (image.planes.length >= 3) {
-      return _fromYuv3Plane(image);
-    }
-    return null;
-  }
-
-  /// NV12：plane0=Y，plane1=交错 UV（iOS 默认）。
-  static img.Image _fromNv12(CameraImage image) {
-    final width = image.width;
-    final height = image.height;
-    final out = img.Image(width: width, height: height);
-
-    final yPlane = image.planes[0];
-    final uvPlane = image.planes[1];
-    final yRowStride = yPlane.bytesPerRow;
-    final uvRowStride = uvPlane.bytesPerRow;
-    final yBytes = yPlane.bytes;
-    final uvBytes = uvPlane.bytes;
-
-    for (var y = 0; y < height; y++) {
-      final yRow = y * yRowStride;
-      final uvRow = (y >> 1) * uvRowStride;
-      for (var x = 0; x < width; x++) {
-        final yIndex = yRow + x;
-        final uvIndex = uvRow + (x & ~1);
-        if (yIndex >= yBytes.length || uvIndex + 1 >= uvBytes.length) {
-          continue;
-        }
-        final yp = yBytes[yIndex];
-        final u = uvBytes[uvIndex] - 128;
-        final v = uvBytes[uvIndex + 1] - 128;
-        out.setPixelRgb(
-          x,
-          y,
-          (yp + 1.402 * v).round().clamp(0, 255),
-          (yp - 0.344136 * u - 0.714136 * v).round().clamp(0, 255),
-          (yp + 1.772 * u).round().clamp(0, 255),
-        );
-      }
-    }
-    return out;
-  }
-
-  /// 3 平面 YUV420（Android 常见 I420 / NV21 布局）。
-  static img.Image _fromYuv3Plane(CameraImage image) {
-    final width = image.width;
-    final height = image.height;
-    final out = img.Image(width: width, height: height);
-
-    final yPlane = image.planes[0];
-    final uPlane = image.planes[1];
-    final vPlane = image.planes[2];
-
-    final yRowStride = yPlane.bytesPerRow;
-    final uvRowStride = uPlane.bytesPerRow;
-    final uvPixelStride = uPlane.bytesPerPixel ?? 1;
-
-    final yBytes = yPlane.bytes;
-    final uBytes = uPlane.bytes;
-    final vBytes = vPlane.bytes;
-
-    for (var y = 0; y < height; y++) {
-      final yRow = y * yRowStride;
-      final uvRow = (y >> 1) * uvRowStride;
-      for (var x = 0; x < width; x++) {
-        final yIndex = yRow + x;
-        final uvIndex = uvRow + (x >> 1) * uvPixelStride;
-        if (yIndex >= yBytes.length ||
-            uvIndex >= uBytes.length ||
-            uvIndex >= vBytes.length) {
-          continue;
-        }
-        final yp = yBytes[yIndex];
-        final up = uBytes[uvIndex] - 128;
-        final vp = vBytes[uvIndex] - 128;
-
-        final r = (yp + 1.402 * vp).round().clamp(0, 255);
-        final g = (yp - 0.344136 * up - 0.714136 * vp).round().clamp(0, 255);
-        final b = (yp + 1.772 * up).round().clamp(0, 255);
-        out.setPixelRgb(x, y, r, g, b);
-      }
-    }
-    return out;
-  }
-
-  static img.Image _fromBgra8888(CameraImage image) {
-    final plane = image.planes.first;
-    return img.Image.fromBytes(
-      width: image.width,
-      height: image.height,
-      bytes: plane.bytes.buffer,
-      rowStride: plane.bytesPerRow,
-      order: img.ChannelOrder.bgra,
-    );
   }
 }

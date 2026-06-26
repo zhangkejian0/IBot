@@ -6,8 +6,11 @@ import 'dart:ui';
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show DeviceOrientation;
+import 'package:flutter/widgets.dart'
+    show WidgetsBinding, WidgetsBindingObserver;
 import 'package:image/image.dart' as img;
 import 'package:permission_handler/permission_handler.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../face/gaze_zone_detector.dart';
 import '../models/detection.dart';
@@ -15,6 +18,7 @@ import '../models/expression.dart';
 import '../models/person.dart';
 import 'desktop_config.dart';
 import '../services/camera_image_utils.dart';
+import '../services/battery_monitor.dart';
 import '../services/face_engine.dart';
 import '../services/face_recognition_service.dart';
 import '../services/hand_engine.dart';
@@ -25,6 +29,7 @@ import '../services/voice/llm_config.dart';
 import '../services/voice/pophie_client.dart';
 import '../services/voice/pophie_config.dart';
 import '../services/voice/voice_assistant.dart';
+import '../services/voice/voice_state.dart';
 import 'package:hand_detection/hand_detection.dart' show GestureType;
 
 /// 应用整体阶段。
@@ -35,6 +40,13 @@ class DisplaySettings {
   bool faceEnabled = true;
   bool handEnabled = true;
   bool identityEnabled = true;
+
+  /// 省电模式：无人脸时检测降到 ~2fps、手势降频，并允许屏幕息屏(有人脸/语音
+  /// 活跃时自动恢复全速并保持唤醒)。关闭则全程全速运行(更耗电)。默认开启。
+  bool powerSaveEnabled = true;
+
+  /// 主页显示整机累计耗电统计（运行时长/消耗 mAh）。默认关闭。
+  bool batteryStatsEnabled = false;
 
   // 调试模式：开启时显示摄像头的人脸/手势识别画面，关闭时显示虚拟宠物网页。
   bool debugMode = false;
@@ -73,7 +85,7 @@ class EnrollCapture {
 }
 
 /// 应用核心控制器：负责启动加载、相机取流，并把每帧分发给三个识别引擎。
-class AppController extends ChangeNotifier {
+class AppController extends ChangeNotifier with WidgetsBindingObserver {
   final FaceEngine faceEngine = FaceEngine();
   final HandEngine handEngine = HandEngine();
   final MlKitFaceEngine mlkitFaceEngine = MlKitFaceEngine();
@@ -82,6 +94,8 @@ class AppController extends ChangeNotifier {
   final DisplaySettings settings = DisplaySettings();
   final StaticServer staticServer = StaticServer();
   final VoiceAssistant voiceAssistant = VoiceAssistant();
+  /// 整机累计耗电统计（主页可选显示）。
+  final BatteryMonitor batteryMonitor = BatteryMonitor();
   /// LLM 服务配置(DeepSeek 预设,可在设置页修改并持久化)。
   final LlmConfigStore llmConfigStore = LlmConfigStore();
 
@@ -140,6 +154,24 @@ class AppController extends ChangeNotifier {
   // 66ms ≈ 15fps,在流畅度与开销间取衡;身份识别另有 _identityInterval 节流。
   DateTime _lastDetectRun = DateTime.fromMillisecondsSinceEpoch(0);
   static const Duration _detectInterval = Duration(milliseconds: 66);
+
+  // —— 省电：空闲降频 / 屏幕常亮 / 生命周期 ——
+  /// 最近一次检测到人脸的时刻（驱动空闲判定）。
+  DateTime _lastFaceSeen = DateTime.now();
+  /// 屏幕常亮锁当前状态（避免重复调用原生接口）。
+  bool _wakelockOn = true;
+  /// 因 App 退到后台而暂停了取流（回前台需恢复）。
+  bool _streamPausedForBackground = false;
+  /// 检测帧计数：用于手势降频（每 N 帧才跑一次手势）。
+  int _detectFrameCount = 0;
+  /// 上一帧手势结果：手势降频/跳过的帧复用它，避免闪烁。
+  List<HandOverlay> _lastHands = const [];
+  /// 无人脸超过此时长 → 检测降到 ~2fps 且跳过手势（省 CPU/NPU）。
+  static const Duration _lowPowerAfter = Duration(seconds: 6);
+  /// 无人脸超过此时长 → 释放屏幕常亮锁，让系统按超时息屏（省电幅度最大）。
+  static const Duration _screenSleepAfter = Duration(seconds: 20);
+  /// 空闲时的检测间隔（~2fps）；活跃时用 [_detectInterval]（~15fps）。
+  static const Duration _idleDetectInterval = Duration(milliseconds: 500);
 
   /// 按位置追踪的「身份 slot」：多人脸时为每张脸维持一个稳定身份，避免逐帧
   /// 串脸。每个 slot 记录归一化中心点、命中身份及其最后可见时刻。TTL 内即使
@@ -222,7 +254,11 @@ class AppController extends ChangeNotifier {
       voiceAssistant.pophie.configure(pophieConfigStore.config);
       _wireVoicePerception();
 
+      // 监听 App 生命周期：退到后台/息屏时暂停取流与推理，回前台再恢复。
+      WidgetsBinding.instance.addObserver(this);
+
       _setLoading(1.0, '准备就绪');
+      _lastFaceSeen = DateTime.now();
       await _camera?.startImageStream(_onFrame);
 
       // 固定额外等待：摄像头首帧与各模型推理管道仍需少量时间稳定，
@@ -255,6 +291,9 @@ class AppController extends ChangeNotifier {
       ResolutionPreset.medium,
       enableAudio: false,
       imageFormatGroup: ImageFormatGroup.yuv420,
+      // 采集帧率限到 15fps：与检测节流匹配，砍掉一半传感器/ISP/帧传输开销。
+      // 预览在宠物模式下并不渲染，30fps 纯属浪费。
+      fps: 15,
     );
     await controller.initialize();
     // 强制横屏全屏 app：锁定预览/取流朝向，使 CameraValue.deviceOrientation
@@ -281,7 +320,12 @@ class AppController extends ChangeNotifier {
     // 上一帧 DetectionResult 保留,UI/虚拟宠物继续用旧值驱动注视与表情,
     // 视觉上不会闪烁,只是检测频率降到 ~15fps。
     final now = DateTime.now();
-    if (now.difference(_lastDetectRun) < _detectInterval) return;
+    // 自适应降频：无人脸超过 _lowPowerAfter → 检测降到 ~2fps，省 CPU/NPU。
+    // 仅在省电模式开启时生效（关闭则全程全速）。
+    final idle = settings.powerSaveEnabled &&
+        now.difference(_lastFaceSeen) > _lowPowerAfter;
+    final interval = idle ? _idleDetectInterval : _detectInterval;
+    if (now.difference(_lastDetectRun) < interval) return;
     _lastDetectRun = now;
     _processing = true;
     _processFrame(image).whenComplete(() {
@@ -306,18 +350,20 @@ class AppController extends ChangeNotifier {
       final identityDue = settings.identityEnabled &&
           faceRecognition.isAvailable &&
           DateTime.now().difference(_lastIdentityRun) >= _identityInterval;
-      // MLKit 检测与身份识别/录入都用同一旋转基准(_detectionRotation)摆正图像，
-      // 二者旋转角一致 → 算一次共享。仅当确实需要时才算（惰性）。
-      final needsUpright =
-          settings.faceEnabled || identityDue || needCapture;
-      img.Image? upright;
-      if (needsUpright) {
-        try {
-          upright = CameraImageUtils.toUprightImage(image, detectionRotation);
-        } catch (e, st) {
-          debugPrint('[Frame] toUprightImage error: $e\n$st');
-        }
-      }
+      // 摆正图像(全图逐像素 YUV→RGB + 旋转)是主线程最大的开销,且只为 ML Kit
+      // 多脸检测与身份裁剪服务——表情/注视来自 MediaPipe(原生转换),并不需要它。
+      // 因此仅在「真正需要多脸」时才构建:身份识别到期(逐脸裁剪) / 录入采样 /
+      // 调试模式(需在画面上实时叠加多脸框)。虚拟宠物(非调试)只用主脸的表情/
+      // 注视,故跳过摆正与 ML Kit,主线程不再每帧做 ~30 万像素的逐像素转换,
+      // 消除卡顿(身份识别帧仍按 _identityInterval 节流,每 1.2s 才转换一次)。
+      final needMultiFace = identityDue ||
+          needCapture ||
+          (settings.faceEnabled && settings.debugMode);
+      // 摆正图像放到后台 isolate 转换(toUprightImageAsync),与 MediaPipe / 手势
+      // (原生,各自线程)并发,使 UI 线程在身份识别帧也不被逐像素转换阻塞。
+      final uprightFuture = needMultiFace
+          ? CameraImageUtils.toUprightImageAsync(image, detectionRotation)
+          : Future<img.Image?>.value(null);
 
       final faceFuture = settings.faceEnabled
           ? faceEngine.process(
@@ -327,27 +373,40 @@ class AppController extends ChangeNotifier {
               deviceOrientation: _deviceOrientation,
             )
           : Future<FaceOverlay?>.value(null);
-      final mlkitFuture = settings.faceEnabled
-          ? mlkitFaceEngine.process(
-              image,
-              sensorRotation: detectionRotation,
-              isFrontCamera: _isFrontCamera,
-              deviceOrientation: _deviceOrientation,
-              upright: upright, // 复用上面算好的摆正图，不再重复 YUV 转换
-            )
-          : Future<List<Rect>>.value(const []);
-      final handFuture = settings.handEnabled
+      // 手势降频(#6) + 空闲跳过(#3):省电模式下手势每 2 个检测帧才跑一次,
+      // 无人脸空闲时完全跳过;未运行的帧复用上一帧手势结果,避免闪烁。
+      // 省电关闭时则每帧全速跑手势。
+      _detectFrameCount++;
+      final idle = settings.powerSaveEnabled &&
+          DateTime.now().difference(_lastFaceSeen) > _lowPowerAfter;
+      final runHands = settings.handEnabled &&
+          !idle &&
+          (!settings.powerSaveEnabled || _detectFrameCount % 2 == 0);
+      final handFuture = runHands
           ? handEngine.process(
               image,
               sensorOrientation: _sensorOrientation,
               isFrontCamera: _isFrontCamera,
               deviceOrientation: _deviceOrientation,
             )
-          : Future<List<HandOverlay>>.value(const []);
+          : Future<List<HandOverlay>>.value(
+              idle || !settings.handEnabled ? const [] : _lastHands);
+
+      // 等后台摆正完成后再做多脸检测(ML Kit 需要 RGB 摆正图)。未构建摆正图时
+      // 跳过,faces 回退为 MediaPipe 单主脸(表情/注视照常驱动虚拟宠物)。
+      img.Image? upright;
+      try {
+        upright = await uprightFuture;
+      } catch (e, st) {
+        debugPrint('[Frame] toUprightImageAsync error: $e\n$st');
+      }
+      final mlkitBoxes = upright != null
+          ? await mlkitFaceEngine.processUpright(upright)
+          : const <Rect>[];
 
       final mediapipeFace = await faceFuture; // 主脸：478 点 + 表情
-      final mlkitBoxes = await mlkitFuture; // 多脸归一化框（主脸在前）
       final handResult = await handFuture;
+      if (runHands) _lastHands = handResult;
 
       // 构建多脸列表：以 ML Kit 框为主，MediaPipe 主脸（网格/表情）按 IoU
       // 嫁接到最匹配的框上；其余脸仅含包围盒。
@@ -450,6 +509,18 @@ class AppController extends ChangeNotifier {
       final mirror = _effectiveMirrorOverlay();
       _result =
           DetectionResult(faces: resultFaces, hands: handResult, mirror: mirror);
+
+      // 有人脸即刷新「最近可见」时刻，并据此切换屏幕常亮锁(#1)：
+      // 省电模式下长时间无人脸 → 释放常亮锁让系统息屏；语音活跃时强制保持唤醒。
+      // 省电关闭时则始终保持唤醒。
+      if (resultFaces.isNotEmpty) _lastFaceSeen = now;
+      final voiceActive =
+          voiceAssistant.isRunning && voiceAssistant.state.isActive;
+      final keepAwake = !settings.powerSaveEnabled ||
+          voiceActive ||
+          now.difference(_lastFaceSeen) <= _screenSleepAfter;
+      _setWakelock(keepAwake);
+
       if (!_disposed) notifyListeners();
     } catch (e) {
       debugPrint('processFrame error: $e');
@@ -640,6 +711,14 @@ class AppController extends ChangeNotifier {
     }
     // 语音助手总开关 / 唤醒 / TTS 变更时按需启停(仿虚拟宠物服务管理模式)。
     _syncVoiceAssistant();
+    // 关闭省电模式时立即恢复屏幕常亮(不等下一帧),避免刚关开关屏幕仍要息屏。
+    if (!settings.powerSaveEnabled) _setWakelock(true);
+    // 耗电统计开关:开启即以当前电量为起点开始计量,关闭则停止。
+    if (settings.batteryStatsEnabled && !batteryMonitor.isRunning) {
+      batteryMonitor.start();
+    } else if (!settings.batteryStatsEnabled && batteryMonitor.isRunning) {
+      batteryMonitor.stop();
+    }
     notifyListeners();
   }
 
@@ -771,9 +850,64 @@ class AppController extends ChangeNotifier {
     return path;
   }
 
+  /// 仅在状态变化时切换屏幕常亮锁，避免重复调用原生接口。
+  void _setWakelock(bool on) {
+    if (_wakelockOn == on) return;
+    _wakelockOn = on;
+    (on ? WakelockPlus.enable() : WakelockPlus.disable())
+        .catchError((Object _) {});
+  }
+
+  /// App 生命周期：退到后台/息屏暂停取流与推理，回前台恢复（#4）。
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (_disposed) return;
+    switch (state) {
+      case AppLifecycleState.resumed:
+        _resumeCamera();
+        break;
+      case AppLifecycleState.inactive:
+      case AppLifecycleState.paused:
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.detached:
+        _pauseCamera();
+        break;
+    }
+  }
+
+  /// 退到后台：停掉取流（连带停掉所有逐帧推理）并释放常亮锁。
+  Future<void> _pauseCamera() async {
+    _setWakelock(false);
+    final cam = _camera;
+    if (cam == null || _streamPausedForBackground) return;
+    if (cam.value.isStreamingImages) {
+      _streamPausedForBackground = true;
+      try {
+        await cam.stopImageStream();
+      } catch (_) {}
+    }
+  }
+
+  /// 回到前台：恢复取流，并按「有交互」重新保持唤醒。
+  Future<void> _resumeCamera() async {
+    final cam = _camera;
+    if (cam == null || _phase != AppPhase.ready) return;
+    if (!_streamPausedForBackground) return;
+    _streamPausedForBackground = false;
+    _lastFaceSeen = DateTime.now();
+    _setWakelock(true);
+    try {
+      if (!cam.value.isStreamingImages) {
+        await cam.startImageStream(_onFrame);
+      }
+    } catch (_) {}
+  }
+
   @override
   void dispose() {
     _disposed = true;
+    WidgetsBinding.instance.removeObserver(this);
+    WakelockPlus.disable().catchError((Object _) {});
     final cam = _camera;
     _camera = null;
     if (cam != null) {
@@ -782,6 +916,7 @@ class AppController extends ChangeNotifier {
       }
       cam.dispose();
     }
+    batteryMonitor.dispose();
     faceEngine.dispose();
     handEngine.dispose();
     mlkitFaceEngine.dispose();

@@ -133,8 +133,81 @@ class CameraScreen extends StatelessWidget {
               child: _ListeningMarquee(voice: controller.voiceAssistant),
             ),
           ),
+
+          // 耗电统计面板（主页，设置中可开启；点按重置计量）。
+          Positioned(
+            left: 12,
+            bottom: 12,
+            child: SafeArea(child: _BatteryStatsPanel(controller: controller)),
+          ),
         ],
       ),
+    );
+  }
+}
+
+/// 主页左下角的整机累计耗电统计小面板。设置开启时显示；点按重置计量。
+class _BatteryStatsPanel extends StatelessWidget {
+  const _BatteryStatsPanel({required this.controller});
+  final AppController controller;
+
+  String _fmtDuration(Duration d) {
+    final h = d.inHours;
+    final m = d.inMinutes % 60;
+    final s = d.inSeconds % 60;
+    return h > 0 ? '${h}h${m}m' : '${m}m${s}s';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: Listenable.merge([controller, controller.batteryMonitor]),
+      builder: (context, _) {
+        if (!controller.settings.batteryStatsEnabled) {
+          return const SizedBox.shrink();
+        }
+        final m = controller.batteryMonitor;
+        final lines = <String>['运行 ${_fmtDuration(m.elapsed)}'];
+        final mah = m.consumedMah;
+        final pct = m.consumedPercent;
+        if (mah != null) {
+          lines.add('耗电 ${mah.toStringAsFixed(1)} mAh'
+              '${pct != null ? ' ($pct%)' : ''}');
+          final avg = m.averageMa;
+          if (avg != null) lines.add('均流 ${avg.toStringAsFixed(0)} mA');
+        } else if (pct != null) {
+          lines.add('耗电 $pct%');
+        } else {
+          lines.add(m.supported ? '采样中…' : '本机不支持');
+        }
+        if (m.instantPowerMw > 0) {
+          lines.add('瞬时 ${m.instantPowerMw.toStringAsFixed(0)} mW');
+        }
+        if (m.charging) lines.add('⚠ 充电中·数据无效');
+
+        return GestureDetector(
+          onTap: controller.batteryMonitor.reset,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.55),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('⚡ 耗电统计 · 点按重置',
+                    style: TextStyle(color: Colors.white70, fontSize: 11)),
+                const SizedBox(height: 2),
+                for (final l in lines)
+                  Text(l,
+                      style: const TextStyle(color: Colors.white, fontSize: 13)),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 }
@@ -150,7 +223,8 @@ class _VirtualPetWebView extends StatefulWidget {
 class _VirtualPetWebViewState extends State<_VirtualPetWebView> {
   static const EmotionMapper _mapper = EmotionMapper();
   // 同一状态至少保持这么久再允许切换，避免表情抖动导致 FSM 频繁跳变。
-  static const Duration _minDwell = Duration(milliseconds: 600);
+  // 300ms：在「防抖」与「切换跟手」之间取衡（600ms 体感偏迟钝）。
+  static const Duration _minDwell = Duration(milliseconds: 300);
 
   late final WebViewController _controller;
   bool _loaded = false;
