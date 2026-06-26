@@ -45,6 +45,17 @@ class WakeWordService {
   static const _modelDirName =
       'sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01';
 
+  /// KWS 触发概率阈值(0..1)。**越高越不易误唤醒**(但过高会漏唤醒)。
+  /// sherpa-onnx 官方默认 0.25;原值 0.1 过低,办公室环境/日常对话频繁误触发
+  /// (没说唤醒词却被唤醒),提到 0.35 从严过滤。若实测发现正常唤醒变迟钝,
+  /// 可在 0.25~0.45 间下调微调。
+  static const double _keywordsThreshold = 0.35;
+
+  /// KWS 关键词增益分(boosting)。**越高越灵敏**(也越易误触发),与
+  /// [_keywordsThreshold] 反向。sherpa-onnx 默认 1.5;保持 1.0 偏保守,
+  /// 配合提高的阈值进一步抑制误唤醒。
+  static const double _keywordsScore = 1.0;
+
   /// 加载 KWS 模型并初始化识别器。
   ///
   /// 把 assets/models/voice/ 下的模型文件复制到临时目录,再用 sherpa-onnx
@@ -81,8 +92,8 @@ class WakeWordService {
           debug: true,
           modelingUnit: 'cjkchar',
         ),
-        keywordsThreshold: 0.1,
-        keywordsScore: 1.0,
+        keywordsThreshold: _keywordsThreshold,
+        keywordsScore: _keywordsScore,
         // sherpa-onnx 创建 spotter 时强制要求有关键词(keywords-file 或
         // keywords-buf 至少一个非空),否则 keyword-spotter.cc:Validate 报
         // "Please provide either a keywords-file or the keywords-buf" →
@@ -235,7 +246,7 @@ class WakeWordService {
     _stream = _spotter!.createStream(keywords: _buildKeywordLine(_keyword));
     _sub = pcmStream.listen(_onPcm);
     debugPrint('[WakeWord] start listening keyword=$_keyword '
-        'threshold=0.1 line="${_buildKeywordLine(_keyword)}"');
+        'threshold=$_keywordsThreshold line="${_buildKeywordLine(_keyword)}"');
   }
 
   int _pcmCount = 0; // 节流计数:每 50 片打一次点,确认音频确实流入。

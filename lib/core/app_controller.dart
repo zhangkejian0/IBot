@@ -10,6 +10,7 @@ import 'package:flutter/services.dart' show DeviceOrientation;
 import 'package:image/image.dart' as img;
 import 'package:permission_handler/permission_handler.dart';
 
+import 'app_tuning.dart';
 import '../face/activity_state_tracker.dart';
 import '../face/behavior_state_tracker.dart';
 import '../face/gaze_zone_detector.dart';
@@ -220,29 +221,8 @@ class AppController extends ChangeNotifier {
   ActivitySnapshot get activity => _activity;
 
   // —— 注视触发对话(无需唤醒词,持续注视机器人自动发起交互) ——
-  // 正视机器人的 gaze 特征点(由真实采样校准):
-  //   gazeX ≈ -0.27, gazeY ≈ +0.31(正视摄像头时 blendshape 的系统偏移)。
-  //   判定:gaze 到此点的距离 < [_gazeTriggerRadius]。
-  //   阈值依据:9 组采样(5正视/4非正视),正视距离 0.01~0.097,非正视>0.21。
-  //
-  // **多重门槛**(实测单看 gaze 半径仍偏易触发,故叠加收紧):
-  //   1. gaze 半径收紧到 0.10(正视最远 0.097,留极小余量,排除"大致朝前");
-  //   2. 持续时长 8 秒(路过/偶然对视凑不够);
-  //   3. 同时要求行为态 focused(人静止专注,排除边走边瞥);
-  //   4. 人脸较居中(排除侧着脸正对镜头的误判);
-  //   5. 容错:允许短暂出圆 ≤1.5s 不重置(自然注视会有瞬间偏移)。
-  static const double _gazeCenterX = -0.27;
-  static const double _gazeCenterY = 0.31;
-  static const double _gazeTriggerRadius = 0.10;
-  /// 持续注视多久(秒)后触发对话。
-  static const int _gazeTriggerSeconds = 8;
-  /// 触发后冷却时长(秒),期间不再因注视触发(避免刚说完又触发)。
-  static const int _gazeCooldownSeconds = 60;
-  /// 容错:短暂出圆不超过此时长(秒)不重置注视计时(自然注视有瞬间偏移)。
-  static const int _gazeToleranceSeconds = 1;
-  /// 人脸需较居中:face 中心 x 在 [0.5±_faceCenterTolerance] 范围内。
-  static const double _faceCenterTolerance = 0.22;
-
+  // 注视判定与多重门槛(正视特征点/半径/持续时长/冷却/容错/居中)的阈值与
+  // 依据,统一收口于 [AppTuning](gaze* / faceCenterTolerance),见该文件注释。
   DateTime? _gazeLookingSince; // 开始持续注视的时刻
   DateTime? _gazeLostSince; // 最近一次离开正视圆的时刻(容错用)
   DateTime? _gazeLastTrigger; // 上次触发时刻(冷却用)
@@ -254,9 +234,8 @@ class AppController extends ChangeNotifier {
   bool _processing = false;
   bool _disposed = false;
 
-  // 身份识别节流
+  // 身份识别节流(间隔见 [AppTuning.identityInterval])
   DateTime _lastIdentityRun = DateTime.fromMillisecondsSinceEpoch(0);
-  static const Duration _identityInterval = Duration(milliseconds: 1200);
 
   // —— 按需采样（替代持续帧流），避免平台主线程被相机/原生推理长期占用 ——
   //
@@ -265,57 +244,39 @@ class AppController extends ChangeNotifier {
   // 投递到 Dart 并触发 MediaPipe/MLKit 原生推理，同样占用主线程 —— 两者抢同
   // 一线程导致 WebView 周期性掉帧（实测注释掉帧流即彻底不卡）。
   //
-  // 方案：平时不开帧流（主线程空闲 → WebView 流畅），用定时器每隔 [_sampleInterval]
+  // 方案：平时不开帧流（主线程空闲 → WebView 流畅），用定时器每隔 [AppTuning.sampleInterval]
   // 临时开流抓「一帧」后立即 stopImageStream，再处理这一帧。把对主线程的占用
   // 压成短促、稀疏的脉冲。注视/表情靠 JS 侧 spring 平滑补偿低采样率。
   Timer? _sampleTimer;
   // 本轮采样是否仍在等待「那一帧」（startImageStream 后、抓到首帧前为 true）。
   bool _sampling = false;
-  // 采样间隔（≈3.3fps）。陪伴场景的信息采集与注视跟随足够；调大更省、更流畅，
-  // 调小更跟手。可按设备实测在 250~600ms 之间权衡。
-  static const Duration _sampleInterval = Duration(milliseconds: 300);
 
-  // 物体检测独立节流:物体移动远比注视/表情慢,没必要每个检测帧都跑。
-  // 用更长的间隔(默认 500ms ≈ 2fps)进一步降低原生调用频率与每帧 RGBA 取字节
-  // 的开销;两次物体检测之间复用上一帧 objects(覆盖层/感知不闪烁)。
+  // 物体检测独立节流(间隔见 [AppTuning.objectInterval]):物体移动远比注视/
+  // 表情慢,没必要每个检测帧都跑;两次物体检测之间复用上一帧 objects(覆盖层/
+  // 感知不闪烁)。
   DateTime _lastObjectRun = DateTime.fromMillisecondsSinceEpoch(0);
-  // YOLO 比 ML Kit 重,且走 JPEG 往返,节流放宽到 700ms(~1.4fps),配合后台执行。
-  static const Duration _objectInterval = Duration(milliseconds: 700);
   List<ObjectOverlay> _lastObjects = const [];
   // 后台物体检测是否在跑:避免上一次未完成又触发,导致任务堆积。
   bool _objectBusy = false;
 
-  // 「手持物体」判定:物体框与手框的中心距离阈值(归一化空间,0..1)。
-  // 手部 landmarks 包围盒通常较紧,放宽到 0.22 兼顾「手握住物体边缘」的情形。
-  static const double _heldDistance = 0.22;
-
   /// 按位置追踪的「身份 slot」：多人脸时为每张脸维持一个稳定身份，避免逐帧
   /// 串脸。每个 slot 记录归一化中心点、命中身份及其最后可见时刻。TTL 内即使
   /// 这一帧未跑识别（节流中），也能凭 slot 给该位置的人脸续上身份。
+  /// (TTL / 匹配距离见 [AppTuning.identityTtl] / [AppTuning.slotMatchDistance])
   final List<_IdentitySlot> _slots = [];
-  static const Duration _identityTtl = Duration(seconds: 3);
   // 中心点距离阈值（归一化空间，0..1），超过则视为不同位置的人脸。
   // 收紧到 0.15：两人并排时各自中心间距常 < 0.25，过大会让两张脸塌缩到
   // 同一个 slot，导致串脸。
-  static const double _slotMatchDistance = 0.15;
-
-  /// 模型/相机加载完成后的固定缓冲，确保首帧前各引擎已彻底就绪。
-  static const Duration _readyBuffer = Duration(seconds: 2);
-
-  /// LLM 预置 DeepSeek API Key(仅首次写入配置文件时用;之后以设置页为准)。
-  /// 真实生产中应移除此硬编码,改由用户在设置页录入。
-  static const String _kPresetLlmApiKey = 'sk-1f6417c0177249de8b02a2a18207de2d';
 
   // 录入采样请求
   Completer<EnrollCapture?>? _captureCompleter;
 
-  // —— 人物日志：感知节流 ——
+  // —— 人物日志：感知节流(最小间隔见 [AppTuning.perceptionMinInterval]) ——
   // 感知帧高频(~5fps),不能逐帧落盘。这里做「变化触发 + 最小间隔」节流：
   // 仅当关键信息(人物/表情/手势/物体/手持)相对上次记录发生变化,且距上次
   // 记录已超过最小间隔时,才写一条 perception 记录,避免日志被重复帧刷爆。
   String _lastPerceptionSig = '';
   DateTime _lastPerceptionLog = DateTime.fromMillisecondsSinceEpoch(0);
-  static const Duration _perceptionMinInterval = Duration(seconds: 2);
 
   CameraController? get cameraController => _camera;
 
@@ -381,8 +342,8 @@ class AppController extends ChangeNotifier {
       }
 
       // 加载 LLM 配置(DeepSeek 预设),并注入语音助手的对话服务。
-      // 预置 Key 仅在首次落盘时使用,之后以设置页录入为准。
-      await llmConfigStore.load(defaultApiKey: _kPresetLlmApiKey);
+      // apiKey 留空,需由用户在设置页录入后才生效。
+      await llmConfigStore.load();
       voiceAssistant.chat.configure(llmConfigStore.config);
 
       // 加载 Pophie 后端配置并注入。语音对话全程走 /api/chat(STT+LLM+TTS)。
@@ -400,7 +361,7 @@ class AppController extends ChangeNotifier {
 
       // 固定额外等待：摄像头首帧与各模型推理管道仍需少量时间稳定，
       // 缓冲后再进入下一阶段，避免开场即出现掉帧/未识别。
-      await Future<void>.delayed(_readyBuffer);
+      await Future<void>.delayed(AppTuning.readyBuffer);
 
       // 已注册主人 → 直接进入主界面；未注册 → 进入首次激活向导。
       // 向导的人脸录入依赖常驻相机与识别模型，故必须在就绪缓冲之后才分流。
@@ -418,11 +379,7 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  /// 取流分辨率。物体识别(YOLO)对输入分辨率敏感:过低(如 low≈240p)时
-  /// 细节不足,杯子/书/手机这类相似小物体极易被误判。medium(≈480p)在
-  /// 准确率与 CPU/内存(逐像素 YUV→RGB 在主 isolate)之间取得平衡;若设备
-  /// 算力不足出现卡顿,可下调回 low;追求更高精度可上调到 high(720p)。
-  static const ResolutionPreset _captureResolution = ResolutionPreset.medium;
+  /// 取流分辨率(见 [AppTuning.captureResolution])。
 
   Future<void> _initCamera() async {
     final cameras = await availableCameras();
@@ -448,7 +405,7 @@ class AppController extends ChangeNotifier {
 
     final controller = CameraController(
       selected,
-      _captureResolution,
+      AppTuning.captureResolution,
       enableAudio: false,
       // 从源头限定 5fps 采集,与 _detectInterval=200ms 检测节流对齐:
       // 硬件不再以 30fps 回调再被丢弃 25 次,而是直接只产 5 帧/秒,
@@ -599,7 +556,7 @@ class AppController extends ChangeNotifier {
   /// 启动按需采样定时器（替代持续 startImageStream）。
   void _startSampling() {
     _sampleTimer?.cancel();
-    _sampleTimer = Timer.periodic(_sampleInterval, (_) => _sampleOnce());
+    _sampleTimer = Timer.periodic(AppTuning.sampleInterval, (_) => _sampleOnce());
   }
 
   /// 停止采样并确保帧流已关闭。
@@ -668,11 +625,11 @@ class AppController extends ChangeNotifier {
       final needCapture = _captureCompleter != null;
       final identityDue = settings.identityEnabled &&
           faceRecognition.isAvailable &&
-          DateTime.now().difference(_lastIdentityRun) >= _identityInterval;
+          DateTime.now().difference(_lastIdentityRun) >= AppTuning.identityInterval;
       // 物体检测独立节流：到期才跑（间隔比检测帧更长，进一步省原生调用）。
       final objectDue = settings.objectEnabled &&
           objectEngine.isInitialized &&
-          DateTime.now().difference(_lastObjectRun) >= _objectInterval;
+          DateTime.now().difference(_lastObjectRun) >= AppTuning.objectInterval;
       // MLKit 人脸/物体检测与身份识别/录入都用同一旋转基准(_detectionRotation)
       // 摆正图像，旋转角一致 → 算一次共享。仅当确实需要时才算（惰性）。
       final needsUpright = settings.faceEnabled ||
@@ -941,7 +898,7 @@ class AppController extends ChangeNotifier {
         '|${objectNames.join(',')}|$held|$faceCount';
     final now = DateTime.now();
     final changed = sig != _lastPerceptionSig;
-    final elapsedOk = now.difference(_lastPerceptionLog) >= _perceptionMinInterval;
+    final elapsedOk = now.difference(_lastPerceptionLog) >= AppTuning.perceptionMinInterval;
     // 变化才记;但同一状态长时间持续也无需重复记(仅在变化时落盘)。
     if (!changed || !elapsedOk) return;
 
@@ -1013,7 +970,7 @@ class AppController extends ChangeNotifier {
     ));
   }
 
-  /// 注视触发:持续正视机器人超过 [_gazeTriggerSeconds] 秒,且度过冷却期,
+  /// 注视触发:持续正视机器人超过 [AppTuning.gazeTriggerSeconds] 秒,且度过冷却期,
   /// 且语音助手空闲可交互时,自动发起一轮对话(无需唤醒词)。
   ///
   /// 多重门槛(实测单看 gaze 半径偏易触发,故叠加收紧,详见常量区注释):
@@ -1025,9 +982,9 @@ class AppController extends ChangeNotifier {
     if (!voice.isRunning || voice.state != VoiceState.idle) return;
 
     final now = DateTime.now();
-    // 冷却期:距上次触发不足 _gazeCooldownSeconds 秒则不触发。
+    // 冷却期:距上次触发不足 AppTuning.gazeCooldownSeconds 秒则不触发。
     if (_gazeLastTrigger != null &&
-        now.difference(_gazeLastTrigger!).inSeconds < _gazeCooldownSeconds) {
+        now.difference(_gazeLastTrigger!).inSeconds < AppTuning.gazeCooldownSeconds) {
       return;
     }
 
@@ -1038,7 +995,7 @@ class AppController extends ChangeNotifier {
       _gazeLookingSince ??= now;
       _gazeLostSince = null;
       final held = now.difference(_gazeLookingSince!).inSeconds;
-      if (held >= _gazeTriggerSeconds) {
+      if (held >= AppTuning.gazeTriggerSeconds) {
         // 持续注视达标:触发对话,记录时刻进入冷却,重置注视计时。
         _gazeLookingSince = null;
         _gazeLastTrigger = now;
@@ -1048,7 +1005,7 @@ class AppController extends ChangeNotifier {
     } else {
       // 未正视:记录离开时刻;超过容错秒数才真正重置(允许瞬间偏移)。
       _gazeLostSince ??= now;
-      if (now.difference(_gazeLostSince!).inSeconds > _gazeToleranceSeconds) {
+      if (now.difference(_gazeLostSince!).inSeconds > AppTuning.gazeToleranceSeconds) {
         _gazeLookingSince = null;
       }
     }
@@ -1057,14 +1014,14 @@ class AppController extends ChangeNotifier {
   /// 是否正视机器人(多重门槛):gaze 落在正视圆内 + 行为态 focused + 人脸居中。
   bool _isLookingAtRobot(FaceOverlay face) {
     // 1. gaze 在正视特征点附近(收紧半径 0.10)。
-    final dx = face.gazeX - _gazeCenterX;
-    final dy = face.gazeY - _gazeCenterY;
-    if (math.sqrt(dx * dx + dy * dy) >= _gazeTriggerRadius) return false;
+    final dx = face.gazeX - AppTuning.gazeCenterX;
+    final dy = face.gazeY - AppTuning.gazeCenterY;
+    if (math.sqrt(dx * dx + dy * dy) >= AppTuning.gazeTriggerRadius) return false;
     // 2. 行为态为专注(人静止专注,排除边走动边瞥一眼)。
     if (_behavior.state != BehaviorState.focused) return false;
     // 3. 人脸较居中(排除侧着脸正对镜头的误判)。
     final cx = face.boundingBox.center.dx;
-    if ((cx - 0.5).abs() > _faceCenterTolerance) return false;
+    if ((cx - 0.5).abs() > AppTuning.faceCenterTolerance) return false;
     return true;
   }
 
@@ -1099,7 +1056,7 @@ class AppController extends ChangeNotifier {
       for (final h in hands) {
         final overlap = _iou(o.boundingBox, h.boundingBox) > 0 ||
             o.boundingBox.overlaps(h.boundingBox);
-        final near = _dist(o.center, h.boundingBox.center) < _heldDistance;
+        final near = _dist(o.center, h.boundingBox.center) < AppTuning.heldDistance;
         if (overlap || near) {
           held = true;
           break;
@@ -1142,7 +1099,7 @@ class AppController extends ChangeNotifier {
   void _assignSlots(Map<Rect, IdentityMatch?> frameIdentities) {
     final now = DateTime.now();
     // 清理过期 slot。
-    _slots.removeWhere((s) => now.difference(s.lastSeen) > _identityTtl);
+    _slots.removeWhere((s) => now.difference(s.lastSeen) > AppTuning.identityTtl);
 
     // 候选配对：(距离, 脸框, slot)，仅保留距离 < 阈值者。
     final pairs = <_Pair>[];
@@ -1150,7 +1107,7 @@ class AppController extends ChangeNotifier {
       final c = _center(entry.key);
       for (final s in _slots) {
         final d = _dist(s.center, c);
-        if (d < _slotMatchDistance) {
+        if (d < AppTuning.slotMatchDistance) {
           pairs.add(_Pair(d, entry.key, s));
         }
       }
@@ -1186,9 +1143,9 @@ class AppController extends ChangeNotifier {
     for (var i = 0; i < boxes.length; i++) {
       final c = _center(boxes[i]);
       for (final s in _slots) {
-        if (now.difference(s.lastSeen) > _identityTtl) continue;
+        if (now.difference(s.lastSeen) > AppTuning.identityTtl) continue;
         final d = _dist(s.center, c);
-        if (d < _slotMatchDistance) {
+        if (d < AppTuning.slotMatchDistance) {
           pairs.add(_Pair(d, boxes[i], s, faceIndex: i));
         }
       }
@@ -1393,7 +1350,14 @@ class AppController extends ChangeNotifier {
     // 物体感知：去重收集有标签的物体名 + 结构化明细(名称/置信度/位置/包围盒)；
     // 提取手持物体；拼装自然语言场景。同时携带「简名列表 + 结构化明细 + 自然
     // 语言场景」三种表述，最大化后端/大模型对「画面里有什么、在哪儿」的理解。
-    final objects = _result.objects;
+    //
+    // 置信度门控:置信度 < AppTuning.perceptionObjectConfidence 的物体不可信,不发送。
+    // 此处是「发往后端」的唯一组装口,在此过滤可让简名列表/明细/手持/场景
+    // 四种表述口径一致,不会出现「明细过滤了但简名列表还留着」的不一致。
+    // (覆盖层 UI 不受影响,低置信度物体仍显示,保留调试可见性。)
+    final objects = _result.objects
+        .where((o) => o.confidence >= AppTuning.perceptionObjectConfidence)
+        .toList();
     final names = <String>[];
     final details = <Map<String, dynamic>>[];
     for (final o in objects) {
@@ -1402,7 +1366,9 @@ class AppController extends ChangeNotifier {
       if (!names.contains(l)) names.add(l);
       details.add(_objectDetail(o));
     }
-    final held = _result.heldObject;
+    // 手持物体从「已过滤」列表重算,避免发送低置信度的手持结果
+    // (原 DetectionResult.heldObject 取未过滤的置信度最高者,可能仍 < 阈值)。
+    final held = _heldObjectFrom(objects);
     final heldName = held?.label;
     final heldDetail = held != null ? _objectDetail(held) : null;
     final baseScene = _buildSceneDescription(
@@ -1429,6 +1395,19 @@ class AppController extends ChangeNotifier {
       scene: scene,
     );
   }
+
+  /// 从给定物体列表中取「被手持」者(多个取置信度最高),逻辑同
+  /// [DetectionResult.heldObject] 但作用于「已过置信度阈值」的列表,
+  /// 用于 [_buildPerception] 避免发送低置信度的手持物体。
+  ObjectOverlay? _heldObjectFrom(List<ObjectOverlay> objects) {
+    ObjectOverlay? best;
+    for (final o in objects) {
+      if (!o.heldByHand) continue;
+      if (best == null || o.confidence > best.confidence) best = o;
+    }
+    return best;
+  }
+
 
   /// 把单个物体识别结果序列化为结构化明细：名称 + 置信度 + 位置描述 +
   /// 归一化包围盒 `[left, top, right, bottom]`（均做镜像校正，与「左/右」位置

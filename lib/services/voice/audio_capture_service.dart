@@ -98,9 +98,14 @@ class AudioCaptureService {
   /// 未采集到语音返回 null。
   ///
   /// 阈值说明(均为 RMS 归一化到 0..1,分母 6000):
-  /// - [speechThreshold] 起说话门槛。原 0.12 偏高,声音小/离麦远时达不到
-  ///   → 偶发"未采集到语音"。降到 0.06 让正常说话能稳定触发。
-  /// - [silenceThreshold] 续说话门槛。降到 0.04。
+  /// - [speechThreshold] 起说话门槛。0.06 在安静环境够用,但办公室(键盘声/
+  ///   旁人说话/空调)底噪偏高,频繁误采 → 提高到 0.15(近距离正常说话常
+  ///   >0.3,远处人声/键盘多 <0.15),拉开与环境噪声的差距。
+  /// - [silenceThreshold] 续说话门槛(低于此值开始计静音)。配合提高到 0.08。
+  /// - [speechOnsetFrames] **起说话连续帧门控**(抗误采核心):要求连续 N 帧
+  ///   都超 [speechThreshold] 才认定"开始说话",过滤键盘敲击/单次咳嗽/远处
+  ///   偶发一句话等瞬态尖峰。每帧约 100ms,N=3 ≈ 持续 300ms 高能量才触发。
+  ///   确认前的高能量帧会经预缓冲补回,避免切掉开头的字。
   /// - [silenceTimeout] 静音判定结束。原 1500ms 偏长(说完话还要等 1.5s
   ///   才上传),降到 500ms(Google ~600ms 的业界值,进一步压低以提升
   ///   「即问即答」体感),省 ~0.2s 端到端延迟;在"不误截停顿"与"快速响应"
@@ -110,13 +115,18 @@ class AudioCaptureService {
     Duration maxDuration = const Duration(seconds: 12),
     Duration silenceTimeout = const Duration(milliseconds: 500),
     Duration onsetTimeout = const Duration(seconds: 10),
-    double speechThreshold = 0.06,
-    double silenceThreshold = 0.04,
+    double speechThreshold = 0.15,
+    double silenceThreshold = 0.08,
+    int speechOnsetFrames = 3,
   }) async {
     if (!_running) return null;
     final completer = Completer<VadResult?>();
     final buffer = BytesBuilder();
     var speechStarted = false;
+    // 起说话连续帧计数 + 预缓冲:确认"持续高能量"才起说话,过滤瞬态尖峰
+    // (键盘/咳嗽/远处偶发人声),并把确认前的高能量帧补回,避免切掉开头。
+    var onsetConsec = 0;
+    final preRoll = <Uint8List>[];
     DateTime? lastVoiceAt;
     final startAt = DateTime.now();
     StreamSubscription<Uint8List>? sub;
@@ -149,10 +159,30 @@ class AudioCaptureService {
         final lvl = _rmsLevel(bytes);
         sampleCount++;
         if (lvl > maxObservedLevel) maxObservedLevel = lvl;
-        if (lvl >= speechThreshold) speechStarted = true;
-        if (lvl >= silenceThreshold) lastVoiceAt = DateTime.now();
-        // 起始后才累积，避免把前导静音也发给后端。
-        if (speechStarted) buffer.add(bytes);
+        if (!speechStarted) {
+          // 起说话前:要求连续 speechOnsetFrames 帧超阈值才认定开始说话,
+          // 过滤偶发瞬态尖峰(键盘/咳嗽/远处一句话)。高能量帧先入预缓冲,
+          // 一旦确认即整体补回 buffer(避免切掉开头的字);能量回落则丢弃。
+          if (lvl >= speechThreshold) {
+            onsetConsec++;
+            preRoll.add(bytes);
+            if (onsetConsec >= speechOnsetFrames) {
+              speechStarted = true;
+              for (final b in preRoll) {
+                buffer.add(b);
+              }
+              preRoll.clear();
+              lastVoiceAt = DateTime.now();
+            }
+          } else {
+            onsetConsec = 0;
+            preRoll.clear();
+          }
+        } else {
+          // 已起说话:续说话门槛之上刷新"最后有声"时刻,持续累积。
+          if (lvl >= silenceThreshold) lastVoiceAt = DateTime.now();
+          buffer.add(bytes);
+        }
       },
       onError: (e) {
         debugPrint('[AudioCapture] utterance stream error: $e');
