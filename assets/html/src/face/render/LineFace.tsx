@@ -7,6 +7,8 @@ import {
   type AmbientDescriptor, type AmbientExpressionId, type EyeStyle, type MouthKind, type PropKind,
 } from './ambientExpression';
 import { chooseAutoMouth, type AutoMouthChoice } from './autoMouth';
+import { splitEyeGaze } from './eyeGaze';
+import { buildHeadTransform } from './headTransform';
 
 /**
  * LineFace ── 线条化（monoline）风格。
@@ -101,12 +103,14 @@ export function LineFace() {
   const Clight = lighten(C, 0.35);  // 描边顶部高光色
   const Ccatch = lighten(C, 0.8);   // 瞳孔反光点
 
-  const breatheScale = 1 + params.headBobY * 0.01;
+  const breatheScale = 1 + Math.sin(t / 620) * 0.01;
   const tiltExtra = (desc.headTilt ?? 0) + (desc.spin ? Math.sin(t / 480) * 7 : 0);
   const shakeX = desc.shake ? Math.sin(t / 45) * desc.shake : 0;
-  const headTransform =
-    `translate(${(VIEW_CX + shakeX).toFixed(2)} ${(FACE_CY + params.headBobY).toFixed(2)}) ` +
-    `rotate(${(params.headTilt + tiltExtra).toFixed(3)}) scale(${breatheScale.toFixed(4)}) translate(${-VIEW_CX} ${-FACE_CY})`;
+  const headTransform = buildHeadTransform(VIEW_CX, FACE_CY, params, {
+    tilt: tiltExtra,
+    shakeX,
+    scale: breatheScale,
+  });
 
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%', background: BG, overflow: 'hidden' }}>
@@ -148,6 +152,7 @@ export function LineFace() {
           <Eye cx={RIGHT_EYE_CX} cy={FACE_CY} isLeft={false} mode={rightEye}
                openness={rOp} px={gx('right')} py={gy('right')} color={C} catchC={Ccatch} />
           <Mouth mode={mouth} curve={params.mouth.curve} openness={params.mouth.openness}
+                 cornerLift={params.mouth.cornerLift}
                  isHappy={desc.eye === 'star'} t={t} />
           {desc.prop && <Prop kind={desc.prop} color={C} t={t} />}
         </g>
@@ -238,13 +243,17 @@ function Eye({
   const ringRy = wide ? Math.max(3, ry * 1.05) : ry;
   const blink = openness < 0.2;
   const pr = (wide ? PUPIL_R * 0.78 : PUPIL_R * 1.18) * Math.max(0.5, openness);
-  const pcx = cx + px, pcy = cy + py - 2;
+  const { rollX, rollY, pupilX: pdx, pupilY: pdy } = splitEyeGaze(px, py);
+  const eyeCx = cx + rollX;
+  const eyeCy = cy + rollY;
+  const pcx = eyeCx + pdx;
+  const pcy = eyeCy + pdy - 2;
   return (
     <>
-      <ellipse cx={cx} cy={cy} rx={ringRx} ry={ringRy} />
+      <ellipse cx={eyeCx} cy={eyeCy} rx={ringRx} ry={ringRy} />
       {/* 眼内上缘弧形反光 */}
       {!blink && (
-        <path d={`M ${cx - r * 0.55} ${cy - r * 0.45} Q ${cx - r * 0.05} ${cy - r * 0.78} ${cx + r * 0.34} ${cy - r * 0.58}`}
+        <path d={`M ${eyeCx - r * 0.55} ${eyeCy - r * 0.45} Q ${eyeCx - r * 0.05} ${eyeCy - r * 0.78} ${eyeCx + r * 0.34} ${eyeCy - r * 0.58}`}
               strokeWidth={SW * 0.5} opacity={0.65} />
       )}
       {!blink && (
@@ -258,10 +267,10 @@ function Eye({
   );
 }
 
-function Mouth({ mode, curve, openness, isHappy, t }: {
-  mode: MouthMode; curve: number; openness: number; isHappy: boolean; t: number;
+function Mouth({ mode, curve, openness, cornerLift = 0, isHappy, t }: {
+  mode: MouthMode; curve: number; openness: number; cornerLift?: number; isHappy: boolean; t: number;
 }) {
-  const cx = MOUTH_CX, cy = MOUTH_CY, w = MOUTH_W;
+  const cx = MOUTH_CX, cy = MOUTH_CY + cornerLift * 12, w = MOUTH_W;
   // auto：沿用底层 FaceParams（curve/openness）分流，与 AmbientFace 对齐。
   // chooseAutoMouth 返回 'open'，LineFace 本地用 'o'，这里转一下名。
   const autoToLine: Record<AutoMouthChoice, Exclude<MouthMode, 'auto'>> = {

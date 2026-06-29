@@ -29,6 +29,10 @@ export type FaceParams = {
   blush: BlushParams;
   headTilt: number;
   headBobY: number;
+  /** 头部水平平移：向左/右「探头」 */
+  headPanX: number;
+  /** 头部俯仰角（度）：抬头为负、低头为正 */
+  headPitch: number;
 };
 
 export type DeepPartial<T> = { [K in keyof T]?: T[K] extends object ? DeepPartial<T[K]> : T[K] };
@@ -43,7 +47,7 @@ export type OscillatorTarget =
   | 'rightEye.openness' | 'rightEye.pupilX' | 'rightEye.pupilY' | 'rightEye.pupilScale' | 'rightEye.upperLidCurve' | 'rightEye.tearAmount'
   | 'mouth.curve' | 'mouth.openness' | 'mouth.cornerLift' | 'mouth.width'
   | 'blush.intensity'
-  | 'headTilt' | 'headBobY'
+  | 'headTilt' | 'headBobY' | 'headPanX' | 'headPitch'
   | 'pupilScale';
 
 export type OscillatorSpec = {

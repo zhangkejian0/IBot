@@ -54,6 +54,8 @@ export function blendParams(layers: Layer[]): FaceParams {
 
     out.headTilt        += weight * (pose.headTilt        - base.headTilt);
     out.headBobY        += weight * (pose.headBobY        - base.headBobY);
+    out.headPanX        += weight * (pose.headPanX        - base.headPanX);
+    out.headPitch       += weight * (pose.headPitch       - base.headPitch);
   }
 
   clampEye(out.leftEye);
@@ -66,6 +68,8 @@ export function blendParams(layers: Layer[]): FaceParams {
   out.blush.size = clamp(out.blush.size, 0.5, 1.6);
   out.headTilt = clamp(out.headTilt, -20, 20);
   out.headBobY = clamp(out.headBobY, -15, 15);
+  out.headPanX = clamp(out.headPanX, -70, 70);
+  out.headPitch = clamp(out.headPitch, -18, 18);
 
   return out;
 }

@@ -26,6 +26,8 @@ const FIELDS: Field[] = [];
 });
 FIELDS.push({ key: 'headTilt', getTarget: (p) => p.headTilt, setOut: (p, v) => { p.headTilt = v; } });
 FIELDS.push({ key: 'headBobY', getTarget: (p) => p.headBobY, setOut: (p, v) => { p.headBobY = v; } });
+FIELDS.push({ key: 'headPanX', getTarget: (p) => p.headPanX, setOut: (p, v) => { p.headPanX = v; } });
+FIELDS.push({ key: 'headPitch', getTarget: (p) => p.headPitch, setOut: (p, v) => { p.headPitch = v; } });
 
 export class SpringTracker {
   private values: number[];

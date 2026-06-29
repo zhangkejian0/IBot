@@ -7,6 +7,7 @@ import { ExpressionEditor } from './face/debug/ExpressionEditor';
 import { readInitialDebugFlag, setDebugEnabled } from './face/debug/debugFlag';
 import { FACE_BG } from './face/render/faceLayout';
 import { getFaceStyle, subscribeFaceStyle } from './face/render/faceStyle';
+import { bindGazePointer } from './face/runtime/gazeInput';
 
 const SECRET_TAP_COUNT = 5;
 const SECRET_TAP_WINDOW_MS = 2000;
@@ -17,6 +18,13 @@ export function App() {
   const [debugAvailable, setDebugAvailable] = useState<boolean>(() => readInitialDebugFlag());
   const [panelOpen, setPanelOpen] = useState(() => readInitialDebugFlag());
   const tapsRef = useRef<number[]>([]);
+  const faceAreaRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = faceAreaRef.current;
+    if (!el) return;
+    return bindGazePointer(el);
+  }, []);
 
   useEffect(() => {
     const off = subscribeFaceStyle((id) => setFaceStyleState(id));
@@ -55,7 +63,7 @@ export function App() {
 
   return (
     <div style={styles.root}>
-      <div style={styles.faceArea} className="face-area">
+      <div ref={faceAreaRef} style={styles.faceArea} className="face-area">
         <FaceComponent />
       </div>
 

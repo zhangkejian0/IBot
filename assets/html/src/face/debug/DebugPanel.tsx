@@ -8,7 +8,7 @@ import { AMBIENT_SKINS, getAmbientSkinId, setAmbientSkin } from '../render/ambie
 import { FACE_STYLES, getFaceStyle, setFaceStyle, type FaceStyleId } from '../render/faceStyle';
 
 export function DebugPanel({ onClose }: { onClose?: () => void }) {
-  const [gazeMode, setGazeMode] = useState(false);
+  const [gazePointerEnabled, setGazePointerEnabled] = useState(true);
   const [listening, setListening] = useState(0);
   const [faceStyle, setFaceStyleState] = useState<FaceStyleId>(() => getFaceStyle());
   const [ambExpr, setAmbExpr] = useState<AmbientExpressionId>(() => getAmbientExpression());
@@ -31,18 +31,9 @@ export function DebugPanel({ onClose }: { onClose?: () => void }) {
   };
 
   useEffect(() => {
-    if (!gazeMode) {
-      faceController.setGazeTarget(0, 0);
-      return;
-    }
-    const onMove = (e: MouseEvent) => {
-      const x = (e.clientX / window.innerWidth) * 2 - 1;
-      const y = (e.clientY / window.innerHeight) * 2 - 1;
-      faceController.setGazeTarget(x, y);
-    };
-    window.addEventListener('mousemove', onMove);
-    return () => window.removeEventListener('mousemove', onMove);
-  }, [gazeMode]);
+    faceController.setGazePointerEnabled(gazePointerEnabled);
+    if (!gazePointerEnabled) faceController.setGazeTarget(0, 0);
+  }, [gazePointerEnabled]);
 
   useEffect(() => {
     listeningRef.current = listening;
@@ -66,7 +57,7 @@ export function DebugPanel({ onClose }: { onClose?: () => void }) {
   }, [listening]);
 
   const reset = () => {
-    setGazeMode(false);
+    setGazePointerEnabled(true);
     setListening(0);
     setAmbientExpression('idle');
     setAmbExpr('idle');
@@ -122,10 +113,10 @@ export function DebugPanel({ onClose }: { onClose?: () => void }) {
         <label style={s.checkbox}>
           <input
             type="checkbox"
-            checked={gazeMode}
-            onChange={(e) => setGazeMode(e.target.checked)}
+            checked={gazePointerEnabled}
+            onChange={(e) => setGazePointerEnabled(e.target.checked)}
           />
-          注视跟随鼠标
+          鼠标/触摸注视跟随
         </label>
         <SliderRow
           label="倾听音量"
