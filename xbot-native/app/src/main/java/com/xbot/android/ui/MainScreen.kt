@@ -20,13 +20,13 @@ import com.xbot.android.webview.FaceWebView
 import kotlinx.coroutines.delay
 
 /**
- * 主界面（阶段 1）。
+ * 主界面（阶段 1-3）。
  *
  * 两种互斥模式（由 controller.debugMode 控制，对应 Flutter 调试开关）：
  * - 虚拟宠物模式（默认）：全屏虚拟形象 WebView，注视跟随 + 注意力态驱动表情。
  * - 调试模式：摄像头识别覆盖层（人脸框/网格/手势骨架/物体/状态面板）。
  *
- * 识别在两种模式下都常驻运行（仅决定把结果画到屏幕还是驱动虚拟形象）。
+ * 双击 → 触发语音助手（由 FaceWebView 内部 GestureDetector 直接捕获）。
  */
 @Composable
 fun MainScreen(controller: MainScreenController) {
@@ -56,6 +56,9 @@ fun MainScreen(controller: MainScreenController) {
 
         // —— 右上角调试浮层（两种模式都显示，对标 native-prototype）——
         DebugOverlay(controller)
+
+        // 注：双击检测由 FaceWebView 内部 GestureDetector 直接捕获（绕过 Compose 平台视图
+        // 吞触摸事件的问题），见 MainScreenController.attachWebView 设置的 webView.onDoubleTap。
 
         // —— 定时刷新帧率统计 ——
         LaunchedEffect(Unit) {

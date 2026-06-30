@@ -23,6 +23,11 @@ import com.xbot.android.vision.ObjectEngine
 import com.xbot.android.vision.PoseLandmarkEngine
 import com.xbot.android.vision.VisionPipeline
 import com.xbot.android.webview.FaceWebView
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 
 /**
@@ -53,23 +58,12 @@ class MainScreenController(
     var faceWebView: FaceWebView? = null
         private set
 
-    /** 语音助手（唤醒 + 流式 STT + Pophie + 流式 TTS）。 */
-    val voiceAssistant = com.xbot.android.voice.VoiceAssistant(
-        context = context,
-        onStateChange = { state, robotState ->
-            // 语音状态/robotState → FaceBridge（语音优先级最高，接管表情 + 嘴部）。
-            faceWebView?.bridge?.apply {
-                voiceActive = state.isActive
-                voiceState = robotState ?: state.faceState
-            }
-        },
-        onLevel = { lvl ->
-            // 语音音量（listening 用麦音量，speaking 用 TTS 音量）→ FaceBridge 嘴部。
-            faceWebView?.bridge?.voiceLevel = lvl
-        },
-    )
+    /** 语音助手（惰性初始化：仅当需要时才创建，避免启动阶段因 sherpa-onnx 等 native 库加载导致崩溃）。 */
+    @Volatile var voiceAssistant: com.xbot.android.voice.VoiceAssistant? = null
+        private set
 
     private val cameraManager = CameraManager(context)
+    private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
     // —— 视觉引擎 ——
     private val faceEngine = FaceLandmarkEngine(context, FACE_MODEL_PATH)
@@ -116,9 +110,53 @@ class MainScreenController(
     private var frameCounter = 0
     private var lastStatTime = System.currentTimeMillis()
 
+    /** 惰性创建语音助手（仅当需要且有麦克风权限时才创建，避免启动时 native 库加载导致崩溃）。 */
+    @Synchronized
+    fun ensureVoiceAssistant(): com.xbot.android.voice.VoiceAssistant {
+        return voiceAssistant ?: com.xbot.android.voice.VoiceAssistant(
+            context = context,
+            onStateChange = { state, robotState ->
+                faceWebView?.bridge?.apply {
+                    voiceActive = state.isActive
+                    voiceState = robotState ?: state.faceState
+                }
+            },
+            onLevel = { lvl ->
+                faceWebView?.bridge?.voiceLevel = lvl
+            },
+        ).also { voiceAssistant = it }
+    }
+
     fun attachWebView(webView: FaceWebView) {
         faceWebView = webView
         webView.setup()
+        // WebView 层直接捕获双击（绕过 Compose 手势被平台视图吞掉的问题）。
+        webView.onDoubleTap = { onDoubleTap() }
+    }
+
+    /** 双击触发语音助手。 */
+    private fun onDoubleTap() {
+        android.util.Log.i("MainScreenController", "双击 → 语音助手")
+        try {
+            val v = ensureVoiceAssistant()
+            if (!v.isAvailable) {
+                android.util.Log.w("MainScreenController", "语音不可用，请求麦克风权限")
+                onRequestMic()
+                return
+            }
+            if (!v.isRunning) v.start()
+            if (v.isRunning && v.state.value == com.xbot.android.voice.VoiceState.IDLE) {
+                android.util.Log.i("MainScreenController", "触发对话 double_tap")
+                v.triggerManually("double_tap")
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("MainScreenController", "双击处理异常: ${e.message}")
+        }
+    }
+
+    /** 请求麦克风权限（双击时若不可用则调用）。 */
+    fun requestMic() {
+        onRequestMic()
     }
 
     fun startCameraPipeline() {
@@ -151,6 +189,24 @@ class MainScreenController(
         )
         cameraManager.start(lifecycleOwner, analyzer, useFront = true)
         cameraStarted = true
+
+        // 启用语音助手（需麦克风权限；惰性创建，避免启动时 native 加载崩溃）。
+        if (hasMicPermission()) {
+            try {
+                val va = ensureVoiceAssistant()
+                va.markAvailable()
+                va.initialize()
+                scope.launch {
+                    delay(2000)
+                    try { if (va.isAvailable) va.start() } catch (_: Exception) {}
+                }
+            } catch (e: Exception) {
+                // 语音初始化失败不影响视觉识别主流程。
+                android.util.Log.e("MainScreenController", "语音助手启动失败: ${e.message}")
+            }
+        } else {
+            onRequestMic()
+        }
     }
 
     fun tickStats() {
@@ -164,6 +220,7 @@ class MainScreenController(
     }
 
     fun release() {
+        try { voiceAssistant?.release() } catch (_: Exception) {}
         cameraManager.release()
         faceEngine.close()
         mlkitEngine.close()
@@ -181,6 +238,8 @@ fun rememberMainScreenController(
     lifecycleOwner: LifecycleOwner,
     hasCameraPermission: () -> Boolean,
     onRequestCamera: () -> Unit,
+    hasMicPermission: () -> Boolean,
+    onRequestMic: () -> Unit,
     peopleProvider: () -> List<Person> = { emptyList() },
 ): MainScreenController {
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -193,6 +252,8 @@ fun rememberMainScreenController(
             lifecycleOwner = lifecycleOwner,
             hasCameraPermission = hasCameraPermission,
             onRequestCamera = onRequestCamera,
+            hasMicPermission = hasMicPermission,
+            onRequestMic = onRequestMic,
             peopleProvider = peopleProvider,
         )
     }

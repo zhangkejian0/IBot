@@ -3,6 +3,10 @@ package com.xbot.android.webview
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Color
+import android.os.Handler
+import android.os.Looper
+import android.view.GestureDetector
+import android.view.MotionEvent
 import android.view.View
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
@@ -34,13 +38,34 @@ class FaceWebView(context: Context) : WebView(context) {
         private const val FACE_PAGE_URL = "https://appassets.androidplatform.net/dist/index.html?style=ambient"
     }
 
+    /** 双击回调（由 MainScreenController 设置，触发语音助手）。 */
+    var onDoubleTap: (() -> Unit)? = null
+
     private val pageLoaded = AtomicBoolean(false)
+
+    /** 手势检测器：在 WebView 层直接捕获双击（绕过 Compose 手势被平台视图吞掉的问题）。 */
+    private val gestureDetector = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
+        override fun onDoubleTap(e: MotionEvent): Boolean {
+            android.util.Log.i("FaceWebView", "双击触发")
+            onDoubleTap?.invoke()
+            return true
+        }
+        // 不拦截单击（不阻碍 WebView 正常交互）。
+        override fun onSingleTapConfirmed(e: MotionEvent): Boolean = false
+    })
 
     /** JS 桥接：累积检测结果/语音状态，按节流间隔推送给前端。 */
     val bridge = FaceBridge(this)
 
-    @SuppressLint("SetJavaScriptEnabled")
+    @SuppressLint("SetJavaScriptEnabled", "ClickableViewAccessibility")
     fun setup() {
+        // 拦截触摸事件：转发给 GestureDetector 检测双击。
+        // 不拦截单击（return false），让 WebView 正常处理。
+        setOnTouchListener { _, event ->
+            gestureDetector.onTouchEvent(event)
+            false // 不消费，WebView 仍可正常交互
+        }
+
         settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true

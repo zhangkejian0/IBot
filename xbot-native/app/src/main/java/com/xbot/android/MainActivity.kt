@@ -48,6 +48,10 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.RequestPermission()
     ) { /* 权限结果由 MainScreenController 重读感知 */ }
 
+    private val micPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { /* 权限结果由 MainScreenController 重读感知 */ }
+
     @SuppressLint("ClickableViewAccessibility")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -83,6 +87,8 @@ class MainActivity : ComponentActivity() {
                             lifecycleOwner = this,
                             hasCameraPermission = { checkCameraPermission() },
                             onRequestCamera = { requestCameraPermission() },
+                            hasMicPermission = { checkMicPermission() },
+                            onRequestMic = { requestMicPermission() },
                             peopleProvider = { appViewModel.personRepository.people },
                         )
                         MainScreen(controller)
@@ -104,5 +110,13 @@ class MainActivity : ComponentActivity() {
 
     private fun requestCameraPermission() {
         cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+    }
+
+    private fun checkMicPermission(): Boolean =
+        ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+
+    private fun requestMicPermission() {
+        micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
     }
 }

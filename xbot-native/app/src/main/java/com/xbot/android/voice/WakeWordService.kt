@@ -43,29 +43,48 @@ class WakeWordService(
     val currentKeyword: String get() = keyword
     val isReady: Boolean get() = spotter != null
 
-    /** 初始化：构造 KeywordSpotter（从 assets）。失败仅禁用唤醒，不抛出。 */
+    /** 初始化：把模型从 assets 复制到 cacheDir，再用无 AssetManager 的构造函数加载。
+     *  原因：sherpa-onnx 的 AssetManager 构造函数无法处理 keywordsFile 的绝对路径，
+     *  会触发 native fatal（"Read binary file failed"）。故所有文件都用绝对路径。 */
     fun initialize() {
         try {
             val keywordLine = Pinyin.buildKeywordLine(keyword) ?: run {
                 Log.e(TAG, "拼音字典未覆盖「$keyword」，唤醒词初始化失败")
                 return
             }
-            // Java API 仅支持 keywordsFile（不支持内联 keywordsBuf），故把关键词行写入临时文件。
+            // 1. 把模型从 assets 复制到 cacheDir（仅 int8 + tokens）。
+            val destDir = File(context.cacheDir, "xbot_kws_model").apply { mkdirs() }
+            val filesToCopy = listOf(
+                "encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+                "decoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+                "joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+                "tokens.txt",
+            )
+            for (name in filesToCopy) {
+                val dest = File(destDir, name)
+                if (!dest.exists()) {
+                    context.assets.open("$modelDir/$name").use { input ->
+                        dest.outputStream().use { output -> input.copyTo(output) }
+                    }
+                }
+            }
+            // 2. 写关键词文件。
             val kwFile = File(context.cacheDir, "xbot_keywords.txt")
             kwFile.writeText(keywordLine)
 
+            // 3. 用绝对路径构造 config，用无 AssetManager 构造函数。
             val transducerCfg = OnlineTransducerModelConfig().apply {
-                encoder = "$modelDir/encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx"
-                decoder = "$modelDir/decoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx"
-                joiner = "$modelDir/joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx"
+                encoder = File(destDir, "encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx").absolutePath
+                decoder = File(destDir, "decoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx").absolutePath
+                joiner = File(destDir, "joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx").absolutePath
             }
             val modelCfg = OnlineModelConfig().apply {
                 transducer = transducerCfg
-                tokens = "$modelDir/tokens.txt"
+                tokens = File(destDir, "tokens.txt").absolutePath
                 numThreads = 2
                 debug = false
                 provider = "cpu"
-                modelType = ""   // 必须空！写 "zipformer" 会触发错误加载分支并崩溃
+                modelType = ""
                 modelingUnit = "cjkchar"
             }
             val cfg = KeywordSpotterConfig().apply {
@@ -77,7 +96,9 @@ class WakeWordService(
                 keywordsScore = 1.0f
                 numTrailingBlanks = 1
             }
-            spotter = KeywordSpotter(context.assets, cfg)
+            // KeywordSpotter(AssetManager, config)：AssetManager 传 null（文件从 SD 卡绝对路径加载）。
+            // sherpa native 层检查到 null 时走文件系统路径分支。
+            spotter = KeywordSpotter(null, cfg)
             Log.i(TAG, "唤醒词已加载（$keyword → $keywordLine）")
         } catch (e: Exception) {
             Log.e(TAG, "唤醒词初始化失败: ${e.message}")
