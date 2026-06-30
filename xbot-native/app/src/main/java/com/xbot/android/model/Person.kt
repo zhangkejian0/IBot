@@ -1,11 +1,13 @@
 package com.xbot.android.model
 
 import android.graphics.RectF
+import kotlinx.serialization.Serializable
 
 /**
  * 已录入的人物身份（对应 Flutter Person）。
  * 一个人物可含多张录入样本对应的多个特征向量，比对时取与任一向量的最高相似度。
  */
+@Serializable
 data class Person(
     val id: String,
     val name: String,
@@ -18,6 +20,7 @@ data class Person(
 }
 
 /** 与主人的家庭关系。 */
+@Serializable
 enum class FamilyRelation(val label: String) {
     OWNER("主人"),
     SPOUSE("配偶"),

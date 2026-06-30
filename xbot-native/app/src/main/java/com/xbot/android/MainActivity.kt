@@ -8,32 +8,45 @@ import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.lifecycleScope
+import com.xbot.android.core.AppPhase
+import com.xbot.android.core.AppViewModel
+import com.xbot.android.core.AppViewModelFactory
 import com.xbot.android.ui.MainScreen
+import com.xbot.android.ui.OnboardingScreen
 import com.xbot.android.ui.rememberMainScreenController
+import com.xbot.android.ui.XBotTheme
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 
 /**
  * 主 Activity：横屏全屏常亮 + 沉浸式。
  *
- * 阶段 0：请求相机权限 → 启动后台相机管线（FaceLandmarkEngine 推理）→
- * WebView(AssetLoader) 加载虚拟形象 → FaceBridge 注入 setGazeTarget/setState。
- *
- * 架构（对照 Flutter 的根本差异）：
- *   后台线程(camera-analysis):  CameraX ImageProxy → FrameAnalyzer → FaceLandmarkerEngine
- *                                                                     │ 主脸坐标 + blendshapes
- *                                                                     ▼
- *   主线程(Handler main):       FaceBridge.onFrame → JS 注入 → WebView 注视/表情
+ * 根据 [AppViewModel.phase] 分流：
+ * - LOADING：初始化中（短暂）
+ * - ONBOARDING：首次激活向导
+ * - READY：主界面（虚拟形象 + 视觉感知）
  */
 class MainActivity : ComponentActivity() {
 
+    private val appViewModel: AppViewModel by viewModels {
+        AppViewModelFactory(application as android.app.Application)
+    }
+
+    /** 阶段流（Compose 观察用）。 */
+    private val phaseFlow = MutableStateFlow(AppPhase.LOADING)
+
     private val cameraPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        // 权限结果由 MainScreenController.observePermissionState 感知（重组时重读）。
-    }
+    ) { /* 权限结果由 MainScreenController 重读感知 */ }
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -46,14 +59,43 @@ class MainActivity : ComponentActivity() {
             hide(WindowInsetsCompat.Type.systemBars())
         }
 
-        setContent {
-            val controller = rememberMainScreenController(
-                lifecycleOwner = this,
-                hasCameraPermission = { checkCameraPermission() },
-                onRequestCamera = { requestCameraPermission() },
-            )
-            MainScreen(controller)
+        // 后台初始化（加载人物库/主人档案）。
+        lifecycleScope.launch {
+            appViewModel.initialize()
+            phaseFlow.value = appViewModel.phase.get()
         }
+
+        setContent {
+            val phase by phaseFlow.asStateFlow().collectAsState()
+            XBotTheme {
+                when (phase) {
+                    AppPhase.LOADING, AppPhase.ERROR, AppPhase.PERMISSION_DENIED -> {
+                        com.xbot.android.ui.LoadingScreen()
+                    }
+                    AppPhase.ONBOARDING -> {
+                        OnboardingScreen(
+                            appViewModel = appViewModel,
+                            onComplete = { phaseFlow.value = AppPhase.READY },
+                        )
+                    }
+                    AppPhase.READY -> {
+                        val controller = rememberMainScreenController(
+                            lifecycleOwner = this,
+                            hasCameraPermission = { checkCameraPermission() },
+                            onRequestCamera = { requestCameraPermission() },
+                            peopleProvider = { appViewModel.personRepository.people },
+                        )
+                        MainScreen(controller)
+                    }
+                }
+            }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // 阶段可能在向导完成后变化，刷新一次。
+        phaseFlow.value = appViewModel.phase.get()
     }
 
     private fun checkCameraPermission(): Boolean =

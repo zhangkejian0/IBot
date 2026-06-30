@@ -90,12 +90,18 @@ class ObjectEngine(
     init {
         try {
             val modelBuffer = loadModelFile(context, modelPath)
-            val itp = Interpreter(modelBuffer, Interpreter.Options().setNumThreads(4))
+            // YOLO26 int8 + XNNPack delegate 在 reshape 时会崩
+            //（"Node N (TfLiteXNNPackDelegate) failed to prepare" / "Target Tensor hasn't been allocated"），
+            // 故显式禁用 XNNPack，用纯 CPU 多线程推理。
+            val opts = Interpreter.Options()
+                .setNumThreads(4)
+                .setUseXNNPACK(false)
+            val itp = Interpreter(modelBuffer, opts)
             interpreter = itp
             isInitialized = true
             val inShape = itp.getInputTensor(0).shape().toList()
             val outShape = itp.getOutputTensor(0).shape().toList()
-            Log.i(TAG, "YOLO26 已加载，inShape=$inShape outShape=$outShape")
+            Log.i(TAG, "YOLO26 已加载，inShape=$inShape outShape=$outShape（已禁用 XNNPack）")
         } catch (e: Exception) {
             Log.e(TAG, "物体识别模型加载失败: ${e.message}")
             isInitialized = false
