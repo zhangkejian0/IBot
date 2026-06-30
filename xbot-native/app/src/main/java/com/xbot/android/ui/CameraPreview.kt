@@ -34,13 +34,20 @@ fun CameraPreview(
     /** 是否激活绑定（含 Preview + 可选 ImageAnalysis）。权限未授予时应传 false。
      *  变化时会重新绑定，确保 analyzer 在权限授予后真正挂上。 */
     active: Boolean = true,
+    /** 兼容模式：用 TextureView 实现，便于父级裁剪为圆形/圆角（SurfaceView 不随父级裁剪）。 */
+    compatibleMode: Boolean = false,
     analysisExecutor: Executor? = null,
     analyzer: ((ImageProxy) -> Unit)? = null,
     onCameraBound: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    val previewView = remember { PreviewView(context).apply { scaleType = PreviewView.ScaleType.FILL_CENTER } }
+    val previewView = remember {
+        PreviewView(context).apply {
+            scaleType = PreviewView.ScaleType.FILL_CENTER
+            if (compatibleMode) implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+        }
+    }
 
     // key 同时依赖 useFront 与 active：active 由 false→true（权限授予）时必须重新绑定，
     // 否则 ImageAnalysis 不会挂上（analyzer 永远不触发）。

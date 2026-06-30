@@ -77,6 +77,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         enrollRequest.set(EnrollRequest(onCapture))
     }
 
+    /** 取消当前等待中的录入采样请求（超时/重置时调用）。 */
+    fun clearEnrollRequest() {
+        enrollRequest.set(null)
+    }
+
     /**
      * 喂入一帧 bitmap 供录入采样（向导人脸步骤调用）。
      * 检测到主脸 → 裁剪 → embed → 触发回调并清除请求。

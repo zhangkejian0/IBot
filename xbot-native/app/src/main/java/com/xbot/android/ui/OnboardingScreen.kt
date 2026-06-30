@@ -30,7 +30,12 @@ import com.xbot.android.core.AppViewModel
 import com.xbot.android.model.EnrollCapture
 import com.xbot.android.model.Gender
 import com.xbot.android.model.OwnerProfile
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.Executors
+import kotlin.coroutines.resume
 
 /**
  * 首次激活向导（5 步）。对应 Flutter OnboardingScreen。
@@ -47,15 +52,63 @@ fun OnboardingScreen(
     onComplete: () -> Unit,
 ) {
     val totalSteps = 5
+    val requiredSamples = 5
     var step by remember { mutableStateOf(0) }
+    val scope = rememberCoroutineScope()
 
     // 表单暂存。
     var nickname by remember { mutableStateOf("") }
     var robotName by remember { mutableStateOf("狗蛋") }
     var gender by remember { mutableStateOf<Gender?>(null) }
     var birthday by remember { mutableStateOf("") } // yyyy-MM-dd
-    // 人脸样本。
+    // 人脸样本 + 录入状态。
     val faceSamples = remember { mutableStateListOf<EnrollCapture>() }
+    var faceState by remember { mutableStateOf(FaceScanState.IDLE) }
+    var faceScanning by remember { mutableStateOf(false) }
+    var faceMessage by remember { mutableStateOf<String?>(null) }
+
+    // 启动人脸录入：循环采样直到达到 requiredSamples 或超时。
+    fun startFaceScan() {
+        if (!appViewModel.canEnroll) {
+            faceState = FaceScanState.FAILED
+            faceMessage = "未加载身份识别模型，可稍后在设置中补录"
+            return
+        }
+        faceScanning = true
+        faceState = FaceScanState.COLLECTING
+        faceSamples.clear()
+        faceMessage = null
+        scope.launch {
+            val deadline = System.currentTimeMillis() + 20_000
+            while (faceSamples.size < requiredSamples && System.currentTimeMillis() < deadline) {
+                val capture = withTimeoutOrNull(6_000L) {
+                    suspendCancellableCoroutine<EnrollCapture?> { cont ->
+                        cont.invokeOnCancellation { appViewModel.clearEnrollRequest() }
+                        appViewModel.requestEnrollCapture { c -> if (cont.isActive) cont.resume(c) }
+                    }
+                }
+                if (capture != null && capture.hasEmbedding) {
+                    faceSamples.add(capture)
+                    if (faceSamples.size < requiredSamples) delay(350)
+                }
+            }
+            if (faceSamples.isEmpty()) {
+                faceState = FaceScanState.FAILED
+                faceMessage = "未捕获到清晰人脸，可重试或稍后补录"
+            } else {
+                faceState = FaceScanState.SUCCESS
+                faceMessage = "记住你啦（${faceSamples.size}/$requiredSamples）"
+            }
+            faceScanning = false
+        }
+    }
+
+    fun resetFaceScan() {
+        appViewModel.clearEnrollRequest()
+        faceSamples.clear()
+        faceState = FaceScanState.IDLE
+        faceMessage = null
+    }
 
     Box(
         modifier = Modifier
@@ -101,7 +154,14 @@ fun OnboardingScreen(
                         birthday = birthday, onBirthday = { birthday = it },
                     )
                     2 -> RobotNameStep(robotName = robotName, onRobotName = { robotName = it })
-                    3 -> FaceScanStep(appViewModel = appViewModel, samples = faceSamples)
+                    3 -> FaceScanStep(
+                        appViewModel = appViewModel,
+                        samples = faceSamples,
+                        faceState = faceState,
+                        scanning = faceScanning,
+                        message = faceMessage,
+                        requiredSamples = requiredSamples,
+                    )
                     4 -> SummaryStep(
                         nickname = nickname, robotName = robotName,
                         gender = gender, birthday = birthday,
@@ -111,37 +171,66 @@ fun OnboardingScreen(
             }
             Spacer(Modifier.height(12.dp))
             // 导航按钮（固定在底部，独立 Row，不与上方内容重叠）。
+            val isLast = step == totalSteps - 1
+            val isFaceStep = step == 3
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
             ) {
                 if (step > 0) {
-                    OutlinedButton(onClick = { step-- }) { Text("上一步") }
+                    OutlinedButton(onClick = { step-- }, enabled = !faceScanning) { Text("上一步") }
                 } else {
                     Spacer(Modifier.width(1.dp))
                 }
-                Button(
-                    onClick = {
-                        if (step < totalSteps - 1) {
-                            step++
-                        } else {
-                            // 完成。
-                            appViewModel.completeOnboarding(
-                                profile = OwnerProfile(
-                                    nickname = nickname.ifBlank { "主人" },
-                                    robotName = robotName.ifBlank { "狗蛋" },
-                                    gender = gender,
-                                    birthday = birthday.ifBlank { null },
-                                ),
-                                faceSamples = faceSamples.toList(),
-                            )
-                            onComplete()
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    // 人脸步骤已有样本时提供「重新录入」次级入口。
+                    if (isFaceStep && faceSamples.isNotEmpty() && !faceScanning) {
+                        TextButton(onClick = { resetFaceScan() }) { Text("重新录入") }
+                        Spacer(Modifier.width(8.dp))
+                    }
+                    // 主按钮：人脸步骤复用为「开始录入/采集中/继续」。
+                    val primaryLabel: String
+                    val primaryAction: (() -> Unit)?
+                    if (isFaceStep) {
+                        when {
+                            faceScanning -> {
+                                primaryLabel = "采集中…（${faceSamples.size}/$requiredSamples）"
+                                primaryAction = null
+                            }
+                            faceSamples.isEmpty() -> {
+                                primaryLabel = "开始录入"
+                                primaryAction = { startFaceScan() }
+                            }
+                            else -> {
+                                primaryLabel = "继续"
+                                primaryAction = { step++ }
+                            }
                         }
-                    },
-                    // 第一步需昵称非空才可继续。
-                    enabled = step != 1 || nickname.isNotBlank(),
-                ) {
-                    Text(if (step == totalSteps - 1) "完成" else "下一步")
+                    } else {
+                        primaryLabel = if (isLast) "完成" else "下一步"
+                        primaryAction = if (step == 1 && nickname.isBlank()) {
+                            null
+                        } else if (isLast) {
+                            {
+                                appViewModel.completeOnboarding(
+                                    profile = OwnerProfile(
+                                        nickname = nickname.ifBlank { "主人" },
+                                        robotName = robotName.ifBlank { "狗蛋" },
+                                        gender = gender,
+                                        birthday = birthday.ifBlank { null },
+                                    ),
+                                    faceSamples = faceSamples.toList(),
+                                )
+                                onComplete()
+                            }
+                        } else {
+                            { step++ }
+                        }
+                    }
+                    Button(onClick = { primaryAction?.invoke() }, enabled = primaryAction != null) {
+                        Text(primaryLabel)
+                    }
                 }
             }
         }
@@ -229,10 +318,16 @@ private fun RobotNameStep(robotName: String, onRobotName: (String) -> Unit) {
 }
 
 @Composable
-private fun FaceScanStep(appViewModel: AppViewModel, samples: MutableList<EnrollCapture>) {
+private fun FaceScanStep(
+    appViewModel: AppViewModel,
+    samples: MutableList<EnrollCapture>,
+    faceState: FaceScanState,
+    scanning: Boolean,
+    message: String?,
+    requiredSamples: Int,
+) {
     val context = LocalContext.current
     var hasCamera by remember { mutableStateOf(false) }
-    var status by remember { mutableStateOf("请正对摄像头…") }
 
     val permLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -245,59 +340,95 @@ private fun FaceScanStep(appViewModel: AppViewModel, samples: MutableList<Enroll
         if (!granted) permLauncher.launch(Manifest.permission.CAMERA)
     }
 
-    // 请求一次采样；收到后加入列表并再请求一次（采 3 张）。
-    LaunchedEffect(hasCamera, samples.size) {
-        if (!hasCamera || !appViewModel.canEnroll) return@LaunchedEffect
-        if (samples.size >= 3) { status = "已采集 ${samples.size} 张，可继续"; return@LaunchedEffect }
-        status = "采集中…（${samples.size}/3）"
-        appViewModel.requestEnrollCapture { capture ->
-            if (capture != null && capture.hasEmbedding) {
-                samples.add(capture)
-            }
-        }
-    }
-
     // 后台帧分析 executor：把每帧喂给 tryEnrollFrame 驱动录入采样。
     val analysisExecutor = remember {
         Executors.newSingleThreadExecutor { Thread(it, "xbot-enroll").apply { isDaemon = true } }
     }
     DisposableEffect(Unit) { onDispose { analysisExecutor.shutdown() } }
 
+    val accent = Color(0xFF0A84FF)
+    val green = Color(0xFF30D158)
+    val red = Color(0xFFFF453A)
+    val statusColor = when (faceState) {
+        FaceScanState.SUCCESS -> green
+        FaceScanState.FAILED, FaceScanState.DUPLICATE -> red
+        else -> accent
+    }
+    val title = when (faceState) {
+        FaceScanState.COLLECTING -> if (scanning) "采集中…请保持稳定" else "请将面部正对摄像头"
+        FaceScanState.SUCCESS -> "录入成功"
+        FaceScanState.FAILED -> "录入失败"
+        FaceScanState.DUPLICATE -> "已认识"
+        FaceScanState.IDLE -> "录入面部"
+    }
+    val subtitle = when (faceState) {
+        FaceScanState.COLLECTING ->
+            if (scanning) "已采集 ${samples.size}/$requiredSamples · 请缓慢转动头部"
+            else "保持光线充足，动作放缓"
+        FaceScanState.FAILED -> message ?: "未捕获到清晰人脸，可重试或稍后补录"
+        FaceScanState.DUPLICATE -> message ?: "这张脸我已认识啦"
+        FaceScanState.SUCCESS -> message ?: "记住你啦，下次见一定认得你"
+        FaceScanState.IDLE -> "让机器人认出你是谁"
+    }
+
     Row(modifier = Modifier.fillMaxSize()) {
-        // 左：可见相机预览（Preview use case）+ 同时绑 ImageAnalysis 喂帧。
-        // active = hasCamera：权限授予后 hasCamera 由 false→true，触发 CameraPreview 重新绑定，
-        // 确保 ImageAnalysis 的 analyzer 真正挂上（否则采集中永远不动）。
-        CameraPreview(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxHeight(),
-            useFront = true,
-            active = hasCamera,
-            analysisExecutor = analysisExecutor,
-            analyzer = { image ->
-                val bmp = image.toBitmapOrNull()
-                if (bmp != null) appViewModel.tryEnrollFrame(bmp)
-                image.close()
-            },
-        )
-        Spacer(Modifier.width(16.dp))
-        // 右：说明与采集状态。
+        // 左：Face-ID 风格扫描环（圆形相机预览 + 放射刻度）。
+        Box(
+            modifier = Modifier.weight(1f).fillMaxHeight().padding(8.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            FaceScanRing(
+                state = faceState,
+                progress = samples.size / requiredSamples.toFloat(),
+                scanning = scanning,
+                cameraActive = hasCamera,
+                analysisExecutor = analysisExecutor,
+                analyzer = { image ->
+                    val bmp = image.toBitmapOrNull()
+                    if (bmp != null) appViewModel.tryEnrollFrame(bmp)
+                    image.close()
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+        // 右：状态提示卡 + 说明（操作按钮复用全局底部栏）。
         Column(
-            modifier = Modifier.width(220.dp).fillMaxHeight(),
+            modifier = Modifier
+                .width(300.dp)
+                .fillMaxHeight()
+                .verticalScroll(rememberScrollState())
+                .padding(start = 20.dp, end = 20.dp),
             verticalArrangement = Arrangement.Center,
         ) {
-            StepTitle("认识我", "对着摄像头采集人脸")
-            Spacer(Modifier.height(16.dp))
-            Text(
-                status,
-                color = if (samples.size >= 3) MaterialTheme.colorScheme.primary else Color.White,
-            )
-            if (!hasCamera) {
-                Text("等待摄像头权限…", color = Color.Gray)
+            // 状态提示卡。
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFF1C1C1E), RoundedCornerShape(12.dp))
+                    .padding(14.dp),
+            ) {
+                Text(title, color = statusColor, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(4.dp))
+                Text(subtitle, color = Color(0xFF9A9AA0), fontSize = 12.sp)
             }
-            if (samples.size >= 3) {
-                Spacer(Modifier.height(8.dp))
-                Text("✅ 录入完成（${samples.size} 张）", color = MaterialTheme.colorScheme.primary)
+            Spacer(Modifier.height(18.dp))
+            Text("说明", color = Color(0xFF9A9AA0), fontSize = 12.sp, fontWeight = FontWeight.Medium)
+            Spacer(Modifier.height(8.dp))
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFF1C1C1E), RoundedCornerShape(12.dp))
+                    .padding(14.dp),
+            ) {
+                Text(
+                    "点击「开始录入」后，相机将自动采集多帧人脸样本；建议缓慢转动头部以提升识别稳定性。人脸数据仅保存在本机，不会上传。",
+                    color = Color(0xFF9A9AA0),
+                    fontSize = 13.sp,
+                )
+            }
+            if (!hasCamera) {
+                Spacer(Modifier.height(12.dp))
+                Text("等待摄像头权限…", color = Color.Gray, fontSize = 12.sp)
             }
         }
     }
