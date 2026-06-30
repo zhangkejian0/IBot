@@ -38,7 +38,7 @@ android {
         compose = true
     }
 
-    // MediaPipe tasks-vision / TFLite 需要从 assets 读取 .task / .tflite，开启不解压。
+    // MediaPipe tasks-vision / TFLite / sherpa-onnx 需要从 assets 读取 .task/.tflite/.onnx，开启不解压。
     androidResources {
         noCompress += listOf("task", "tflite", "onnx")
     }
@@ -53,6 +53,9 @@ kotlin {
 }
 
 dependencies {
+    // —— 本地 AAR：sherpa-onnx（唤醒词 KWS，预编译 AAR 放 app/libs/）——
+    implementation(files("libs/sherpa-onnx.aar"))
+
     // —— 相机：CameraX（取流在后台 executor，这是换原生的核心动机）——
     val cameraxVersion = "1.4.2"
     implementation("androidx.camera:camera-core:$cameraxVersion")

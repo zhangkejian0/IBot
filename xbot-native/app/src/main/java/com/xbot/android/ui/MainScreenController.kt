@@ -38,6 +38,8 @@ class MainScreenController(
     private val lifecycleOwner: LifecycleOwner,
     private val hasCameraPermission: () -> Boolean,
     private val onRequestCamera: () -> Unit,
+    private val hasMicPermission: () -> Boolean,
+    private val onRequestMic: () -> Unit,
     peopleProvider: () -> List<Person> = { emptyList() },
 ) {
     companion object {
@@ -50,6 +52,22 @@ class MainScreenController(
 
     var faceWebView: FaceWebView? = null
         private set
+
+    /** 语音助手（唤醒 + 流式 STT + Pophie + 流式 TTS）。 */
+    val voiceAssistant = com.xbot.android.voice.VoiceAssistant(
+        context = context,
+        onStateChange = { state, robotState ->
+            // 语音状态/robotState → FaceBridge（语音优先级最高，接管表情 + 嘴部）。
+            faceWebView?.bridge?.apply {
+                voiceActive = state.isActive
+                voiceState = robotState ?: state.faceState
+            }
+        },
+        onLevel = { lvl ->
+            // 语音音量（listening 用麦音量，speaking 用 TTS 音量）→ FaceBridge 嘴部。
+            faceWebView?.bridge?.voiceLevel = lvl
+        },
+    )
 
     private val cameraManager = CameraManager(context)
 
