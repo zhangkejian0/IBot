@@ -17,6 +17,25 @@ import 'streaming_tts_player.dart';
 import 'voice_state.dart';
 import 'wake_word_service.dart';
 
+/// 触发来源标识 → 可读中文名(供交互日志 message 展示)。
+///
+/// 与网络日志(NetworkLogEntry.trigger)使用同一套短字符串值：
+/// 端侧主动对话 wake/double_tap/gaze/manual，服务端主动播报 proactive:*。
+const Map<String, String> _triggerLabels = {
+  'wake': '唤醒词',
+  'double_tap': '双击',
+  'gaze': '注视',
+  'manual': '手动',
+  'proactive:welcome': '欢迎语',
+  'proactive:reminder': '定时提醒',
+  'proactive:living_loop': '主动陪伴',
+  'proactive:poll': '主动消息轮询',
+};
+
+/// 把任意触发来源标识转成可读中文名(未知值原样返回)。
+String triggerLabel(String source) =>
+    _triggerLabels[source] ?? source;
+
 /// 语音助手编排器:本地唤醒(KWS)+ 麦克风采集 + Pophie 后端对话。
 /// 以一个有限状态机对外暴露 [state] / [userText] / [replyText] / [level]。
 ///
@@ -102,6 +121,12 @@ class VoiceAssistant extends ChangeNotifier {
   /// 机器人最近一次回复携带的 FSM 状态(驱动虚拟形象，文档 §2.6)。
   String? _robotState;
   String? get robotState => _robotState;
+
+  /// 当前轮对话的触发来源标识(wake/double_tap/gaze/manual/proactive:*)。
+  /// 在 _onWake / _playProactive 入口设置，随每个网络请求透传给 PophieClient
+  /// 写入网络日志；一轮结束 finally 清回 null，避免残留串到下一轮。
+  String? _triggerSource;
+  String? get triggerSource => _triggerSource;
 
   VoiceState _state = VoiceState.idle;
   VoiceState get state => _state;
@@ -243,16 +268,22 @@ class VoiceAssistant extends ChangeNotifier {
   }
 
   /// 手动触发一轮对话(不依赖唤醒词,供按钮/调试使用)。
-  Future<void> triggerManually() async {
+  /// [source] 为触发来源标识,用于网络/交互日志区分是谁触发的(默认 manual)。
+  Future<void> triggerManually({String source = 'manual'}) async {
     if (!_running) return;
-    _onWake(wakeWord.keyword);
+    _onWake(wakeWord.keyword, source: source);
   }
 
   /// 唤醒回调:进入对话主流程。
   /// idle → waking → listening → thinking → speaking → idle
-  void _onWake(String keyword) {
-    debugPrint('[VoiceAssistant] wake word: $keyword');
-    conversationLog.log('wake', '唤醒词: $keyword');
+  /// [source] 触发来源标识(wake=唤醒词 / double_tap / gaze / manual)，
+  /// 透传给 PophieClient 写入网络日志，并体现在交互日志 message 里。
+  void _onWake(String keyword, {String source = 'wake'}) {
+    debugPrint('[VoiceAssistant] wake word: $keyword (source=$source)');
+    _triggerSource = source;
+    pophie.setTriggerSource(source);
+    conversationLog.log('wake', '触发对话: ${triggerLabel(source)}'
+        '${source == 'wake' ? '(唤醒词「$keyword」)' : ''}');
     if (streamingSttEnabled) {
       _runStreamingConversation();
     } else {
@@ -410,6 +441,8 @@ class VoiceAssistant extends ChangeNotifier {
       _userText = '';
       _replyText = '';
       _robotState = null;
+      _triggerSource = null;
+      pophie.setTriggerSource(null);
       audio.externalLevel = false;
       audio.level.value = 0.0;
       final wasBarged = _bargeInTriggered;
@@ -607,6 +640,8 @@ class VoiceAssistant extends ChangeNotifier {
       _userText = '';
       _replyText = '';
       _robotState = null;
+      _triggerSource = null;
+      pophie.setTriggerSource(null);
       audio.externalLevel = false;
       audio.level.value = 0.0;
       _setState(VoiceState.idle);
@@ -1178,11 +1213,18 @@ class VoiceAssistant extends ChangeNotifier {
   /// [_playStreamingTts] 内部会自动回退批量 /api/tts + playTts。
   Future<void> _playProactive(ProactiveMessage msg) async {
     if (!_running) return;
+    // 主动播报的触发来源:由后端 metadata.trigger 归一化得到(welcome/reminder/
+    // living_loop)，统一加 proactive: 前缀，与端侧触发区分。
+    final type = msg.triggerType ?? 'unknown';
+    final source = 'proactive:$type';
+    _triggerSource = source;
+    pophie.setTriggerSource(source);
     try {
       _setState(VoiceState.speaking); // 复用 speaking 态驱动虚拟宠物嘴型
       _replyText = msg.content; // 复用气泡字幕字段,UI 无需改
       notifyListeners();
-      conversationLog.log('proactive', '主动提醒: ${msg.content}');
+      conversationLog.log('proactive',
+          '主动提醒[${triggerLabel(source)}]: ${msg.content}');
 
       // 流式合成播报(内部含停麦/启麦与批量回退,同主对话范式)。
       await _playStreamingTts(text: msg.content);
@@ -1199,6 +1241,8 @@ class VoiceAssistant extends ChangeNotifier {
         _consecutiveBargeIns = 0;
       }
       _replyText = '';
+      _triggerSource = null;
+      pophie.setTriggerSource(null);
       audio.level.value = 0.0;
       _setState(VoiceState.idle);
       // _playStreamingTts 播放时停了麦,这里重启(唤醒与聆听前置条件)。

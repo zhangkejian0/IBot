@@ -94,7 +94,7 @@ class CameraScreen extends StatelessWidget {
                 }
                 // 仅在 idle 时触发,避免聆听/思考/播报中重复触发。
                 if (v.isRunning && v.state == VoiceState.idle) {
-                  await v.triggerManually();
+                  await v.triggerManually(source: 'double_tap');
                 }
               },
             ),

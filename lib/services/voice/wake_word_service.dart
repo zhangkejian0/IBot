@@ -26,8 +26,8 @@ class WakeWordService {
   bool _running = false;
   bool get isRunning => _running;
 
-  /// 当前唤醒词(默认"你好",可在设置页修改)。
-  String _keyword = '你好';
+  /// 当前唤醒词(默认"你好小白",可在设置页修改)。
+  String _keyword = '你好小白';
   String get keyword => _keyword;
 
   /// 检测到唤醒词时触发(主回调)。由 [VoiceAssistant] 订阅以进入 waking 态。

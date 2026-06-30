@@ -718,6 +718,12 @@ el('clear').onclick=async function(){
   .m-POST { background: rgba(79,156,249,.15); color: var(--accent); }
   .m-PUT { background: rgba(255,159,10,.15); color: var(--orange); }
   .m-DELETE { background: rgba(255,69,58,.15); color: var(--red); }
+  /* 触发来源 tag 配色：端侧主动对话 / 服务端主动播报 各一档色 */
+  .tg-wake { background: rgba(255,214,10,.15); color: var(--yellow); }
+  .tg-double_tap { background: rgba(100,210,255,.15); color: var(--teal); }
+  .tg-gaze { background: rgba(191,90,242,.15); color: var(--purple); }
+  .tg-manual { background: rgba(154,160,170,.15); color: var(--sub); }
+  .tg-proactive { background: rgba(255,159,10,.15); color: var(--orange); }
   .ok { color: var(--green); font-weight: 600; }
   .bad { color: var(--red); font-weight: 600; }
   .path { color: var(--teal); word-break: break-all; }
@@ -760,6 +766,7 @@ el('clear').onclick=async function(){
       <th style="width:70px">方法</th>
       <th style="width:60px">状态</th>
       <th>路径</th>
+      <th style="width:100px">触发</th>
       <th style="width:80px">耗时</th>
       <th style="width:90px">体量</th>
       <th>请求 / 响应</th>
@@ -784,6 +791,23 @@ function fmtBytes(n){
   if(n<1024) return n+' B';
   if(n<1048576) return (n/1024).toFixed(1)+' KB';
   return (n/1048576).toFixed(2)+' MB';
+}
+// 触发来源标识 → {cls, label}。null/空 → 灰色短横(非语音请求)。
+// proactive:* 统一归 tg-proactive 色，label 显示细分类型。
+function fmtTrigger(t){
+  if(!t) return '<span class="muted">-</span>';
+  var label = {
+    'wake':'唤醒词','double_tap':'双击','gaze':'注视','manual':'手动',
+    'proactive:welcome':'欢迎语','proactive:reminder':'定时提醒',
+    'proactive:living_loop':'主动陪伴','proactive:poll':'消息轮询'
+  }[t];
+  if(!label){
+    // 未知值(含 proactive:未知前缀)原样兜底显示。
+    if(t.indexOf('proactive:')===0) label = t.slice('proactive:'.length) || '主动';
+    else label = t;
+  }
+  var cls = t.indexOf('proactive:')===0 ? 'tg-proactive' : ('tg-'+t);
+  return '<span class="tag '+cls+'">'+esc(label)+'</span>';
 }
 async function loadDates(){
   var r = await fetch('/api/net/dates'); var j = await r.json();
@@ -825,6 +849,7 @@ function render(){
       : (e.statusCode!=null
           ? '<span class="'+(e.statusCode<400?'ok':'bad')+'">'+e.statusCode+'</span>'
           : '<span class="muted">-</span>');
+    var trigger = fmtTrigger(e.trigger);
     var bytes = '';
     if(e.requestBytes!=null) bytes += '<div class="muted">↑ '+fmtBytes(e.requestBytes)+'</div>';
     if(e.responseBytes!=null) bytes += '<div class="muted">↓ '+fmtBytes(e.responseBytes)+'</div>';
@@ -840,6 +865,7 @@ function render(){
       '<td><span class="tag m-'+esc(e.method)+'">'+esc(e.method)+'</span></td>'+
       '<td>'+status+'</td>'+
       '<td class="path">'+esc(e.path||e.url)+'</td>'+
+      '<td>'+trigger+'</td>'+
       '<td class="dur">'+(e.durationMs!=null? e.durationMs+' ms':'')+'</td>'+
       '<td>'+bytes+'</td>'+
       '<td>'+detail+'</td>';

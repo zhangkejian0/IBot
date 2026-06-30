@@ -89,7 +89,7 @@ class DisplaySettings {
   /// 自动发起一轮语音交互。需 voiceEnabled 开启才生效。默认开。
   bool gazeTriggerEnabled = true;
   /// 唤醒词(可在设置页修改,运行时生效)。
-  String wakeWord = '你好';
+  String wakeWord = '你好小白';
   /// 云端服务 API Key(阿里云 ASR/TTS、LLM;阶段 3+ 使用,首版可留空占位)。
   String? asrApiKey;
   String? llmApiKey;
@@ -973,8 +973,8 @@ class AppController extends ChangeNotifier {
   /// 注视触发:持续正视机器人超过 [AppTuning.gazeTriggerSeconds] 秒,且度过冷却期,
   /// 且语音助手空闲可交互时,自动发起一轮对话(无需唤醒词)。
   ///
-  /// 多重门槛(实测单看 gaze 半径偏易触发,故叠加收紧,详见常量区注释):
-  /// gaze 在正视圆内 + 行为态 focused + 人脸居中,三者同时满足才累计注视时长。
+  /// 双重门槛(详见 [_isLookingAtRobot] 与 [AppTuning] 常量区注释):
+  /// gaze 在正视圆内 + 人脸居中,两者同时满足才累计注视时长。
   void _maybeGazeTrigger() {
     // 前置:开关 + 语音助手在运行且空闲(不在对话中)。
     if (!settings.gazeTriggerEnabled || !settings.voiceEnabled) return;
@@ -1000,7 +1000,7 @@ class AppController extends ChangeNotifier {
         _gazeLookingSince = null;
         _gazeLastTrigger = now;
         debugPrint('[AppController] 注视触发对话(持续正视 $held秒)');
-        voice.triggerManually();
+        voice.triggerManually(source: 'gaze');
       }
     } else {
       // 未正视:记录离开时刻;超过容错秒数才真正重置(允许瞬间偏移)。
@@ -1011,15 +1011,18 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  /// 是否正视机器人(多重门槛):gaze 落在正视圆内 + 行为态 focused + 人脸居中。
+  /// 是否正视机器人(双重门槛):gaze 落在正视圆内 + 人脸居中。
+  ///
+  /// 历史版本还要求「行为态 focused」(头不动 + 眼不游移连续数秒)，但该条件
+  /// 过严(gaze 自然抖动常致 gazeStd 超阈值而进不了 focused)，导致即便把
+  /// [AppTuning.gazeTriggerRadius] 放到 0.50 也从不触发。现已移除该门槛，
+  /// 仅靠 gaze 半径 + 人脸居中 + 持续时长 + 冷却期 控制。
   bool _isLookingAtRobot(FaceOverlay face) {
-    // 1. gaze 在正视特征点附近(收紧半径 0.10)。
+    // 1. gaze 在正视特征点附近(半径见 [AppTuning.gazeTriggerRadius])。
     final dx = face.gazeX - AppTuning.gazeCenterX;
     final dy = face.gazeY - AppTuning.gazeCenterY;
     if (math.sqrt(dx * dx + dy * dy) >= AppTuning.gazeTriggerRadius) return false;
-    // 2. 行为态为专注(人静止专注,排除边走动边瞥一眼)。
-    if (_behavior.state != BehaviorState.focused) return false;
-    // 3. 人脸较居中(排除侧着脸正对镜头的误判)。
+    // 2. 人脸较居中(排除侧着脸正对镜头的误判)。
     final cx = face.boundingBox.center.dx;
     if ((cx - 0.5).abs() > AppTuning.faceCenterTolerance) return false;
     return true;

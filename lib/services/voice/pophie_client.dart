@@ -188,6 +188,7 @@ class ProactiveMessage {
     required this.id,
     required this.content,
     this.createdAt,
+    this.triggerType,
   });
 
   /// 消息唯一 id(增量轮询游标,下次 since_id 用)。
@@ -196,6 +197,13 @@ class ProactiveMessage {
   final String content;
   /// 创建时间(服务端 created_at)。
   final DateTime? createdAt;
+
+  /// 主动消息的来源类型(归一化):welcome / reminder / living_loop。
+  ///
+  /// 由后端 conversations.metadata.trigger 解析：welcome/reminder 为字符串；
+  /// 主动感知陪伴(Living Loop)的 trigger 是感知 signal 字典，统一归为
+  /// living_loop。解析失败时为 null。
+  final String? triggerType;
 
   factory ProactiveMessage.fromJson(Map<String, dynamic> json) {
     DateTime? createdAt;
@@ -209,8 +217,32 @@ class ProactiveMessage {
       id: (json['id'] as num?)?.toInt() ?? 0,
       content: json['content'] as String? ?? '',
       createdAt: createdAt,
+      triggerType: _parseProactiveTriggerType(json['metadata']),
     );
   }
+}
+
+/// 把后端 conversations.metadata.trigger 归一化为 proact
+/// 类型字符串。
+///
+/// - {"trigger":"welcome"} → "welcome"
+/// - {"trigger":"reminder"} → "reminder"
+/// - {"trigger":{...感知signal...}}(Living Loop) → "living_loop"
+/// - 其它/缺失 → null
+String? _parseProactiveTriggerType(Object? metadata) {
+  if (metadata is! Map) return null;
+  final trigger = metadata['trigger'];
+  if (trigger is String) {
+    final t = trigger.trim();
+    if (t == 'welcome') return 'welcome';
+    if (t == 'reminder') return 'reminder';
+    // 其它字符串类型的 trigger 也按其字面值归一化(保险)。
+    if (t.isNotEmpty) return t;
+    return null;
+  }
+  // Living Loop 的 trigger 是感知 signal 字典(非字符串)。
+  if (trigger is Map) return 'living_loop';
+  return null;
 }
 
 /// `/api/proactive_messages` 的轮询结果(文档 §3.8)。
@@ -265,6 +297,21 @@ class PophieClient {
     _config = _config.copyWith(sessionId: id);
   }
 
+  /// 当前轮语音交互的触发来源标识(由 VoiceAssistant 透传)，随每个请求写入
+  /// options.extra，由 [NetworkLogInterceptor] 捕获进网络日志。null 表示无关联。
+  ///
+  /// 取值：wake / double_tap / gaze / manual / proactive:* / proactive:poll。
+  /// 一轮对话/播报开始时设置，结束时由 VoiceAssistant 清回 null。
+  String? _triggerSource;
+  void setTriggerSource(String? source) {
+    _triggerSource = (source == null || source.isEmpty) ? null : source;
+  }
+
+  /// 构造注入触发来源的 Options.extra map(与现有 extra 合并)。
+  Map<String, dynamic> _triggerExtra() => {
+    NetworkLogInterceptor.triggerKey: _triggerSource,
+  };
+
   bool get isConfigured => _config.isValid;
 
   /// 健康检查(文档 §3.1)。返回语音是否可用，失败返回 false。
@@ -309,6 +356,11 @@ class PophieClient {
           'since_id': sinceId,
           'limit': limit,
         },
+        // 轮询请求固定标识为 proactive:poll，独立于当前对话的 _triggerSource
+        // (轮询可能发生在任意对话阶段，语义上是"拉取主动消息"而非某次对话)。
+        options: Options(extra: {
+          NetworkLogInterceptor.triggerKey: 'proactive:poll',
+        }),
       );
       final data = r.data ?? const {};
       final items = (data['items'] as List?)
@@ -346,6 +398,7 @@ class PophieClient {
       options: Options(
         contentType: Headers.jsonContentType,
         receiveTimeout: const Duration(seconds: 20),
+        extra: _triggerExtra(),
       ),
     );
     final data = r.data ?? const {};
@@ -408,6 +461,7 @@ class PophieClient {
           // 流式合成本身长时,放宽接收超时;首字到达后即有数据,不会触发。
           receiveTimeout: const Duration(seconds: 40),
           headers: {'Accept': 'application/x-ndjson'},
+          extra: _triggerExtra(),
         ),
       );
     } on DioException catch (e) {
@@ -520,7 +574,10 @@ class PophieClient {
     final r = await _dio.post<Map<String, dynamic>>(
       '${_config.baseUrl}/api/chat',
       data: body,
-      options: Options(contentType: Headers.jsonContentType),
+      options: Options(
+        contentType: Headers.jsonContentType,
+        extra: _triggerExtra(),
+      ),
     );
     final data = r.data ?? const {};
 
@@ -629,6 +686,7 @@ class PophieClient {
           // LLM 流式生成本身长时,放宽接收超时;首个 speak 到达后即有数据。
           receiveTimeout: const Duration(seconds: 60),
           headers: {'Accept': 'application/x-ndjson'},
+          extra: _triggerExtra(),
         ),
       );
     } on DioException catch (e) {

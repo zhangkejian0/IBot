@@ -27,6 +27,7 @@ class NetworkLogEntry {
     this.requestBytes,
     this.responseBytes,
     this.error,
+    this.trigger,
   });
 
   /// 记录时刻(本地时间)，即请求发起时间。
@@ -68,6 +69,13 @@ class NetworkLogEntry {
   /// 错误信息(超时/连接失败/非 2xx 等)。成功时为 null。
   final String? error;
 
+  /// 触发本次请求的语音交互来源标识(由 VoiceAssistant 透传)。
+  ///
+  /// 端侧主动对话：wake(唤醒词) / double_tap(双击) / gaze(注视) / manual(手动)。
+  /// 服务端主动播报：proactive:welcome / proactive:reminder / proactive:living_loop，
+  /// 或 proactive:poll(主动消息轮询本身)。与语音交互无关的请求(如健康检查)为 null。
+  final String? trigger;
+
   bool get ok => error == null && statusCode != null && statusCode! < 400;
 
   Map<String, dynamic> toJson() {
@@ -86,6 +94,7 @@ class NetworkLogEntry {
     if (requestBytes != null) map['requestBytes'] = requestBytes;
     if (responseBytes != null) map['responseBytes'] = responseBytes;
     if (error != null) map['error'] = error;
+    if (trigger != null) map['trigger'] = trigger;
     return map;
   }
 
@@ -108,6 +117,7 @@ class NetworkLogEntry {
       requestBytes: (json['requestBytes'] as num?)?.toInt(),
       responseBytes: (json['responseBytes'] as num?)?.toInt(),
       error: json['error'] as String?,
+      trigger: json['trigger'] as String?,
     );
   }
 }
