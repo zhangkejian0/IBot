@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="background">#FF000000</color>
+    <color name="surface">#FF1C1C1E</color>
+    <color name="text_primary">#FFFFFFFF</color>
+    <color name="text_secondary">#FF8E8E93</color>
+    <color name="accent_blue">#FF0A84FF</color>
+    <color name="accent_green">#FF30D158</color>
+    <color name="accent_orange">#FFFF9F0A</color>
+    <color name="accent_yellow">#FFFFD60A</color>
+    <color name="accent_teal">#FF64D2FF</color>
+    <color name="accent_purple">#FFBF5AF2</color>
+    <color name="accent_red">#FFFF453A</color>
+    <color name="separator">#FF38383A</color>
+    <color name="card_row">#FF2C2C2E</color>
+    <color name="grouped_background">#FF1C1C1E</color>
+    <!-- Flutter _RoundIconButton: black 42% + white 12% border -->
+    <color name="round_icon_bg">#6B000000</color>
+    <color name="round_icon_border">#1FFFFFFF</color>
+</resources>

@@ -1,0 +1,10 @@
+# 语音助手本地唤醒模型存放目录
+#
+# 阶段 2 接入 sherpa-onnx KWS 时,把以下文件放入此目录:
+#   - *.onnx        关键词检测模型(open-vocabulary KWS)
+#   - tokens.txt    模型对应的 token 表
+#   - keywords.txt  唤醒词文本(可配置,运行时可改)
+#
+# 推荐模型(中文,体积小):
+#   sherpa-onnx-kws-zephyr-7B / sherpa-onnx-kws-multi-zh-hans
+# 详见 https://k2-fsa.github.io/sherpa/onnx/kws/index.html
