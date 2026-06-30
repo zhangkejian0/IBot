@@ -1,154 +1,115 @@
 package com.xbot.android.camera
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.util.Log
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
-import androidx.camera.core.Preview
+import androidx.camera.core.ImageProxy
 import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
-import com.xbot.android.detection.FaceDetector
-import com.xbot.android.detection.FaceRecognizer
-import com.xbot.android.detection.HandDetector
-import com.xbot.android.detection.PoseDetector
-import com.xbot.android.model.DetectionResult
 import java.util.concurrent.Executors
 
 /**
- * 相机管理器:CameraX 绑定 + ImageAnalysis 后台线程取流 + Preview 预览。
+ * 相机管理：CameraX ImageAnalysis 绑定到**后台 executor**（换原生的核心动机）。
  *
- * 同时绑定两个 use case:
- * - Preview:显示在 PreviewView 上(调试模式用)
- * - ImageAnalysis:后台 executor 推理(始终运行)
+ * 对应 Flutter 的 CameraController + 按需采样。原生方案的根本差异：
+ * - 相机帧投递到绑定时指定的后台 executor（[analysisExecutor]），全程不碰主线程。
+ * - 推理在同一后台线程完成（见 [FrameAnalyzer]），不经过任何 platform channel。
+ * - STRATEGY_KEEP_ONLY_LATEST 自动丢帧，无堆积，**无 CameraX session 重建**。
+ *
+ * 故不再需要 Flutter 的「按需采样」补丁（300ms 定时开/关流）——恢复成持续帧流。
  */
-class CameraManager(
-    private val context: Context,
-    private val lifecycleOwner: LifecycleOwner
-) {
+class CameraManager(private val context: Context) {
+
     companion object {
         private const val TAG = "CameraManager"
     }
 
-    private val analysisExecutor = Executors.newSingleThreadExecutor()
+    /** 后台单线程 executor：相机帧投递 + 推理都在这里。 */
+    private val analysisExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "xbot-camera-analysis").apply { isDaemon = true }
+    }
+
     private var cameraProvider: ProcessCameraProvider? = null
+    private var imageAnalysis: ImageAnalysis? = null
+    private var analyzer: FrameAnalyzer? = null
 
-    // 检测引擎
-    private lateinit var faceDetector: FaceDetector
-    private lateinit var handDetector: HandDetector
-    private lateinit var poseDetector: PoseDetector
-    private lateinit var faceRecognizer: FaceRecognizer
-    private lateinit var frameAnalyzer: FrameAnalyzer
+    /** 是否使用前置摄像头（陪伴场景对着用户，默认前置）。 */
+    var useFrontCamera: Boolean = true
+        private set
 
-    /** 摄像头预览 View,供调试模式显示 */
-    var previewView: PreviewView? = null
+    /** 当前是否已绑定取流。 */
+    @Volatile
+    var isRunning: Boolean = false
         private set
 
     /**
-     * 初始化并启动相机管线。
-     * @param onResult 每帧检测结果回调(在后台线程触发)
-     * @param onInitialized 初始化完成回调(在主线程)
+     * 启动相机管线：绑定 ImageAnalysis 到后台 executor。
+     *
+     * @param lifecycleOwner CameraX 要求绑定到生命周期
+     * @param analyzer 帧分析器（在后台线程被回调）
+     * @param useFront 是否前置摄像头
      */
+    @SuppressLint("RestrictedApi")
     fun start(
-        onResult: (DetectionResult, Long) -> Unit,
-        onInitialized: (() -> Unit)? = null
+        lifecycleOwner: LifecycleOwner,
+        analyzer: FrameAnalyzer,
+        useFront: Boolean = true,
     ) {
-        // 创建 PreviewView(调试模式用)
-        previewView = PreviewView(context).apply {
-            scaleType = PreviewView.ScaleType.FILL_CENTER
-        }
-
-        // 先在后台线程初始化检测引擎,完成后再绑定相机。
-        // 避免竞态:bindCamera 时 frameAnalyzer 未就绪导致 setAnalyzer 被跳过。
-        analysisExecutor.execute {
+        this.useFrontCamera = useFront
+        this.analyzer = analyzer
+        val future = ProcessCameraProvider.getInstance(context)
+        future.addListener({
             try {
-                faceDetector = FaceDetector(context, "models/face_landmarker.task")
-                handDetector = HandDetector(context, "models/hand_landmarker.task")
-                poseDetector = PoseDetector(context, "models/pose_landmarker_lite.task")
-                faceRecognizer = FaceRecognizer(context, "models/mobilefacenet.tflite")
-                faceRecognizer.initialize()
+                val provider = future.get()
+                cameraProvider = provider
 
-                frameAnalyzer = FrameAnalyzer(
-                    faceDetector = faceDetector,
-                    handDetector = handDetector,
-                    poseDetector = poseDetector,
-                    faceRecognizer = faceRecognizer,
-                    onResult = onResult
-                )
-
-                Log.i(TAG, "检测引擎初始化完成: face=${faceDetector.isInitialized}, hand=${handDetector.isInitialized}, pose=${poseDetector.isInitialized}")
-
-                // 引擎就绪后,在主线程绑定相机
-                android.os.Handler(android.os.Looper.getMainLooper()).post {
-                    bindCamera()
-                    onInitialized?.invoke()
-                    Log.i(TAG, "相机管线已启动(后台线程推理)")
+                val analysis = ImageAnalysis.Builder()
+                    // 自动丢弃忙时的帧，无堆积。
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    // 输出旋转：CameraX 据此把帧摆正，FrameAnalyzer 拿到的 bitmap 已 upright。
+                    // 横屏 app：始终是两个横屏方向之一。
+                    .setTargetRotation(context.display?.rotation ?: 0)
+                    .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+                    .build()
+                analysis.setAnalyzer(analysisExecutor) { image ->
+                    // 转发给 FrameAnalyzer，它在同一后台线程处理这一帧。
+                    analyzer.analyze(image)
                 }
+                imageAnalysis = analysis
+
+                val selector = if (useFront) {
+                    CameraSelector.DEFAULT_FRONT_CAMERA
+                } else {
+                    CameraSelector.DEFAULT_BACK_CAMERA
+                }
+
+                provider.unbindAll()
+                provider.bindToLifecycle(lifecycleOwner, selector, analysis)
+                isRunning = true
+                Log.i(TAG, "相机管线已启动（后台线程推理，${if (useFront) "前置" else "后置"}）")
             } catch (e: Exception) {
-                Log.e(TAG, "检测引擎初始化失败: ${e.message}")
-                // 即使引擎失败,也绑定相机(至少有预览)
-                android.os.Handler(android.os.Looper.getMainLooper()).post {
-                    bindCamera()
-                    onInitialized?.invoke()
-                }
+                Log.e(TAG, "相机绑定失败: ${e.message}")
             }
-        }
-    }
-
-    private fun bindCamera() {
-        val providerFuture = ProcessCameraProvider.getInstance(context)
-        providerFuture.addListener({
-            cameraProvider = providerFuture.get()
-            doBind()
         }, ContextCompat.getMainExecutor(context))
     }
 
-    private fun doBind() {
-        val provider = cameraProvider ?: return
-        val pv = previewView ?: return
-
-        // Preview use case:显示摄像头画面
-        val preview = Preview.Builder().build().also {
-            it.surfaceProvider = pv.surfaceProvider
-        }
-
-        // ImageAnalysis use case:后台推理
-        val imageAnalysis = ImageAnalysis.Builder()
-            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-            .build()
-
-        if (::frameAnalyzer.isInitialized) {
-            imageAnalysis.setAnalyzer(analysisExecutor, frameAnalyzer)
-            Log.i(TAG, "FrameAnalyzer 已绑定到 ImageAnalysis")
-        } else {
-            Log.w(TAG, "FrameAnalyzer 未就绪,跳过 setAnalyzer")
-        }
-
-        val selector = CameraSelector.DEFAULT_FRONT_CAMERA
-
-        try {
-            provider.unbindAll()
-            provider.bindToLifecycle(lifecycleOwner, selector, preview, imageAnalysis)
-            Log.i(TAG, "CameraX 绑定完成(Preview + ImageAnalysis)")
-        } catch (e: Exception) {
-            Log.e(TAG, "相机绑定失败: ${e.message}")
-        }
-    }
-
-    /** 更新人物库(供 FrameAnalyzer 身份识别用) */
-    fun updatePeople(people: List<com.xbot.android.model.Person>) {
-        if (::frameAnalyzer.isInitialized) {
-            frameAnalyzer.people = people
-        }
-    }
-
+    /** 停止取流。 */
     fun stop() {
         cameraProvider?.unbindAll()
+        isRunning = false
+    }
+
+    /** 切换前后摄像头。 */
+    fun toggle(lifecycleOwner: LifecycleOwner) {
+        val a = analyzer ?: return
+        start(lifecycleOwner, a, useFront = !useFrontCamera)
+    }
+
+    fun release() {
+        stop()
         analysisExecutor.shutdown()
-        if (::faceDetector.isInitialized) faceDetector.close()
-        if (::handDetector.isInitialized) handDetector.close()
-        if (::poseDetector.isInitialized) poseDetector.close()
-        if (::faceRecognizer.isInitialized) faceRecognizer.close()
     }
 }

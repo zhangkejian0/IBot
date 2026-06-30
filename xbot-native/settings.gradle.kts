@@ -10,8 +10,10 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // sherpa-onnx Android AAR 发布在 JitPack。
+        maven { url = uri("https://jitpack.io") }
     }
 }
 
-rootProject.name = "XBot"
+rootProject.name = "XBotNative"
 include(":app")

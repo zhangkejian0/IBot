@@ -1,10 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.XBot" parent="Theme.MaterialComponents.NoActionBar">
-        <item name="android:windowFullscreen">true</item>
-        <item name="android:windowNoTitle">true</item>
+    <!-- 基于 Material3 暗色主题：陪伴机器人全程暗背景，与虚拟形象前端一致。 -->
+    <style name="Theme.XBot" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="android:windowBackground">@color/xbot_background</item>
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
-        <item name="android:windowBackground">@android:color/black</item>
+        <!-- 沉浸式：不抢占虚拟形象的可视区域 -->
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
     </style>
 </resources>

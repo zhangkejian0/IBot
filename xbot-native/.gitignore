@@ -1,27 +1,13 @@
-# Gradle
-.gradle/
-build/
+# Build
+/build/
+/app/build/
+/.gradle/
+/.kotlin/
 
-# Kotlin
-.kotlin/
-
-# IntelliJ / Android Studio
-.idea/
+# IDE
+/.idea/
 *.iml
-*.iws
-*.ipr
-captures/
-
-# Local configuration (SDK paths, etc.)
 local.properties
-
-# Signing / secrets
-*.keystore
-*.jks
-key.properties
-
-# Native files
-.cxx/
 
 # OS
 .DS_Store

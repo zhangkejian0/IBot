@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 与虚拟形象前端 #0A0A0A 暗背景一致 -->
+    <color name="xbot_background">#FF0A0A0A</color>
+    <!-- 自适应图标背景，与 logo 深蓝背景对齐（flutter_launcher_icons 配置） -->
+    <color name="ic_launcher_background">#1A1D39</color>
+</resources>

@@ -1,47 +1,48 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- 相机(MediaPipe 推理) -->
+    <!-- 摄像头：实时识别（必需） -->
     <uses-permission android:name="android.permission.CAMERA" />
-    <!-- 麦克风(语音助手) -->
+    <!-- 麦克风：语音助手（唤醒/ASR/TTS） -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
-    <!-- 防止陪伴场景息屏 -->
-    <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <!-- 网络(后端交互) -->
+    <!-- 网络：Pophie 后端 + 局域网日志服务 -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <!-- 蓝牙(底座控制) -->
-    <uses-permission android:name="android.permission.BLUETOOTH" />
-    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <!-- 屏幕常亮：陪伴机器人开机即工作 -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- 蓝牙底座控制（经典蓝牙 SPP） -->
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
-    <!-- 存储(日志文件) -->
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
-        android:maxSdkVersion="28" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation"
+        tools:targetApi="31" />
 
-    <uses-feature android:name="android.hardware.camera" android:required="true" />
-    <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
 
     <application
-        android:name=".XBotApplication"
-        android:allowBackup="true"
+        android:name=".XBotApp"
+        android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher"
         android:supportsRtl="true"
-        android:hardwareAccelerated="true"
         android:theme="@style/Theme.XBot"
-        android:networkSecurityConfig="@xml/network_security_config">
+        android:hardwareAccelerated="true"
+        tools:targetApi="34">
 
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:configChanges="orientation|screenSize|keyboardHidden"
-            android:screenOrientation="landscape"
-            android:windowSoftInputMode="adjustResize">
+            android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout"
+            android:screenOrientation="sensorLandscape"
+            android:theme="@style/Theme.XBot">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
     </application>
-
 </manifest>

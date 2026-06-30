@@ -3,37 +3,35 @@ package com.xbot.android.model
 import androidx.compose.ui.graphics.Color
 
 /**
- * 7 种表情枚举(Ekman's 6 + neutral)。
- * 直接翻译自 Flutter 的 Expression enum。
+ * 7 种常见表情（Ekman 经典 6 种 + 中性）。对应 Flutter Expression 枚举。
  */
-enum class Expression(
-    val label: String,
-    val emoji: String,
-    val color: Color
-) {
-    NEUTRAL("平静", "😐", Color(0xFF9E9E9E)),
-    HAPPY("高兴", "😊", Color(0xFF4CAF50)),
-    SAD("难过", "😢", Color(0xFF2196F3)),
-    SURPRISED("惊讶", "😮", Color(0xFFFF9800)),
-    ANGRY("生气", "😠", Color(0xFFF44336)),
-    DISGUSTED("厌恶", "🤢", Color(0xFF9C27B0)),
-    FEARFUL("恐惧", "😨", Color(0xFF607D8B));
+enum class Expression(val apiName: String, val label: String, val emoji: String) {
+    NEUTRAL("neutral", "中性", "😐"),
+    HAPPY("happy", "高兴", "😄"),
+    SAD("sad", "伤心", "😢"),
+    SURPRISED("surprise", "惊讶", "😲"),
+    ANGRY("angry", "愤怒", "😠"),
+    DISGUSTED("disgust", "厌恶", "🤢"),
+    FEARFUL("fear", "恐惧", "😨");
 
     companion object {
-        val DEFAULT = NEUTRAL
+        /** 后端 7 类 key → 枚举。 */
+        fun fromApiName(key: String?): Expression =
+            entries.firstOrNull { it.apiName == key } ?: NEUTRAL
     }
 }
 
-/**
- * 表情识别结果:赢的表情 + 置信度 + 所有 7 类分数。
- * 直接翻译自 Flutter 的 ExpressionResult。
- */
+/** 表情识别结果：最可能的表情、其置信度、以及全部表情的打分（调试用）。 */
 data class ExpressionResult(
-    val expression: Expression = Expression.NEUTRAL,
-    val score: Float = 0f,
-    val scores: Map<Expression, Float> = emptyMap()
+    val expression: Expression,
+    val score: Float,
+    val scores: Map<Expression, Float>,
 ) {
     companion object {
-        val NEUTRAL = ExpressionResult()
+        val NEUTRAL = ExpressionResult(
+            expression = Expression.NEUTRAL,
+            score = 1f,
+            scores = mapOf(Expression.NEUTRAL to 1f),
+        )
     }
 }

@@ -1,176 +1,81 @@
 package com.xbot.android.camera
 
 import android.graphics.Bitmap
-import android.graphics.RectF
-import android.util.Log
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
-import com.xbot.android.detection.FaceDetector
-import com.xbot.android.detection.FaceRecognizer
-import com.xbot.android.detection.HandDetector
-import com.xbot.android.detection.PoseDetector
-import com.xbot.android.model.DetectionResult
 import com.xbot.android.model.FaceOverlay
-import com.xbot.android.model.HandOverlay
-import com.xbot.android.model.ObjectOverlay
-import com.xbot.android.model.Person
-import com.xbot.android.model.PoseOverlay
-import kotlin.math.max
-import kotlin.math.min
-import kotlin.math.sqrt
 
 /**
- * 帧分析器:CameraX 的 ImageAnalysis.Analyzer 实现。
+ * CameraX 帧分析器：在后台线程把 [ImageProxy] 转 bitmap → 送入人脸引擎推理。
  *
- * **核心**:所有推理在 CameraX 绑定的后台 executor 执行,不碰主线程。
- * 检测完成后通过 [onResult] 回调轻量结果给主线程。
+ * 对应 Flutter 的 _onFrame / _processFrame（按需采样版）。
  *
- * 调度逻辑(对应 Flutter 的 _processFrame):
- * - 人脸:每帧(2fps)
- * - 手势:每帧(与人脸并行)
- * - 姿态:每帧(与人脸并行)
- * - 身份:节流(identityInterval)
- * - 物体:节流(objectInterval,后台异步)
+ * 原生方案简化点：CameraX 的 ImageProxy.toBitmap() 已按 targetRotation 摆正，
+ * 且 OUTPUT_IMAGE_FORMAT_RGBA_8888 直接给出单平面 RGBA，**无需 Flutter 的逐像素
+ * YUV→RGB 转换 + copyRotate**（那两个是 Flutter 主线程最大开销之一）。
+ *
+ * 阶段 0：只做人脸，产出主脸 [FaceOverlay]。阶段 1 起在此扩展多脸/手势/物体/身份。
+ *
+ * @param onResult 推理结果回调（**在后台线程触发**，调用方需自行切到主线程）。
+ *                 参数：主脸（无人脸为 null）、单帧推理耗时（ms）。
  */
 class FrameAnalyzer(
-    private val faceDetector: FaceDetector,
-    private val handDetector: HandDetector,
-    private val poseDetector: PoseDetector,
-    private val faceRecognizer: FaceRecognizer,
-    private val onResult: (DetectionResult, Long) -> Unit
+    private val detect: (Bitmap) -> FaceOverlay?,
+    private val onResult: (face: FaceOverlay?, inferMs: Long) -> Unit,
 ) : ImageAnalysis.Analyzer {
-
-    companion object {
-        private const val TAG = "FrameAnalyzer"
-    }
-
-    private var identityIntervalMs = 1200L
-    private var lastIdentityRun = 0L
-
-    // 身份 slot:按位置追踪,避免逐帧串脸
-    private val identitySlots = mutableListOf<IdentitySlot>()
-    private val identityTtlMs = 3000L
-    private val slotMatchDistance = 0.15f
-
-    // 人物库引用
-    @Volatile
-    var people: List<Person> = emptyList()
 
     override fun analyze(image: ImageProxy) {
         val start = System.currentTimeMillis()
         try {
-            val bitmap = image.toBitmap() // CameraX 自动处理旋转
-
-            // 人脸检测(每帧)
-            val face = if (faceDetector.isInitialized) faceDetector.detect(bitmap) else null
-
-            // 手势检测(每帧)
-            val hands = if (handDetector.isInitialized) handDetector.detect(bitmap) else emptyList()
-
-            // 姿态检测(每帧)
-            val pose = if (poseDetector.isInitialized) poseDetector.detect(bitmap) else null
-
-            // 身份识别(节流)
-            val now = System.currentTimeMillis()
-            val faces = mutableListOf<FaceOverlay>()
-            if (face != null) {
-                val identityDue = faceRecognizer.isInitialized &&
-                    now - lastIdentityRun >= identityIntervalMs
-
-                var identity = if (identityDue) {
-                    lastIdentityRun = now
-                    val embedding = faceRecognizer.embed(cropFace(bitmap, face.boundingBox))
-                    if (embedding != null) {
-                        faceRecognizer.identify(embedding, people)
-                    } else null
-                } else {
-                    // 非识别帧:从 slot 续身份
-                    getSlotIdentity(face.boundingBox, now)
-                }
-
-                // 更新 slot
-                if (identityDue && identity != null) {
-                    updateSlot(face.boundingBox, identity, now)
-                }
-
-                faces.add(face.copy(identity = identity))
-            }
-
-            val result = DetectionResult(
-                faces = faces,
-                hands = hands,
-                objects = emptyList(), // TODO:物体检测(YOLO)后续集成
-                poses = if (pose != null) listOf(pose) else emptyList()
-            )
-
+            val bitmap = image.toRgbBitmap()
+            val face = if (bitmap != null) detect(bitmap) else null
             val inferMs = System.currentTimeMillis() - start
-            onResult(result, inferMs)
+            onResult(face, inferMs)
         } catch (e: Exception) {
-            Log.e(TAG, "analyze 异常: ${e.message}")
+            // 单帧异常不影响后续帧。
         } finally {
+            // analyze 必须 close image，否则 CameraX 不会投递下一帧。
             image.close()
         }
     }
 
-    /** 裁剪人脸区域(带 padding) */
-    private fun cropFace(bitmap: Bitmap, box: RectF, padding: Float = 0.2f): Bitmap {
-        val w = bitmap.width
-        val h = bitmap.height
-        val padW = box.width() * padding
-        val padH = box.height() * padding
-        val left = max(0, ((box.left - padW) * w).toInt())
-        val top = max(0, ((box.top - padH) * h).toInt())
-        val right = min(w, ((box.right + padW) * w).toInt())
-        val bottom = min(h, ((box.bottom + padH) * h).toInt())
-        val cropW = max(1, right - left)
-        val cropH = max(1, bottom - top)
-        return Bitmap.createBitmap(bitmap, left, top, cropW, cropH)
-    }
-
-    /** 从 slot 续身份(非识别帧) */
-    private fun getSlotIdentity(box: RectF, now: Long): com.xbot.android.model.IdentityMatch? {
-        val center = boxCenter(box)
-        val slot = identitySlots.firstOrNull { s ->
-            now - s.lastSeen < identityTtlMs &&
-                distance(s.center, center) < slotMatchDistance
-        }
-        return slot?.identity
-    }
-
-    /** 更新 slot */
-    private fun updateSlot(
-        box: RectF,
-        identity: com.xbot.android.model.IdentityMatch,
-        now: Long
-    ) {
-        val center = boxCenter(box)
-        val existing = identitySlots.firstOrNull { s ->
-            now - s.lastSeen < identityTtlMs &&
-                distance(s.center, center) < slotMatchDistance
-        }
-        if (existing != null) {
-            existing.center = center
-            existing.identity = identity
-            existing.lastSeen = now
-        } else {
-            identitySlots.add(IdentitySlot(center, identity, now))
+    /**
+     * ImageProxy → Bitmap。
+     *
+     * 用 RGBA_8888 输出格式时（见 CameraManager OUTPUT_IMAGE_FORMAT_RGBA_8888），
+     * image.planes[0] 即单平面 RGBA buffer，直接构 Bitmap。CameraX 已按 targetRotation
+     * 摆正，故得到的 bitmap 是 upright（无需再 copyRotate）。
+     *
+     * 注：toBitmap() 在 CameraX 1.4.x 可用，但走 YUV→转换路径；这里直接读 RGBA plane 更省。
+     * 兜底：若 plane 不可用，回退 image.toBitmap()。
+     */
+    private fun ImageProxy.toRgbBitmap(): Bitmap? {
+        return try {
+            val plane = planes[0]
+            val buffer = plane.buffer as java.nio.ByteBuffer
+            val pixelStride = plane.pixelStride // RGBA_8888 下通常 = 4
+            val rowStride = plane.rowStride
+            val rowPadding = rowStride - width * pixelStride
+            // 含 rowPadding 的展开 bitmap，再 crop 成紧凑 bitmap（去掉右侧 padding）。
+            val expanded = Bitmap.createBitmap(
+                width + rowPadding / pixelStride,
+                height,
+                Bitmap.Config.ARGB_8888,
+            )
+            buffer.rewind()
+            expanded.copyPixelsFromBuffer(buffer)
+            if (rowPadding == 0) {
+                expanded
+            } else {
+                Bitmap.createBitmap(expanded, 0, 0, width, height)
+            }
+        } catch (e: Exception) {
+            // 回退：CameraX 内置转换（含旋转）。
+            try {
+                this.toBitmap()
+            } catch (_: Exception) {
+                null
+            }
         }
     }
-
-    private fun boxCenter(box: RectF) =
-        Offset2D(box.centerX(), box.centerY())
-
-    private fun distance(a: Offset2D, b: Offset2D): Float {
-        val dx = a.x - b.x
-        val dy = a.y - b.y
-        return sqrt(dx * dx + dy * dy)
-    }
-
-    private data class IdentitySlot(
-        var center: Offset2D,
-        var identity: com.xbot.android.model.IdentityMatch?,
-        var lastSeen: Long
-    )
-
-    private data class Offset2D(val x: Float, val y: Float)
 }
