@@ -49,9 +49,18 @@ function softenAxis(v: number): number {
   return s * a * (0.55 + 0.45 * (1 - a * 0.35));
 }
 
+/** 分解水平/垂直分量；horizBlend≈1 表示主要在左/右看 */
+function gazeComponents(gazeX: number, gazeY: number) {
+  const gx = softenAxis(gazeX);
+  const gy = softenAxis(gazeY);
+  const absX = Math.abs(gx);
+  const absY = Math.abs(gy);
+  const horizBlend = absX / (absX + absY * 0.4 + 0.1);
+  return { gx, gy, horizBlend };
+}
+
 /**
- * 眼球注视：桌面宠物风格 —— 瞳孔在眼眶内大范围跟随，略快于头部。
- * 参考 EMO / 虚拟宠物：眼睛承担主要「看向」语义，头部只做辅助转头。
+ * 眼球：水平跟得足，垂直克制；左右看时与整脸平移配合。
  */
 export function computeGazeEyes(
   gazeX: number,
@@ -63,32 +72,30 @@ export function computeGazeEyes(
   }
 
   const w = weight;
-  const gx = softenAxis(gazeX);
-  const gy = softenAxis(gazeY);
+  const { gx, gy, horizBlend } = gazeComponents(gazeX, gazeY);
   const dist = Math.min(1, Math.hypot(gx, gy));
 
-  // 水平可略大于垂直（眼眶解剖 + 卡通习惯）
-  const pupilX = 0.82 * w;
-  const pupilY = 0.72 * w;
-  const vergence = 0.06 * w * (0.4 + 0.6 * dist);
+  const pupilX = (0.78 + horizBlend * 0.06) * w;
+  const pupilY = 0.34 * w;
+  const vergence = 0.05 * w * (0.4 + 0.6 * dist);
 
-  const openDelta = -gy * 0.08 * w;
-  const lidCurve = -gy * 0.11 * w;
+  const openDelta = -gy * 0.035 * w;
+  const lidCurve = -gy * 0.045 * w;
 
   return {
     left: {
       pupilX: gx * pupilX + vergence * gx,
       pupilY: gy * pupilY,
       openness: openDelta,
-      upperLidCurve: lidCurve + gx * 0.09 * w,
-      lidTilt: gx * 0.14 * w,
+      upperLidCurve: lidCurve + gx * 0.08 * w,
+      lidTilt: gx * 0.12 * w,
     },
     right: {
       pupilX: gx * pupilX - vergence * gx,
       pupilY: gy * pupilY,
       openness: openDelta,
-      upperLidCurve: lidCurve - gx * 0.09 * w,
-      lidTilt: -gx * 0.1 * w,
+      upperLidCurve: lidCurve - gx * 0.08 * w,
+      lidTilt: -gx * 0.08 * w,
     },
   };
 }
@@ -102,7 +109,7 @@ export function applyGazeEyeChannel(eye: EyeParams, ch: GazeEyeChannel): void {
 }
 
 /**
- * 整头转向：平移 + 偏航/俯仰（幅度克制，作为眼球的辅助）。
+ * 头部：左右时整脸水平平移为主；上下幅度明显减小。
  */
 export function computeGazeBody(
   gazeX: number,
@@ -113,13 +120,17 @@ export function computeGazeBody(
     return { headPanX: 0, headBobY: 0, headTilt: 0, headPitch: 0 };
   }
   const w = weight;
-  const gx = softenAxis(gazeX);
-  const gy = softenAxis(gazeY);
+  const { gx, gy, horizBlend } = gazeComponents(gazeX, gazeY);
+
+  // 偏左右时：加大整脸平移，减弱绕轴转动（「整体挪过去」而非猛甩头）
+  const panScale = 1 + horizBlend * 0.65;
+  const tiltScale = 1 - horizBlend * 0.4;
+
   return {
-    headPanX: gx * 24 * w,
-    headBobY: gy * 18 * w,
-    headTilt: gx * 8 * w,
-    headPitch: gy * 5.5 * w,
+    headPanX: gx * 38 * w * panScale,
+    headBobY: gy * 6 * w,
+    headTilt: gx * 4.5 * w * tiltScale,
+    headPitch: gy * 2 * w,
   };
 }
 
