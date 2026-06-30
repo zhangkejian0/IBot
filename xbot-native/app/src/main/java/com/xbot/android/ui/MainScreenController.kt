@@ -15,6 +15,8 @@ import com.xbot.android.camera.FrameAnalyzer
 import com.xbot.android.core.AppTuning
 import com.xbot.android.model.DetectionResult
 import com.xbot.android.model.Person
+import com.xbot.android.store.SettingsStore
+import com.xbot.android.voice.ConversationLogger
 import com.xbot.android.vision.FaceLandmarkEngine
 import com.xbot.android.vision.FaceRecognizer
 import com.xbot.android.vision.GestureEngine
@@ -45,6 +47,7 @@ class MainScreenController(
     private val onRequestCamera: () -> Unit,
     private val hasMicPermission: () -> Boolean,
     private val onRequestMic: () -> Unit,
+    val settingsStore: SettingsStore,
     peopleProvider: () -> List<Person> = { emptyList() },
 ) {
     companion object {
@@ -57,6 +60,9 @@ class MainScreenController(
 
     var faceWebView: FaceWebView? = null
         private set
+
+    /** 对话交互日志（设置页「交互日志」查看）。 */
+    val conversationLog = ConversationLogger()
 
     /** 语音助手（惰性初始化：仅当需要时才创建，避免启动阶段因 sherpa-onnx 等 native 库加载导致崩溃）。 */
     @Volatile var voiceAssistant: com.xbot.android.voice.VoiceAssistant? = null
@@ -101,8 +107,8 @@ class MainScreenController(
     var activity by mutableStateOf(com.xbot.android.behavior.ActivityTracker.Activity.NONE)
         private set
 
-    /** 调试模式：true 显示摄像头识别覆盖层，false 显示虚拟形象网页（默认 false）。 */
-    var debugMode by mutableStateOf(false)
+    /** 调试模式：true 显示摄像头识别覆盖层，false 显示虚拟形象网页（取自持久化设置）。 */
+    val debugMode: Boolean get() = settingsStore.settings.debugMode
 
     var cameraStarted by mutableStateOf(false)
         private set
@@ -124,7 +130,31 @@ class MainScreenController(
             onLevel = { lvl ->
                 faceWebView?.bridge?.voiceLevel = lvl
             },
-        ).also { voiceAssistant = it }
+            conversationLog = conversationLog,
+            config = settingsStore.toPophieConfig(),
+        ).also {
+            applyVoiceSettings(it)
+            voiceAssistant = it
+        }
+    }
+
+    @Volatile private var lastAppliedKeyword: String = "你好小白"
+
+    /** 把当前设置应用到语音助手（创建时 + 设置页保存后调用）。 */
+    fun applyVoiceSettings(va: com.xbot.android.voice.VoiceAssistant = ensureVoiceAssistant()) {
+        val s = settingsStore.settings
+        va.wakeWordEnabled = s.wakeWordEnabled
+        va.ttsEnabled = s.ttsEnabled
+        va.streamingSttEnabled = s.streamingSttEnabled
+        va.pophie.config = va.pophie.config.copy(
+            baseUrl = s.baseUrl,
+            voiceId = s.voiceId,
+        )
+        // 唤醒词变化才触发模型重建（重建较重，避免无谓重载）。
+        if (s.wakeWord.isNotBlank() && s.wakeWord != lastAppliedKeyword) {
+            lastAppliedKeyword = s.wakeWord
+            if (va.wakeWordReady) va.setWakeKeyword(s.wakeWord)
+        }
     }
 
     fun attachWebView(webView: FaceWebView) {
@@ -137,6 +167,10 @@ class MainScreenController(
     /** 双击触发语音助手。 */
     private fun onDoubleTap() {
         android.util.Log.i("MainScreenController", "双击 → 语音助手")
+        if (!settingsStore.settings.voiceEnabled) {
+            android.util.Log.i("MainScreenController", "语音助手已关闭，忽略双击")
+            return
+        }
         try {
             val v = ensureVoiceAssistant()
             if (!v.isAvailable) {
@@ -167,10 +201,17 @@ class MainScreenController(
         }
         val analyzer = FrameAnalyzer(
             process = { bitmap, startedAt ->
-                // 后台线程：跑完整视觉管线。
-                val r = pipeline.process(bitmap, startedAt, objectEnabled = true)
+                // 后台线程：按当前识别开关跑视觉管线。
+                val s = settingsStore.settings
+                val r = pipeline.process(
+                    bitmap, startedAt,
+                    objectEnabled = s.objectEnabled,
+                    faceEnabled = s.faceEnabled,
+                    handEnabled = s.handEnabled,
+                    identityEnabled = s.identityEnabled,
+                )
                 // 同时触发后台物体检测（独立节流，复用 lastObjects）。
-                pipeline.runObjectDetection(bitmap, startedAt, objectEnabled = true)
+                pipeline.runObjectDetection(bitmap, startedAt, objectEnabled = s.objectEnabled)
                 r
             },
             onResult = { r, infer ->
@@ -190,8 +231,8 @@ class MainScreenController(
         cameraManager.start(lifecycleOwner, analyzer, useFront = true)
         cameraStarted = true
 
-        // 启用语音助手（需麦克风权限；惰性创建，避免启动时 native 加载崩溃）。
-        if (hasMicPermission()) {
+        // 启用语音助手（需语音总开关 + 麦克风权限；惰性创建，避免启动时 native 加载崩溃）。
+        if (settingsStore.settings.voiceEnabled && hasMicPermission()) {
             try {
                 val va = ensureVoiceAssistant()
                 va.markAvailable()
@@ -204,8 +245,30 @@ class MainScreenController(
                 // 语音初始化失败不影响视觉识别主流程。
                 android.util.Log.e("MainScreenController", "语音助手启动失败: ${e.message}")
             }
-        } else {
+        } else if (settingsStore.settings.voiceEnabled) {
             onRequestMic()
+        }
+    }
+
+    /** 设置页改了语音总开关后调用：开则启动，关则停止。 */
+    fun onVoiceEnabledChanged() {
+        val enabled = settingsStore.settings.voiceEnabled
+        if (enabled) {
+            if (hasMicPermission()) {
+                try {
+                    val va = ensureVoiceAssistant()
+                    va.markAvailable()
+                    if (!va.wakeWordReady) va.initialize()
+                    applyVoiceSettings(va)
+                    if (!va.isRunning) va.start()
+                } catch (e: Exception) {
+                    android.util.Log.e("MainScreenController", "启用语音失败: ${e.message}")
+                }
+            } else {
+                onRequestMic()
+            }
+        } else {
+            try { voiceAssistant?.stop() } catch (_: Exception) {}
         }
     }
 
@@ -216,6 +279,10 @@ class MainScreenController(
             fps = frameCounter * 1000f / elapsed
             frameCounter = 0
             lastStatTime = now
+        }
+        // 持久化服务端回传的 sessionId（延续多轮会话记忆）。
+        voiceAssistant?.pophie?.config?.sessionId?.let { sid ->
+            if (sid != settingsStore.settings.sessionId) settingsStore.persistSessionId(sid)
         }
     }
 
@@ -240,6 +307,7 @@ fun rememberMainScreenController(
     onRequestCamera: () -> Unit,
     hasMicPermission: () -> Boolean,
     onRequestMic: () -> Unit,
+    settingsStore: SettingsStore,
     peopleProvider: () -> List<Person> = { emptyList() },
 ): MainScreenController {
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -254,6 +322,7 @@ fun rememberMainScreenController(
             onRequestCamera = onRequestCamera,
             hasMicPermission = hasMicPermission,
             onRequestMic = onRequestMic,
+            settingsStore = settingsStore,
             peopleProvider = peopleProvider,
         )
     }

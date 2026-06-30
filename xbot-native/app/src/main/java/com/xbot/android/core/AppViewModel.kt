@@ -11,6 +11,7 @@ import com.xbot.android.model.OwnerProfile
 import com.xbot.android.model.Person
 import com.xbot.android.store.OwnerProfileStore
 import com.xbot.android.store.PersonRepository
+import com.xbot.android.store.SettingsStore
 import com.xbot.android.vision.FaceLandmarkEngine
 import com.xbot.android.vision.FaceRecognizer
 import com.xbot.android.vision.ImageUtils
@@ -37,6 +38,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     val personRepository = PersonRepository(app)
     val ownerProfileStore = OwnerProfileStore(app)
+    val settingsStore = SettingsStore(app)
 
     /** 录入用的人脸引擎 + 身份识别（与主界面引擎独立，避免抢占）。 */
     private val enrollFaceEngine = FaceLandmarkEngine(app, FACE_MODEL_PATH)
@@ -58,6 +60,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         try {
             personRepository.load()
             ownerProfileStore.load()
+            settingsStore.load()
             phase.set(if (ownerProfileStore.isRegistered) AppPhase.READY else AppPhase.ONBOARDING)
         } catch (e: Exception) {
             Log.e(TAG, "初始化失败: ${e.message}")

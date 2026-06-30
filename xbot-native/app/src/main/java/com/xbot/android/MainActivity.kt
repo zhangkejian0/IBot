@@ -89,9 +89,17 @@ class MainActivity : ComponentActivity() {
                             onRequestCamera = { requestCameraPermission() },
                             hasMicPermission = { checkMicPermission() },
                             onRequestMic = { requestMicPermission() },
+                            settingsStore = appViewModel.settingsStore,
                             peopleProvider = { appViewModel.personRepository.people },
                         )
-                        MainScreen(controller)
+                        MainScreen(
+                            controller = controller,
+                            appViewModel = appViewModel,
+                            onResetOwner = {
+                                appViewModel.resetOwner()
+                                phaseFlow.value = AppPhase.ONBOARDING
+                            },
+                        )
                     }
                 }
             }

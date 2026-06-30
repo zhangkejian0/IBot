@@ -7,15 +7,26 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import com.xbot.android.core.AppViewModel
 import com.xbot.android.webview.FaceWebView
 import kotlinx.coroutines.delay
 
@@ -29,7 +40,26 @@ import kotlinx.coroutines.delay
  * 双击 → 触发语音助手（由 FaceWebView 内部 GestureDetector 直接捕获）。
  */
 @Composable
-fun MainScreen(controller: MainScreenController) {
+fun MainScreen(
+    controller: MainScreenController,
+    appViewModel: AppViewModel,
+    onResetOwner: () -> Unit,
+) {
+    var showSettings by remember { mutableStateOf(false) }
+
+    if (showSettings) {
+        SettingsScreen(
+            controller = controller,
+            appViewModel = appViewModel,
+            onClose = { showSettings = false },
+            onResetOwner = {
+                showSettings = false
+                onResetOwner()
+            },
+        )
+        return
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -56,6 +86,22 @@ fun MainScreen(controller: MainScreenController) {
 
         // —— 右上角调试浮层（两种模式都显示，对标 native-prototype）——
         DebugOverlay(controller)
+
+        // —— 左下角设置入口（半透明齿轮按钮）——
+        IconButton(
+            onClick = { showSettings = true },
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(8.dp)
+                .size(44.dp)
+                .background(Color.Black.copy(alpha = 0.35f), CircleShape),
+        ) {
+            Icon(
+                imageVector = Icons.Filled.Settings,
+                contentDescription = "设置",
+                tint = Color.White.copy(alpha = 0.85f),
+            )
+        }
 
         // 注：双击检测由 FaceWebView 内部 GestureDetector 直接捕获（绕过 Compose 平台视图
         // 吞触摸事件的问题），见 MainScreenController.attachWebView 设置的 webView.onDoubleTap。

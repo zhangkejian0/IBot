@@ -223,6 +223,19 @@ class PophieClient(
         client.dispatcher.cancelAll()
     }
 
+    /** 健康检查（设置页「测试连接」）：能拿到任意 HTTP 响应即视为后端可达。 */
+    suspend fun health(): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val req = Request.Builder()
+                .url("${config.baseUrl.trimEnd('/')}/api/schema")
+                .get()
+                .build()
+            await(client.newCall(req)).use { it.code in 200..499 }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     // ============ /api/proactive_messages ============
 
     data class ProactiveMessage(val id: Long, val content: String, val trigger: String)

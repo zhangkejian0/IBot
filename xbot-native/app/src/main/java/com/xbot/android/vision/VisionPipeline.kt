@@ -55,15 +55,23 @@ class VisionPipeline(
      * @param now 当前时间（ms）
      * @param objectEnabled 是否启用物体识别
      */
-    fun process(bitmap: Bitmap, now: Long, objectEnabled: Boolean): DetectionResult {
+    fun process(
+        bitmap: Bitmap,
+        now: Long,
+        objectEnabled: Boolean,
+        faceEnabled: Boolean = true,
+        handEnabled: Boolean = true,
+        identityEnabled: Boolean = true,
+    ): DetectionResult {
         // —— 1. 主脸（MediaPipe：478 点 + blendshape → 表情/gaze/eyeBlink/mouthOpenness）——
-        val mediapipeFace = faceEngine.detect(bitmap)
+        // faceEnabled 关闭仅停 MediaPipe 表情/网格；ML Kit 框仍保留以驱动虚拟形象注视。
+        val mediapipeFace = if (faceEnabled) faceEngine.detect(bitmap) else null
 
         // —— 2. 多脸框（ML Kit）——
         val mlkitBoxes = runBlocking { mlkitEngine.detectBoxes(bitmap) }
 
         // —— 3. 手势（GestureRecognizer：21 点 + 手势）——
-        val hands = handEngine.detect(bitmap)
+        val hands = if (handEnabled) handEngine.detect(bitmap) else emptyList()
 
         // —— 4. 姿态（PoseLandmarker：33 点）——
         val poses = poseEngine?.detect(bitmap)?.let { listOf(it) } ?: emptyList()
@@ -101,7 +109,7 @@ class VisionPipeline(
         }
 
         // —— 6. 身份识别（节流）+ 录入采样 + slot 绑定 ——
-        val identityDue = faceRecognizer != null && faceRecognizer.isAvailable &&
+        val identityDue = identityEnabled && faceRecognizer != null && faceRecognizer.isAvailable &&
             now - lastIdentityRun >= AppTuning.IDENTITY_INTERVAL_MS
         if (faces.isNotEmpty() && identityDue) {
             lastIdentityRun = now

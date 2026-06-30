@@ -10,8 +10,11 @@ import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -81,11 +84,13 @@ fun OnboardingScreen(
                 }
             }
             Spacer(Modifier.height(20.dp))
-            // 步骤内容（占据剩余空间，底部按钮固定在下方，不重叠）。
+            // 步骤内容（占据剩余空间，底部按钮固定在下方）。
+            // clipToBounds 确保内容不会绘制到按钮区域之上（表单较长时不再与按钮重叠）。
             Box(
                 modifier = Modifier
                     .weight(1f)
-                    .fillMaxWidth(),
+                    .fillMaxWidth()
+                    .clipToBounds(),
                 contentAlignment = Alignment.TopStart,
             ) {
                 when (step) {
@@ -168,7 +173,7 @@ private fun AboutYouStep(
     gender: Gender?, onGender: (Gender?) -> Unit,
     birthday: String, onBirthday: (String) -> Unit,
 ) {
-    Column {
+    Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
         StepTitle("关于你", "告诉我一些关于你的事")
         Spacer(Modifier.height(24.dp))
         OutlinedTextField(
@@ -205,7 +210,7 @@ private fun AboutYouStep(
 
 @Composable
 private fun RobotNameStep(robotName: String, onRobotName: (String) -> Unit) {
-    Column {
+    Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
         StepTitle("给我起个名字", "你想叫我什么？")
         Spacer(Modifier.height(24.dp))
         OutlinedTextField(
@@ -310,7 +315,7 @@ private fun SummaryStep(
     nickname: String, robotName: String,
     gender: Gender?, birthday: String, faceCount: Int,
 ) {
-    Column {
+    Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
         StepTitle("就绪", "确认信息并完成")
         Spacer(Modifier.height(24.dp))
         SummaryRow("你的称呼", nickname.ifBlank { "主人" })
