@@ -75,9 +75,9 @@ export function computeGazeEyes(
   const { gx, gy, horizBlend } = gazeComponents(gazeX, gazeY);
   const dist = Math.min(1, Math.hypot(gx, gy));
 
-  const pupilX = (0.78 + horizBlend * 0.06) * w;
-  const pupilY = 0.34 * w;
-  const vergence = 0.05 * w * (0.4 + 0.6 * dist);
+  const pupilX = (0.94 + horizBlend * 0.06) * w;
+  const pupilY = 0.62 * w;
+  const vergence = 0.055 * w * (0.4 + 0.6 * dist);
 
   const openDelta = -gy * 0.035 * w;
   const lidCurve = -gy * 0.045 * w;
