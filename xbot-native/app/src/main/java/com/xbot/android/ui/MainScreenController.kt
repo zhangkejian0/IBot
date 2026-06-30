@@ -5,104 +5,136 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.LifecycleOwner
 import com.xbot.android.camera.CameraManager
 import com.xbot.android.camera.FrameAnalyzer
-import com.xbot.android.model.FaceOverlay
+import com.xbot.android.core.AppTuning
+import com.xbot.android.model.DetectionResult
+import com.xbot.android.model.Person
 import com.xbot.android.vision.FaceLandmarkEngine
+import com.xbot.android.vision.FaceRecognizer
+import com.xbot.android.vision.GestureEngine
+import com.xbot.android.vision.MlKitFaceEngine
+import com.xbot.android.vision.ObjectEngine
+import com.xbot.android.vision.PoseLandmarkEngine
+import com.xbot.android.vision.VisionPipeline
 import com.xbot.android.webview.FaceWebView
+import kotlinx.coroutines.delay
 
 /**
- * 阶段 0 主界面控制器：相机管线 + FaceLandmarkEngine + FaceWebView 桥接。
+ * 主界面控制器（阶段 1：完整视觉感知 + 行为聚合）。
  *
- * 在 Compose 中通过 [rememberMainScreenController] 获取单例，由 [MainScreen] 消费。
- * 持有调试统计（推理耗时/帧率/人脸数）供右上角浮层展示（对标 native-prototype）。
+ * 相机管线 → VisionPipeline（face+hand+pose+多脸+身份+物体）→ BehaviorTracker/ActivityTracker
+ * → FaceBridge 注入 setState/setGazeTarget（视觉态仅注意力态驱动）。
+ *
+ * @param peopleProvider 人物库提供者（阶段 2 接入 PersonRepository；阶段 1 返回空列表）
  */
 class MainScreenController(
     val context: Context,
     private val lifecycleOwner: LifecycleOwner,
     private val hasCameraPermission: () -> Boolean,
     private val onRequestCamera: () -> Unit,
+    peopleProvider: () -> List<Person> = { emptyList() },
 ) {
     companion object {
         private const val FACE_MODEL_PATH = "face_landmarker.task"
+        private const val POSE_MODEL_PATH = "pose_landmarker_lite.task"
+        private const val GESTURE_MODEL_PATH = "gesture_recognizer.task"
+        private const val MOBILEFACENET_PATH = "mobilefacenet.tflite"
+        private const val YOLO_PATH = "yolo26n_int8.tflite"
     }
 
-    /** 虚拟形象 WebView（由 MainScreen 创建并注入）。 */
     var faceWebView: FaceWebView? = null
         private set
 
     private val cameraManager = CameraManager(context)
-    private var faceEngine: FaceLandmarkEngine? = null
 
-    // —— 调试统计（对标 native-prototype 的右上角浮层）——
+    // —— 视觉引擎 ——
+    private val faceEngine = FaceLandmarkEngine(context, FACE_MODEL_PATH)
+    private val mlkitEngine = MlKitFaceEngine(maxFaces = 3)
+    private val handEngine = GestureEngine(context, GESTURE_MODEL_PATH, numHands = 2)
+    private val poseEngine = PoseLandmarkEngine(context, POSE_MODEL_PATH)
+    private val objectEngine = ObjectEngine(context, YOLO_PATH)
+    private val faceRecognizer = FaceRecognizer(context, MOBILEFACENET_PATH)
+
+    private val pipeline = VisionPipeline(
+        faceEngine = faceEngine,
+        mlkitEngine = mlkitEngine,
+        handEngine = handEngine,
+        poseEngine = poseEngine,
+        objectEngine = objectEngine,
+        faceRecognizer = faceRecognizer,
+        peopleProvider = peopleProvider,
+    )
+
+    // —— 行为聚合 ——
+    private val behaviorTracker = com.xbot.android.behavior.BehaviorTracker()
+    private val activityTracker = com.xbot.android.behavior.ActivityTracker()
+
+    // —— 调试统计（对标 native-prototype 右上角浮层）——
     var inferMs by mutableLongStateOf(0L)
         private set
-    var faceCount by mutableIntStateOf(0)
-        private set
-    var faceCenterX by mutableFloatStateOf(0.5f)
-        private set
-    var faceCenterY by mutableFloatStateOf(0.5f)
-        private set
-    var fps by mutableFloatStateOf(0f)
+    var fps by mutableStateOf(0f)
         private set
 
-    // 帧率统计。
-    private var frameCounter = 0
-    private var lastStatTime = System.currentTimeMillis()
+    // —— 当前检测结果（驱动调试覆盖层）——
+    var result by mutableStateOf(DetectionResult())
+        private set
+    var behaviorState by mutableStateOf(com.xbot.android.behavior.BehaviorTracker.State.ABSENT)
+        private set
+    var activity by mutableStateOf(com.xbot.android.behavior.ActivityTracker.Activity.NONE)
+        private set
 
-    /** 是否已绑定相机管线。 */
+    /** 调试模式：true 显示摄像头识别覆盖层，false 显示虚拟形象网页（默认 false）。 */
+    var debugMode by mutableStateOf(false)
+
     var cameraStarted by mutableStateOf(false)
         private set
 
-    /** 由 MainScreen 注入它创建好的 FaceWebView（含 bridge）。 */
+    private var frameCounter = 0
+    private var lastStatTime = System.currentTimeMillis()
+
     fun attachWebView(webView: FaceWebView) {
         faceWebView = webView
         webView.setup()
     }
 
-    /** 启动相机管线（权限通过后调用）。 */
     fun startCameraPipeline() {
         if (cameraStarted) return
         if (!hasCameraPermission()) {
             onRequestCamera()
             return
         }
-        val engine = FaceLandmarkEngine(context, FACE_MODEL_PATH)
-        if (!engine.isReady) {
-            // 模型加载失败，不启动。
-            engine.close()
-            return
-        }
-        faceEngine = engine
-
         val analyzer = FrameAnalyzer(
-            detect = { bitmap -> engine.detect(bitmap) },
-            onResult = { face, infer ->
-                // 后台线程回调：更新统计 + 推给 bridge（bridge 内部切主线程）。
-                frameCounter++
+            process = { bitmap, startedAt ->
+                // 后台线程：跑完整视觉管线。
+                val r = pipeline.process(bitmap, startedAt, objectEnabled = true)
+                // 同时触发后台物体检测（独立节流，复用 lastObjects）。
+                pipeline.runObjectDetection(bitmap, startedAt, objectEnabled = true)
+                r
+            },
+            onResult = { r, infer ->
+                // 后台线程回调：行为聚合 + 更新统计 + 推 bridge。
+                val now = System.currentTimeMillis()
+                val behavior = behaviorTracker.update(r, now)
+                val act = activityTracker.update(r, now)
+                result = r
+                behaviorState = behavior.state
+                activity = act.activity
                 inferMs = infer
-                faceCount = if (face != null) 1 else 0
-                if (face != null) {
-                    faceCenterX = face.boundingBox.centerX()
-                    faceCenterY = face.boundingBox.centerY()
-                }
-                // 推送前端：阶段 0 behaviorState 传 null（注意力态阶段 1 接入）。
-                faceWebView?.bridge?.onFrame(face, behaviorState = null)
+                frameCounter++
+                // 推前端：视觉态仅注意力态驱动（drowsy→sleepy, focused→gazing）。
+                faceWebView?.bridge?.onFrame(r.face, behaviorState.apiKey)
             },
         )
         cameraManager.start(lifecycleOwner, analyzer, useFront = true)
         cameraStarted = true
     }
 
-    /** 刷新帧率统计（由 MainScreen 定时调用）。 */
     fun tickStats() {
         val now = System.currentTimeMillis()
         val elapsed = now - lastStatTime
@@ -113,43 +145,45 @@ class MainScreenController(
         }
     }
 
-    /** 释放资源。 */
     fun release() {
         cameraManager.release()
-        faceEngine?.close()
-        faceEngine = null
+        faceEngine.close()
+        mlkitEngine.close()
+        handEngine.close()
+        poseEngine.close()
+        objectEngine.close()
+        faceRecognizer.close()
+        behaviorTracker.reset()
+        activityTracker.reset()
     }
 }
 
-/**
- * 在 Compose 中记忆一个 [MainScreenController]。
- * @param onRequestCamera 权限请求回调（permissionLauncher.launch）
- */
 @Composable
 fun rememberMainScreenController(
     lifecycleOwner: LifecycleOwner,
     hasCameraPermission: () -> Boolean,
     onRequestCamera: () -> Unit,
+    peopleProvider: () -> List<Person> = { emptyList() },
 ): MainScreenController {
     val context = androidx.compose.ui.platform.LocalContext.current
     val controller = remember {
+        // 传 Activity context（非 applicationContext）：CameraX 的 bindToLifecycle 与
+        // WindowManager 取 Display 都需要视觉 Context；applicationContext 不关联 Display，
+        // 会导致相机绑定抛 "obtain display from a Context not associated with one"。
         MainScreenController(
-            context = context.applicationContext,
+            context = context,
             lifecycleOwner = lifecycleOwner,
             hasCameraPermission = hasCameraPermission,
             onRequestCamera = onRequestCamera,
+            peopleProvider = peopleProvider,
         )
     }
-
-    // 进入时若已有权限则自动启动；否则请求。
     LaunchedEffect(Unit) {
         if (hasCameraPermission()) controller.startCameraPipeline()
         else onRequestCamera()
     }
-
     DisposableEffect(Unit) {
         onDispose { controller.release() }
     }
-
     return controller
 }

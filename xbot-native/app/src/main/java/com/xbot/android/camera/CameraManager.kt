@@ -71,7 +71,9 @@ class CameraManager(private val context: Context) {
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     // 输出旋转：CameraX 据此把帧摆正，FrameAnalyzer 拿到的 bitmap 已 upright。
                     // 横屏 app：始终是两个横屏方向之一。
-                    .setTargetRotation(context.display?.rotation ?: 0)
+                    // 注意：必须用 WindowManager 取 Display（applicationContext 无关联 Display，
+                    // 用 context.display 会抛 "obtain display from a Context not associated with one"）。
+                    .setTargetRotation(getDisplayRotation())
                     .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                     .build()
                 analysis.setAnalyzer(analysisExecutor) { image ->
@@ -111,5 +113,23 @@ class CameraManager(private val context: Context) {
     fun release() {
         stop()
         analysisExecutor.shutdown()
+    }
+
+    /**
+     * 取当前默认 Display 的旋转角。
+     *
+     * 必须用 WindowManager 取 Display：applicationContext 不关联任何 Display，
+     * 直接 context.display 会抛 "obtain display from a Context not associated with one"。
+     * 调用方（MainScreenController）应传入 Activity context，使 WindowManager 可用。
+     */
+    private fun getDisplayRotation(): Int {
+        return try {
+            val wm = context.getSystemService(android.content.Context.WINDOW_SERVICE)
+                as android.view.WindowManager
+            @Suppress("DEPRECATION")
+            wm.defaultDisplay.rotation
+        } catch (_: Exception) {
+            android.view.Surface.ROTATION_0
+        }
     }
 }
