@@ -84,6 +84,11 @@ fun MainScreen(
             DetectionOverlay(controller)
         }
 
+        // —— 聆听态暖色调跑马灯（苹果 Siri 风格，对标 Flutter _ListeningMarquee）——
+        // 进入聆听（waking/listening）时沿屏幕一圈呈现旋转的暖色光晕，并随麦克风音量
+        // 轻微呼吸。覆盖层无 pointerInput，不拦截双击（仍由 FaceWebView 捕获）。
+        ListeningMarquee(controller)
+
         // —— 右上角调试浮层（两种模式都显示，对标 native-prototype）——
         DebugOverlay(controller)
 

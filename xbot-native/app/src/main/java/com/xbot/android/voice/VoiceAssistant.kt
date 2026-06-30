@@ -64,6 +64,12 @@ class VoiceAssistant(
     /** 唤醒词是否就绪（模型加载成功）。 */
     val wakeWordReady: Boolean get() = ::wakeWord.isInitialized && wakeWord.isReady
 
+    /**
+     * 当前实时音量 0..1：聆听相位为麦克风 RMS（驱动聆听跑马灯呼吸），
+     * 播报相位由 TTS 通过 onLevel 单独驱动。供 UI 轮询读取（线程安全）。
+     */
+    val micLevel: Float get() = audio.level
+
     private var conversationJob: Job? = null
     @Volatile private var activeStt: SttStreamClient? = null
     private var lastPartialText: String = ""

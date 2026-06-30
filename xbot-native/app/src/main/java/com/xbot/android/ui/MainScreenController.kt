@@ -113,6 +113,16 @@ class MainScreenController(
     var cameraStarted by mutableStateOf(false)
         private set
 
+    /**
+     * 是否处于「聆听」可视态（刚唤醒过渡 WAKING 与正式聆听 LISTENING）。
+     * 驱动聆听态彩色跑马灯的淡入淡出（对标 Flutter _ListeningMarquee）。
+     */
+    var voiceListening by mutableStateOf(false)
+        private set
+
+    /** 当前麦克风实时音量 0..1（聆听跑马灯呼吸用，无语音助手时为 0）。 */
+    val voiceLevel: Float get() = voiceAssistant?.micLevel ?: 0f
+
     private var frameCounter = 0
     private var lastStatTime = System.currentTimeMillis()
 
@@ -122,6 +132,9 @@ class MainScreenController(
         return voiceAssistant ?: com.xbot.android.voice.VoiceAssistant(
             context = context,
             onStateChange = { state, robotState ->
+                // 聆听跑马灯仅在唤醒过渡/聆听相位显示（与 Flutter 对齐）。
+                voiceListening = state == com.xbot.android.voice.VoiceState.WAKING ||
+                    state == com.xbot.android.voice.VoiceState.LISTENING
                 faceWebView?.bridge?.apply {
                     voiceActive = state.isActive
                     voiceState = robotState ?: state.faceState
