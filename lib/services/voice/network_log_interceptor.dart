@@ -18,6 +18,9 @@ class NetworkLogInterceptor extends Interceptor {
   /// 在 options.extra 里暂存请求发起时间戳的键。
   static const _startKey = '_netlog_start_ms';
 
+  /// 在 options.extra 里携带「触发来源」标识的键(由 PophieClient 写入)。
+  static const triggerKey = '_netlog_trigger';
+
   @override
   void onRequest(RequestOptions options, RequestInterceptorHandler handler) {
     options.extra[_startKey] = DateTime.now().millisecondsSinceEpoch;
@@ -54,6 +57,10 @@ class NetworkLogInterceptor extends Interceptor {
 
       final isStreamReq = options.responseType == ResponseType.stream;
 
+      // 触发来源:由 PophieClient 写入 options.extra，标识本次请求由哪种
+      // 语音交互发起(wake/double_tap/gaze/manual/proactive:*)。
+      final trigger = options.extra[triggerKey] as String?;
+
       final entry = NetworkLogEntry(
         timestamp: start,
         method: options.method,
@@ -80,6 +87,7 @@ class NetworkLogInterceptor extends Interceptor {
             ? null
             : NetworkLogger.estimateBytes(response.data),
         error: error == null ? null : _describeError(error),
+        trigger: trigger,
       );
       logger.log(entry);
     } catch (_) {

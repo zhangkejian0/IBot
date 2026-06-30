@@ -32,10 +32,10 @@ class AppTuning {
   ///   3. 同时要求行为态 focused(人静止专注,排除边走边瞥);
   ///   4. 人脸较居中(排除侧着脸正对镜头的误判);
   ///   5. 容错:允许短暂出圆 ≤1.5s 不重置(自然注视会有瞬间偏移)。
-  static const double gazeTriggerRadius = 0.10;
+  static const double gazeTriggerRadius = 0.12;
 
   /// 持续注视多久(秒)后触发对话。
-  static const int gazeTriggerSeconds = 8;
+  static const int gazeTriggerSeconds = 5;
 
   /// 触发后冷却时长(秒),期间不再因注视触发(避免刚说完又触发)。
   static const int gazeCooldownSeconds = 60;

@@ -610,7 +610,7 @@ class _WakeWordTile extends StatelessWidget {
           child: CupertinoTextField(
             controller: controller,
             autofocus: true,
-            placeholder: '如：你好',
+            placeholder: '如：你好小白',
             textAlign: TextAlign.center,
             maxLength: 16,
           ),
@@ -835,7 +835,7 @@ class _ConversationLogScreenState extends State<_ConversationLogScreen> {
       child: SafeArea(
         child: entries.isEmpty
             ? const Center(
-                child: Text('暂无记录\n唤醒「你好」开始一轮对话即可看到日志',
+                child: Text('暂无记录\n唤醒「你好小白」开始一轮对话即可看到日志',
                     textAlign: TextAlign.center,
                     style: TextStyle(color: AppTheme.secondaryLabel)),
               )
