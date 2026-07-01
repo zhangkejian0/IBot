@@ -135,6 +135,10 @@ class MainScreenController(
     var voiceListening by mutableStateOf(false)
         private set
 
+    /** 端侧流式 ASR 实时识别文本（仅聆听相位显示字幕；离开聆听时清空）。 */
+    var recognizedText by mutableStateOf("")
+        private set
+
     /** 当前麦克风实时音量 0..1（聆听跑马灯呼吸用，无语音助手时为 0）。 */
     val voiceLevel: Float get() = voiceAssistant?.micLevel ?: 0f
 
@@ -167,6 +171,7 @@ class MainScreenController(
             },
             conversationLog = conversationLog,
             config = settingsStore.toPophieConfig(),
+            onPartialText = { recognizedText = it },
         ).also {
             applyVoiceSettings(it)
             voiceAssistant = it

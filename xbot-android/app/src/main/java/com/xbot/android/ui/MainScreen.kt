@@ -8,7 +8,9 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
@@ -23,8 +25,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.xbot.android.core.AppViewModel
 import com.xbot.android.webview.FaceWebView
@@ -88,6 +95,9 @@ fun MainScreen(
         // 进入聆听（waking/listening）时沿屏幕一圈呈现旋转的暖色光晕，并随麦克风音量
         // 轻微呼吸。覆盖层无 pointerInput，不拦截双击（仍由 FaceWebView 捕获）。
         ListeningMarquee(controller)
+
+        // —— 端侧实时字幕（聆听相位显示流式识别文字，离开聆听自动隐藏）——
+        SubtitleOverlay(controller)
 
         // —— 右上角调试浮层（两种模式都显示，对标 native-prototype）——
         DebugOverlay(controller)
@@ -172,6 +182,37 @@ private fun DebugOverlay(controller: MainScreenController) {
                 .align(Alignment.TopEnd)
                 .background(Color.Black.copy(alpha = 0.42f))
                 .padding(8.dp),
+        )
+    }
+}
+
+/**
+ * 端侧实时字幕（底部居中半透明药丸）。
+ *
+ * 文字来源：端侧流式 ASR（[com.xbot.android.voice.StreamingAsrService]），仅聆听相位
+ * 喂流；离开聆听（进入 THINKING/SPEAKING/IDLE）时 [MainScreenController.recognizedText]
+ * 被清空，字幕自然消失。与云端 STT 解耦——字幕用端侧低延迟文本，对话用云端高准确文本。
+ */
+@Composable
+private fun SubtitleOverlay(controller: MainScreenController) {
+    val text = controller.recognizedText
+    if (!controller.voiceListening || text.isBlank()) return
+    // 与 DebugOverlay 同构：用 fillMaxSize 的 Box 包裹，Text 通过 align 定位到底部居中。
+    Box(modifier = Modifier.fillMaxSize()) {
+        Text(
+            text = text,
+            color = Color.White,
+            style = TextStyle(fontSize = 16.sp, lineHeight = 22.sp),
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.Center,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 64.dp, start = 16.dp, end = 16.dp)  // 避让左下设置齿轮
+                .widthIn(max = 360.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(Color.Black.copy(alpha = 0.55f))
+                .padding(horizontal = 14.dp, vertical = 8.dp),
         )
     }
 }

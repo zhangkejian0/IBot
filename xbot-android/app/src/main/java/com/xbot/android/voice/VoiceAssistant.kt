@@ -37,6 +37,8 @@ class VoiceAssistant(
     private val perceptionProvider: () -> JSONObject? = { null },
     val conversationLog: ConversationLogger? = null,
     config: PophieConfig = PophieConfig(),
+    /** 端侧流式 ASR 的实时识别文本（驱动字幕浮层）。仅显示，不影响对话。 */
+    private val onPartialText: (String) -> Unit = {},
 ) {
     companion object { private const val TAG = "VoiceAssistant" }
 
@@ -45,6 +47,8 @@ class VoiceAssistant(
     private lateinit var wakeWord: WakeWordService
     /** 端侧降噪器（GTCRN）。由 [start] 异步初始化并注入 [audio]；失败降级直通。 */
     private var denoiser: SpeechDenoiser? = null
+    /** 端侧流式 ASR（仅字幕显示）。由 [start] 异步初始化；失败降级为不显示字幕。 */
+    private var asr: StreamingAsrService? = null
     val pophie = PophieClient(config)
     private val tts = StreamingTtsPlayer(onLevel = onLevel)
 
@@ -62,6 +66,8 @@ class VoiceAssistant(
     @Volatile var wakeWordEnabled = true
     @Volatile var ttsEnabled = true
     @Volatile var streamingSttEnabled = true
+    /** 端侧实时字幕开关（默认开）。关闭后不再喂流给 [asr]，字幕不显示。 */
+    @Volatile var onDeviceSubtitleEnabled = true
 
     /** 唤醒词是否就绪（模型加载成功）。 */
     val wakeWordReady: Boolean get() = ::wakeWord.isInitialized && wakeWord.isReady
@@ -89,6 +95,12 @@ class VoiceAssistant(
     private val wakeFeedListener: (ShortArray) -> Unit = { samples ->
         if (::wakeWord.isInitialized) wakeWord.feedPcm16(samples)
     }
+    /** 端侧 ASR 喂流监听器（稳定引用）。仅在聆听相位喂流（半双工，避开 TTS 回声）。 */
+    private val asrFeedListener: (ShortArray) -> Unit = { samples ->
+        if (onDeviceSubtitleEnabled && _state.value == VoiceState.LISTENING) {
+            asr?.feedPcm16(samples)
+        }
+    }
 
     /** 标记可用（麦克风权限通过）。 */
     fun markAvailable() { isAvailable = true }
@@ -114,6 +126,8 @@ class VoiceAssistant(
         setState(VoiceState.IDLE, null)
         // 端侧降噪：异步初始化（native 加载），完成后注入采集管线。失败降级直通。
         initDenoiser()
+        // 端侧实时字幕：异步初始化（native 加载），完成后挂喂流监听。失败降级为不显示。
+        initAsr()
         audio.start(context)
         startWakeListening()
         startProactivePolling()
@@ -137,6 +151,33 @@ class VoiceAssistant(
         }
     }
 
+    /** 初始化端侧流式 ASR（仅字幕）。幂等：已存在则跳过。模型加载失败则字幕降级关闭。 */
+    private fun initAsr() {
+        if (asr != null) return
+        scope.launch {
+            val a = StreamingAsrService(
+                context = context,
+                modelDir = "voice/sherpa-onnx-streaming-paraformer-bilingual-zh-en",
+                onPartial = onPartialText,
+                onFinal = onPartialText,
+            )
+            a.initialize()
+            if (a.isReady) {
+                a.start()
+                asr = a
+                // 挂上喂流监听（聆听相位门控在 listener 内）。常驻挂载，靠 state 门控喂流，
+                // 避免每次进出聆听都 start/stop 解码线程。
+                audio.removeChunkListener(asrFeedListener)
+                audio.addChunkListener(asrFeedListener)
+                log("asr", "端侧实时字幕已启用")
+            } else {
+                // 加载失败：保留实例便于 release，但不挂监听（字幕不显示）。
+                asr = a
+                log("asr", "端侧 ASR 未就绪，实时字幕关闭", true)
+            }
+        }
+    }
+
     fun stop() {
         isRunning = false
         // 先取消对话协程（避免 finally 块与下面的释放竞争）。
@@ -150,11 +191,14 @@ class VoiceAssistant(
             try { wakeWord.stop() } catch (_: Exception) {}
         }
         try { audio.removeChunkListener(wakeFeedListener) } catch (_: Exception) {}
+        try { audio.removeChunkListener(asrFeedListener) } catch (_: Exception) {}
         // 先摘除 denoiser 引用再 stop（避免采集线程在释放中仍访问）。
         audio.denoiser = null
         try { audio.stop() } catch (_: Exception) {}
         try { denoiser?.release() } catch (_: Exception) {}
         denoiser = null
+        try { asr?.release() } catch (_: Exception) {}
+        asr = null
         try { tts.release() } catch (_: Exception) {}
         try { setState(VoiceState.IDLE, null) } catch (_: Exception) {}
     }
@@ -370,6 +414,9 @@ class VoiceAssistant(
         val sessionDone = AtomicBoolean(false)
         val handlingTurn = AtomicBoolean(false)
         val pendingTurn = AtomicReference<Pair<String, JSONObject?>?>(null)
+        // 上行抗噪门控：与端侧字幕同一判据，挡住低能量杂音/小音量旁人被上传给后端。
+        // 仅在采集线程（feedListener）调用，单写者无需同步。
+        val uplinkGate = AudioGate()
         sawPartialSinceListen = false
         lastPartialText = ""
         lastFinalText = ""
@@ -383,6 +430,9 @@ class VoiceAssistant(
                         is SttStreamClient.Event.Ready -> {
                             sawPartialSinceListen = false
                             lastPartialText = ""
+                            uplinkGate.reset()  // 上行门控对齐新聆听窗口
+                            asr?.reset()  // 端侧字幕对齐新聆听窗口
+                            onPartialText("")
                             setState(VoiceState.LISTENING, null)
                             log("listen", "STT ready，开始聆听")
                         }
@@ -436,8 +486,11 @@ class VoiceAssistant(
             stt.start()
 
             // 持续把麦克风 chunk 上行（仅聆听相位、未在处理轮、会话未结束）。
+            // 经 uplinkGate 抗噪门控：低能量杂音/小音量旁人不上传，减少后端误识别。
             val feedListener: (ShortArray) -> Unit = { samples ->
-                if (_state.value == VoiceState.LISTENING && !handlingTurn.get() && !sessionDone.get()) {
+                if (_state.value == VoiceState.LISTENING && !handlingTurn.get() && !sessionDone.get() &&
+                    uplinkGate.accept(samples)
+                ) {
                     stt.sendChunk(pophie.pcm16ToBytes(samples))
                 }
             }
@@ -459,6 +512,9 @@ class VoiceAssistant(
                             sawPartialSinceListen = false
                             lastPartialText = ""
                             lastFinalText = ""
+                            uplinkGate.reset()  // 上行门控对齐新聆听窗口
+                            asr?.reset()  // 端侧字幕对齐新聆听窗口
+                            onPartialText("")
                             setState(VoiceState.LISTENING, null)
                             log("listen", "回到聆听（多轮复用同一 WS）")
                         }
@@ -541,7 +597,12 @@ class VoiceAssistant(
     }
 
     private fun setState(s: VoiceState, robotStateOverride: String?) {
+        val prev = _state.value
         _state.value = s
+        // 离开聆听相位时清空字幕（进入 THINKING/SPEAKING/IDLE 时隐藏）。
+        if (prev == VoiceState.LISTENING && s != VoiceState.LISTENING) {
+            onPartialText("")
+        }
         val fs = robotStateOverride ?: s.faceState
         onStateChange(s, fs)
     }
