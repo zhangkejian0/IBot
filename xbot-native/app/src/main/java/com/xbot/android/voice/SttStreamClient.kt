@@ -19,9 +19,10 @@ import kotlin.coroutines.resumeWithException
  *
  * 协议：JSON 文本帧。
  * - 发送：start{sample_rate,language} → chunk{data:base64(pcm16)} → commit/end
- * - 接收：meta/ready/partial/final(含 voice)/session_end/error/closed
+ * - 接收：meta/ready/partial/final(含 voice)/stop_speaking/session_end/error/closed
  *
  * 空闲超时由服务端主动 session_end + 关 WS。
+ * stop_speaking：服务端在聆听期判定用户要立即停止语音交互时推送（关键词初筛+LLM 确认）。
  */
 class SttStreamClient(
     private val wsUrl: String,
@@ -36,6 +37,8 @@ class SttStreamClient(
         data class Final(val text: String, val voice: JSONObject?) : Event()
         data class SessionEnd(val message: String?, val conversationIdleSec: Int?) : Event()
         data class Error(val message: String?) : Event()
+        /** 服务端判定用户要立即停止语音交互（聆听期 barge-in 退出）。 */
+        data class StopSpeaking(val text: String, val reason: String?) : Event()
         object Closed : Event()
     }
 
@@ -75,6 +78,7 @@ class SttStreamClient(
                     "partial" -> Event.Partial(obj.optString("text"))
                     "final" -> Event.Final(obj.optString("text"), obj.optJSONObject("voice"))
                     "session_end" -> Event.SessionEnd(obj.optString("message"), obj.optInt("conversation_idle_sec").takeIf { it > 0 })
+                    "stop_speaking" -> Event.StopSpeaking(obj.optString("text"), obj.optString("reason").takeIf { it.isNotEmpty() })
                     "error" -> Event.Error(obj.optString("message"))
                     else -> return
                 }

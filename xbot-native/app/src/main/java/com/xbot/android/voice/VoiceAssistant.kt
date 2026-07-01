@@ -76,6 +76,13 @@ class VoiceAssistant(
     @Volatile private var sawPartialSinceListen = false
     @Volatile private var lastFinalText: String = ""
 
+    /** 用户主动中止当前对话轮（由 stopConversation 置位，runStreamingConversation 据此干净退出）。 */
+    @Volatile private var abortConversation = false
+
+    /** 主动消息轮询协程。 */
+    private var proactiveJob: Job? = null
+    @Volatile private var lastProactiveId: Long = 0L
+
     /** 唤醒词喂流监听器（稳定引用，避免重复 add 累积）。 */
     private val wakeFeedListener: (ShortArray) -> Unit = { samples ->
         if (::wakeWord.isInitialized) wakeWord.feedPcm16(samples)
@@ -98,26 +105,89 @@ class VoiceAssistant(
         scope.launch { wakeWord.initialize() }
     }
 
-    /** 启动：set idle，开麦，唤醒监听。 */
+    /** 启动：set idle，开麦，唤醒监听，主动消息轮询。 */
     fun start() {
         if (isRunning) return
         isRunning = true
         setState(VoiceState.IDLE, null)
         audio.start(context)
         startWakeListening()
+        startProactivePolling()
     }
 
     fun stop() {
         isRunning = false
+        // 先取消对话协程（避免 finally 块与下面的释放竞争）。
         conversationJob?.cancel()
         conversationJob = null
+        proactiveJob?.cancel()
+        proactiveJob = null
         try { activeStt?.close() } catch (_: Exception) {}
         activeStt = null
-        if (::wakeWord.isInitialized) wakeWord.stop()
-        audio.removeChunkListener(wakeFeedListener)
-        audio.stop()
-        tts.release()
-        setState(VoiceState.IDLE, null)
+        if (::wakeWord.isInitialized) {
+            try { wakeWord.stop() } catch (_: Exception) {}
+        }
+        try { audio.removeChunkListener(wakeFeedListener) } catch (_: Exception) {}
+        try { audio.stop() } catch (_: Exception) {}
+        try { tts.release() } catch (_: Exception) {}
+        try { setState(VoiceState.IDLE, null) } catch (_: Exception) {}
+    }
+
+    // ============ 主动消息轮询（每 5s 检查后端是否有到点的欢迎语/提醒）============
+
+    private fun startProactivePolling() {
+        proactiveJob?.cancel()
+        proactiveJob = scope.launch {
+            while (isRunning) {
+                delay(5000)
+                if (_state.value != VoiceState.IDLE) continue
+                try {
+                    val messages = pophie.fetchProactiveMessages(lastProactiveId)
+                    if (messages.isNotEmpty()) {
+                        val msg = messages.last()
+                        lastProactiveId = msg.id
+                        log("proactive", "收到主动消息: ${msg.trigger}")
+                        // 在 idle 时播报。
+                        if (_state.value == VoiceState.IDLE && isRunning) {
+                            playProactive(msg.content)
+                        }
+                    }
+                } catch (_: Exception) {
+                    // 轮询失败静默，下次重试。
+                }
+            }
+        }
+    }
+
+    /** 播报一条主动消息（走 TTS）。 */
+    private suspend fun playProactive(text: String) {
+        if (!ttsEnabled || text.isBlank()) return
+        try {
+            setState(VoiceState.SPEAKING, null)
+            audio.externalLevel = true
+            tts.start(22050)
+            pophie.ttsStream(
+                text = text, voice = null,
+                onMeta = {},
+                onChunk = { pcm -> tts.feedChunk(pcm) },
+                onDone = {},
+            )
+            tts.markFeedingDone()
+            val waitMs = (tts.totalSamplesFed.toLong() * 1000 / 22050) + 2000
+            val startAt = System.currentTimeMillis()
+            while (!tts.drained && System.currentTimeMillis() - startAt < waitMs && isRunning) {
+                delay(50)
+            }
+            tts.release()
+            audio.externalLevel = false
+            onLevel(0f)
+            log("proactive", "主动消息播报完成")
+        } catch (e: Exception) {
+            log("proactive", "主动消息播报失败: ${e.message}", true)
+        } finally {
+            audio.externalLevel = false
+            setState(VoiceState.IDLE, null)
+        }
     }
 
     /** 恢复唤醒监听（幂等：先移除再添加稳定监听器）。 */
@@ -131,6 +201,23 @@ class VoiceAssistant(
     /** 手动触发一轮对话（双击 / 注视触发）。 */
     fun triggerManually(source: String = "manual") {
         onWake(currentKeyword(), source)
+    }
+
+    /**
+     * 主动退出聆听/中止当前轮（barge-in 退出）：停 TTS、取消后端请求、关 STT WS、回 idle。
+     * 对齐 IBotServer 的 exitConversationMode(USER_TOGGLE)。
+     * 复用 [PophieClient.cancelAll] / [StreamingTtsPlayer.release] / [SttStreamClient.close]。
+     * 取消 conversationJob 后由 runStreamingConversation 的 finally 收尾（回 idle + 恢复唤醒）。
+     */
+    fun stopConversation(reason: String = "user_stop") {
+        if (_state.value == VoiceState.IDLE) return
+        log("barge_in", "主动退出聆听/中止当前轮: $reason")
+        abortConversation = true
+        try { pophie.cancelAll() } catch (_: Exception) {}                    // 立即取消 chatStream/ttsStream 的 OkHttp 请求
+        try { tts.release() } catch (_: Exception) {}                         // 立即停播（不等协程取消传播）
+        try { audio.externalLevel = false; onLevel(0f) } catch (_: Exception) {}
+        try { activeStt?.close(sendEndFrame = true) } catch (_: Exception) {} // 通知服务端结束聆听（发 {type:"end"}）
+        try { conversationJob?.cancel() } catch (_: Exception) {}             // 触发 runStreamingConversation finally → idle + 唤醒
     }
 
     /** 运行时更新唤醒词（设置页修改后调用）。 */
@@ -155,8 +242,91 @@ class VoiceAssistant(
         if (_state.value != VoiceState.IDLE) return
         if (conversationJob?.isActive == true) return
         log("wake", "触发对话: $source" + if (source == "wake") "（唤醒词「$keyword」）" else "")
-        // 当前原生版仅实现流式对话模式（streamingSttEnabled 关闭时亦走流式）。
-        conversationJob = scope.launch { runStreamingConversation() }
+        // 流式模式默认；关闭流式或流式失败时走批量 fallback。
+        conversationJob = scope.launch {
+            if (streamingSttEnabled) {
+                try {
+                    runStreamingConversation()
+                } catch (e: Exception) {
+                    log("error", "流式对话异常，fallback 批量: ${e.message}", true)
+                    runBatchConversation()
+                }
+            } else {
+                runBatchConversation()
+            }
+        }
+    }
+
+    /**
+     * 批量对话 fallback：VAD 采集一段语音 → WAV → /api/chat → 流式 TTS。
+     * 对应 Flutter voice_assistant._runConversation。
+     */
+    private suspend fun runBatchConversation() {
+        setState(VoiceState.WAKING, null)
+        if (::wakeWord.isInitialized) wakeWord.stop()
+        audio.removeChunkListener(wakeFeedListener)
+        try {
+            // 1. 聆听：VAD 采集一段语音。
+            setState(VoiceState.LISTENING, null)
+            log("listen", "批量模式：VAD 采集语音…")
+            val vad = audio.captureUtterance(context)
+            if (vad == null || vad.pcm16.isEmpty()) {
+                log("listen", "未采集到语音（超时或无人说话）")
+                return
+            }
+            log("listen", "采集完成: ${vad.pcm16.size} samples, 静音 ${vad.silenceMs}ms")
+            // 2. 思考：批量对话（WAV → /api/chat）。
+            val wav = pophie.pcm16ToWav(vad.pcm16)
+            setState(VoiceState.THINKING, null)
+            log("think", "POST /api/chat（批量）…")
+            val result = pophie.chat(wavBytes = wav, perception = perceptionProvider())
+            robotState = result.robotState
+            log("think", "/api/chat 完成 | LLM=\"${result.text}\" | robotState=${result.robotState}")
+            if (result.text.isBlank()) {
+                log("think", "静默回复，不播报", true)
+                return
+            }
+            // 3. 播报：流式 TTS。
+            if (ttsEnabled) {
+                speakText(result.text, null)
+            }
+        } catch (e: Exception) {
+            log("error", "批量对话异常: ${e.message}", true)
+        } finally {
+            robotState = null
+            if (isRunning) {
+                startWakeListening()
+                setState(VoiceState.IDLE, null)
+                log("end", "批量对话结束，回到 idle")
+            }
+        }
+    }
+
+    /** 播报一段文本（流式 TTS）。供 handleTurn / 批量 / 主动消息共用。 */
+    private suspend fun speakText(text: String, voice: JSONObject?) {
+        setState(VoiceState.SPEAKING, robotState)
+        audio.externalLevel = true
+        tts.start(22050)
+        try {
+            pophie.ttsStream(
+                text = text, voice = voice,
+                onMeta = {},
+                onChunk = { pcm -> tts.feedChunk(pcm) },
+                onDone = {},
+            )
+        } catch (e: Exception) {
+            log("speak", "TTS 失败: ${e.message}", true)
+        }
+        tts.markFeedingDone()
+        val waitMs = (tts.totalSamplesFed.toLong() * 1000 / 22050) + 2000
+        val startAt = System.currentTimeMillis()
+        while (!tts.drained && System.currentTimeMillis() - startAt < waitMs && isRunning) {
+            delay(50)
+        }
+        tts.release()
+        audio.externalLevel = false
+        onLevel(0f)
+        log("speak", "播报完成")
     }
 
     /**
@@ -177,6 +347,7 @@ class VoiceAssistant(
         sawPartialSinceListen = false
         lastPartialText = ""
         lastFinalText = ""
+        abortConversation = false
 
         try {
             try {
@@ -217,6 +388,13 @@ class VoiceAssistant(
                             log("end", "服务端结束会话: ${ev.message ?: "空闲超时"}")
                             sessionDone.set(true)
                         }
+                        is SttStreamClient.Event.StopSpeaking -> {
+                            // 服务端判定用户要立即停止语音交互（关键词初筛+LLM 确认）：
+                            // 停 TTS、关 STT WS、回 idle。复用 stopConversation 停止原语。
+                            log("barge_in", "服务端判定停止语音交互: \"${ev.text}\"（${ev.reason ?: "无理由"}）")
+                            sessionDone.set(true)
+                            stopConversation("server_stop_speaking")
+                        }
                         is SttStreamClient.Event.Error -> {
                             log("error", "STT 错误: ${ev.message}", true)
                             sessionDone.set(true)
@@ -239,7 +417,7 @@ class VoiceAssistant(
             }
             audio.addChunkListener(feedListener)
             try {
-                while (!sessionDone.get() && isRunning) {
+                while (!sessionDone.get() && isRunning && !abortConversation) {
                     val turn = pendingTurn.getAndSet(null)
                     if (turn != null) {
                         handlingTurn.set(true)
@@ -250,7 +428,7 @@ class VoiceAssistant(
                         } finally {
                             handlingTurn.set(false)
                         }
-                        if (!sessionDone.get() && isRunning) {
+                        if (!sessionDone.get() && isRunning && !abortConversation) {
                             // 回到聆听（多轮复用同一 WS）。
                             sawPartialSinceListen = false
                             lastPartialText = ""
@@ -344,7 +522,9 @@ class VoiceAssistant(
 
     fun release() {
         stop()
-        if (::wakeWord.isInitialized) wakeWord.release()
+        if (::wakeWord.isInitialized) {
+            try { wakeWord.release() } catch (_: Exception) {}
+        }
         scope.coroutineContext[Job]?.cancel()
     }
 }
