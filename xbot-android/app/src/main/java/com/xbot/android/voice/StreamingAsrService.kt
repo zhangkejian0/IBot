@@ -50,12 +50,14 @@ class StreamingAsrService(
     companion object {
         private const val TAG = "StreamingAsrService"
         private const val SAMPLE_RATE = 16000
-        /** partial 回调节流间隔（ms）：避免每个 100ms chunk 都刷一次 UI。 */
-        private const val PARTIAL_THROTTLE_MS = 150L
+        /** partial 回调节流间隔（ms）：避免每个 chunk 都刷一次 UI。
+         *  80ms 兼顾实时感与刷屏——比帧间隔（~100ms）略小，保证每帧有更新机会。 */
+        private const val PARTIAL_THROTTLE_MS = 80L
 
         // ============ 输出稳定性过滤参数 ============
-        /** partial 前缀需连续稳定的次数才刷 UI。 */
-        private const val STABILITY_HITS = 2
+        /** partial 前缀需连续稳定的次数才刷 UI。1 次 = 首个单调增长帧即显示；
+         *  startsWith 检查本身已抑制回删/跳字，无需二次确认以换取实时性。 */
+        private const val STABILITY_HITS = 1
         /** partial 最短显示长度（字符）。 */
         private const val MIN_PARTIAL_LEN = 2
 

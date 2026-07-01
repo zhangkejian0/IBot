@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
@@ -25,7 +24,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextAlign
@@ -187,7 +185,7 @@ private fun DebugOverlay(controller: MainScreenController) {
 }
 
 /**
- * 端侧实时字幕（底部居中半透明药丸）。
+ * 端侧实时字幕（底部居中纯白文字，无背景）。
  *
  * 文字来源：端侧流式 ASR（[com.xbot.android.voice.StreamingAsrService]），仅聆听相位
  * 喂流；离开聆听（进入 THINKING/SPEAKING/IDLE）时 [MainScreenController.recognizedText]
@@ -210,8 +208,6 @@ private fun SubtitleOverlay(controller: MainScreenController) {
                 .align(Alignment.BottomCenter)
                 .padding(bottom = 64.dp, start = 16.dp, end = 16.dp)  // 避让左下设置齿轮
                 .widthIn(max = 360.dp)
-                .clip(RoundedCornerShape(12.dp))
-                .background(Color.Black.copy(alpha = 0.55f))
                 .padding(horizontal = 14.dp, vertical = 8.dp),
         )
     }
