@@ -28,6 +28,10 @@ data class AppSettings(
     val ttsEnabled: Boolean = true,
     val streamingSttEnabled: Boolean = true,
     val wakeWord: String = "你好小白",
+    /** 声纹识别开关：识别说话人身份并上传后端做个性化回复。关闭后不提嵌入、不上传身份。 */
+    val voiceIdentityEnabled: Boolean = true,
+    /** 声纹匹配阈值（余弦相似度，0..1）。≥ 阈值才算匹配主人。家用单麦克风经验值 0.6，可在声纹测试面板调。 */
+    val voiceMatchThreshold: Float = 0.6f,
 
     // —— Pophie 服务 ——
     val baseUrl: String = "http://223.109.143.135:8000",

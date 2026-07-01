@@ -91,6 +91,7 @@ class MainActivity : ComponentActivity() {
                             onRequestMic = { requestMicPermission() },
                             settingsStore = appViewModel.settingsStore,
                             peopleProvider = { appViewModel.personRepository.people },
+                            voiceRecognizerProvider = { appViewModel.voiceRecognizer },
                         )
                         MainScreen(
                             controller = controller,

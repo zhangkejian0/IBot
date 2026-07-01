@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -26,6 +27,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -37,13 +39,17 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.xbot.android.core.AppViewModel
+import com.xbot.android.voice.AudioCapture
 import com.xbot.android.voice.ConversationEntry
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -64,6 +70,7 @@ fun SettingsScreen(
     val store = controller.settingsStore
     val s = store.settings
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
 
     // 弹窗状态。
     var showLog by remember { mutableStateOf(false) }
@@ -71,6 +78,16 @@ fun SettingsScreen(
     var confirmReset by remember { mutableStateOf(false) }
     var connResult by remember { mutableStateOf<Boolean?>(null) }
     var testing by remember { mutableStateOf(false) }
+    // 声纹管理状态。
+    var showVoiceManager by remember { mutableStateOf(false) }
+    var voiceRecording by remember { mutableStateOf(false) }
+    var voiceMsg by remember { mutableStateOf<String?>(null) }
+    // 触发声纹样本数刷新（录入/清除后重新读取）。
+    var voiceRefresh by remember { mutableStateOf(0) }
+    // 声纹测试状态。
+    var showVoiceTest by remember { mutableStateOf(false) }
+    var voiceTesting by remember { mutableStateOf(false) }
+    var voiceTestResult by remember { mutableStateOf<com.xbot.android.core.AppViewModel.VoiceTestResult?>(null) }
 
     if (showLog) {
         ConversationLogScreen(controller, onBack = { showLog = false })
@@ -120,6 +137,16 @@ fun SettingsScreen(
                     InfoRow("认识我", "已录入 ${appViewModel.personRepository.people.size} 人")
                     SwitchRow("启用身份识别", s.identityEnabled) { v ->
                         store.update { it.copy(identityEnabled = v) }
+                    }
+                    SwitchRow("声纹识别", s.voiceIdentityEnabled, enabled = s.voiceEnabled) { v ->
+                        store.update { it.copy(voiceIdentityEnabled = v) }
+                        controller.applyVoiceSettings()
+                    }
+                    NavRow("声纹管理", "已录入 ${appViewModel.ownerVoiceSampleCount} 句", enabled = s.voiceEnabled) {
+                        showVoiceManager = true
+                    }
+                    NavRow("声纹测试", "说话测试匹配度并调阈值", enabled = s.voiceEnabled) {
+                        showVoiceTest = true
                     }
                     NavRow("重新设置主人", "清除主人信息并重新进入引导") { confirmReset = true }
                 }
@@ -263,6 +290,223 @@ fun SettingsScreen(
             title = { Text("重新设置主人") },
             text = { Text("将清除主人信息（含人脸）并重新进入引导。此操作不可撤销，确定继续吗？") },
         )
+    }
+
+    // —— 弹窗：声纹管理 ——
+    if (showVoiceManager) {
+        @Suppress("UNUSED_EXPRESSION") voiceRefresh  // 建立重组依赖，录入/清除后刷新计数
+        val currentCount = appViewModel.ownerVoiceSampleCount
+        AlertDialog(
+            onDismissRequest = {
+                if (!voiceRecording) { showVoiceManager = false; voiceMsg = null }
+            },
+            confirmButton = { TextButton(onClick = {
+                if (!voiceRecording) { showVoiceManager = false; voiceMsg = null }
+            }) { Text("关闭") } },
+            title = { Text("声纹管理") },
+            text = {
+                Column {
+                    Text("已录入声纹：${currentCount} 句")
+                    Spacer(Modifier.height(8.dp))
+                    if (voiceMsg != null) {
+                        Text(voiceMsg!!, color = Color(0xFF9A9AA0), fontSize = 13.sp)
+                        Spacer(Modifier.height(8.dp))
+                    }
+                    // 录入一句按钮。
+                    TextButton(
+                        onClick = {
+                            if (voiceRecording || !appViewModel.canEnrollVoice) return@TextButton
+                            voiceRecording = true
+                            voiceMsg = "录音中…请对着机器人说一句话"
+                            scope.launch {
+                                val capture = AudioCapture()
+                                val result = withContext(Dispatchers.IO) {
+                                    runCatching { capture.captureUtterance(context) }.getOrNull()
+                                }
+                                try { capture.stop() } catch (_: Exception) {}
+                                val pcm = result?.pcm16
+                                val added = if (pcm != null) appViewModel.saveVoiceToOwner(listOf(pcm)) else 0
+                                voiceRecording = false
+                                voiceMsg = if (added > 0) "录入成功（+1 句）" else "录入失败，请重试"
+                                if (added > 0) voiceRefresh++
+                            }
+                        },
+                        enabled = !voiceRecording && appViewModel.canEnrollVoice,
+                    ) { Text(if (voiceRecording) "录音中…" else "录入一句") }
+                    // 清除声纹按钮。
+                    if (currentCount > 0) {
+                        TextButton(onClick = {
+                            if (appViewModel.clearOwnerVoice()) {
+                                voiceMsg = "已清除全部声纹"
+                                voiceRefresh++
+                            }
+                        }) { Text("清除声纹", color = Color(0xFFFF453A)) }
+                    }
+                    if (!appViewModel.canEnrollVoice) {
+                        Spacer(Modifier.height(4.dp))
+                        Text("声纹模型未就绪，请稍后重试", color = Color(0xFF6A6A70), fontSize = 12.sp)
+                    }
+                }
+            },
+        )
+    }
+
+    // —— 弹窗：声纹测试 ——
+    if (showVoiceTest) {
+        val green = Color(0xFF30D158)
+        val red = Color(0xFFFF453A)
+        val accent = Color(0xFF0A84FF)
+        val r = voiceTestResult
+        // 测试结果的状态色与文案（阈值滑动后基于上次分数实时重判）。
+        val statusColor = when {
+            r == null -> accent
+            r.score < 0f -> Color(0xFF9A9AA0)  // 无效输入（未就绪/过短/无人录入）
+            r.matched -> green
+            else -> red
+        }
+        AlertDialog(
+            onDismissRequest = {
+                if (!voiceTesting) { showVoiceTest = false; voiceTestResult = null }
+            },
+            confirmButton = { TextButton(onClick = {
+                if (!voiceTesting) { showVoiceTest = false; voiceTestResult = null }
+            }) { Text("关闭") } },
+            title = { Text("声纹测试") },
+            text = {
+                Column {
+                    // 操作按钮：测一句话。
+                    TextButton(
+                        onClick = {
+                            if (voiceTesting || !appViewModel.canEnrollVoice) return@TextButton
+                            voiceTesting = true
+                            voiceTestResult = null
+                            scope.launch {
+                                val capture = AudioCapture()
+                                val result = withContext(Dispatchers.IO) {
+                                    runCatching { capture.captureUtterance(context) }.getOrNull()
+                                }
+                                try { capture.stop() } catch (_: Exception) {}
+                                voiceTesting = false
+                                val pcm = result?.pcm16
+                                voiceTestResult = if (pcm != null) appViewModel.testVoice(pcm)
+                                                  else com.xbot.android.core.AppViewModel.VoiceTestResult(false, -1f, s.voiceMatchThreshold, null)
+                            }
+                        },
+                        enabled = !voiceTesting && appViewModel.canEnrollVoice,
+                    ) { Text(if (voiceTesting) "录音中…请说话" else "测试一句") }
+
+                    Spacer(Modifier.height(10.dp))
+
+                    // 结果区。
+                    if (voiceTesting) {
+                        Text("正在采音与比对…", color = accent, fontSize = 13.sp)
+                    } else if (r != null) {
+                        if (r.score < 0f) {
+                            Text("未取到有效语音（模型未就绪/语音过短/未录入声纹）", color = statusColor, fontSize = 13.sp)
+                        } else {
+                            // 匹配状态行。
+                            Text(
+                                if (r.matched) "✓ 匹配：${r.name ?: "未知"}" else "✗ 未匹配（最相似：${r.name ?: "无"}）",
+                                color = statusColor,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            // 分数行。
+                            Text(
+                                "相似度 %.2f    阈值 %.2f".format(r.score, s.voiceMatchThreshold),
+                                color = Color(0xFF9A9AA0),
+                                fontSize = 13.sp,
+                            )
+                            // 分数 vs 阈值的可视化条。
+                            Spacer(Modifier.height(6.dp))
+                            ScoreBar(r.score, s.voiceMatchThreshold, statusColor, green, red)
+                        }
+                    } else {
+                        Text("点击「测试一句」，对着机器人说话", color = Color(0xFF9A9AA0), fontSize = 13.sp)
+                    }
+
+                    Spacer(Modifier.height(16.dp))
+
+                    // 阈值调节滑块（0.01 步进，0.30~0.90）。
+                    Text("匹配阈值：%.2f".format(s.voiceMatchThreshold), color = Color.White, fontSize = 13.sp)
+                    Slider(
+                        value = s.voiceMatchThreshold,
+                        onValueChange = { v ->
+                            // 步进 0.01：量化到最近档位。
+                            val stepped = (v * 100).toInt() / 100f
+                            appViewModel.updateVoiceThreshold(stepped)
+                            // 基于上次分数实时重判「是否匹配」。
+                            voiceTestResult = voiceTestResult?.let {
+                                it.copy(matched = it.score >= stepped, threshold = stepped)
+                            }
+                        },
+                        valueRange = 0.30f..0.90f,
+                        steps = 0,  // 连续滑动，onValueChange 内量化步进
+                    )
+
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "建议：自己多说几句取稳定高分，换人说验证能区分；阈值越高越严格（误认少但可能认不出）。",
+                        color = Color(0xFF6A6A70),
+                        fontSize = 11.sp,
+                    )
+                    if (!appViewModel.canEnrollVoice) {
+                        Spacer(Modifier.height(6.dp))
+                        Text("声纹模型未就绪，请稍后重试", color = Color(0xFF6A6A70), fontSize = 12.sp)
+                    }
+                }
+            },
+        )
+    }
+}
+
+/** 分数 vs 阈值的可视化条：分数条 + 阈值刻度线。 */
+@Composable
+private fun ScoreBar(score: Float, threshold: Float, scoreColor: Color, passColor: Color, failColor: Color) {
+    val range = 0.30f..0.90f
+    fun norm(v: Float) = ((v - range.start) / (range.endInclusive - range.start)).coerceIn(0f, 1f)
+    val sNorm = norm(score)
+    val tNorm = norm(threshold)
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(28.dp),
+    ) {
+        // 轨道。
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(8.dp)
+                .align(Alignment.CenterStart)
+                .background(Color(0xFF2C2C2E), RoundedCornerShape(4.dp)),
+        )
+        // 分数条（从左到分数位置）。
+        Box(
+            modifier = Modifier
+                .fillMaxWidth(sNorm)
+                .height(8.dp)
+                .align(Alignment.CenterStart)
+                .background(scoreColor, RoundedCornerShape(4.dp)),
+        )
+        // 阈值刻度线：宽度 tNorm 的容器，内部 2dp 线靠右对齐 → 线落在阈值位置。
+        Box(
+            modifier = Modifier
+                .fillMaxWidth(tNorm)
+                .fillMaxHeight()
+                .align(Alignment.CenterStart),
+            contentAlignment = Alignment.CenterEnd,
+        ) {
+            Box(
+                modifier = Modifier
+                    .width(2.dp)
+                    .fillMaxHeight()
+                    .background(
+                        if (score >= threshold) passColor else failColor,
+                        RoundedCornerShape(1.dp),
+                    ),
+            )
+        }
     }
 }
 

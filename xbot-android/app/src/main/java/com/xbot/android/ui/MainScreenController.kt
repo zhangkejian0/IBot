@@ -48,7 +48,8 @@ class MainScreenController(
     private val hasMicPermission: () -> Boolean,
     private val onRequestMic: () -> Unit,
     val settingsStore: SettingsStore,
-    peopleProvider: () -> List<Person> = { emptyList() },
+    private val peopleProvider: () -> List<Person> = { emptyList() },
+    private val voiceRecognizerProvider: () -> com.xbot.android.voice.VoiceRecognizer? = { null },
 ) {
     companion object {
         private const val FACE_MODEL_PATH = "face_landmarker.task"
@@ -164,15 +165,20 @@ class MainScreenController(
             },
             perceptionProvider = {
                 // 由当前检测结果构造 Pophie 感知上下文（表情/身份/手势/物体/场景）。
+                // 说话人身份（声纹）作为人脸身份的回退，传给 Perception.build。
                 com.xbot.android.voice.Perception.build(
                     result,
                     com.xbot.android.core.AppTuning.FLIP_FRONT_CAMERA_HORIZONTAL,
+                    speaker = voiceAssistant?.currentSpeaker,
                 )
             },
             conversationLog = conversationLog,
             config = settingsStore.toPophieConfig(),
             onPartialText = { recognizedText = it },
         ).also {
+            // 注入声纹识别器与人物库（对话时识别说话人）。
+            it.voiceRecognizer = voiceRecognizerProvider()
+            it.peopleProvider = peopleProvider
             applyVoiceSettings(it)
             voiceAssistant = it
         }
@@ -186,6 +192,7 @@ class MainScreenController(
         va.wakeWordEnabled = s.wakeWordEnabled
         va.ttsEnabled = s.ttsEnabled
         va.streamingSttEnabled = s.streamingSttEnabled
+        va.voiceIdentityEnabled = s.voiceIdentityEnabled
         va.pophie.config = va.pophie.config.copy(
             baseUrl = s.baseUrl,
             voiceId = s.voiceId,
@@ -373,6 +380,7 @@ fun rememberMainScreenController(
     onRequestMic: () -> Unit,
     settingsStore: SettingsStore,
     peopleProvider: () -> List<Person> = { emptyList() },
+    voiceRecognizerProvider: () -> com.xbot.android.voice.VoiceRecognizer? = { null },
 ): MainScreenController {
     val context = androidx.compose.ui.platform.LocalContext.current
     val controller = remember {
@@ -388,6 +396,7 @@ fun rememberMainScreenController(
             onRequestMic = onRequestMic,
             settingsStore = settingsStore,
             peopleProvider = peopleProvider,
+            voiceRecognizerProvider = voiceRecognizerProvider,
         )
     }
     LaunchedEffect(Unit) {

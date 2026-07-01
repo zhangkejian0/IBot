@@ -45,6 +45,8 @@ class VoiceAssistant(
         /** TTS 结束后抑制麦克上行/字幕/唤醒的时长(ms)，覆盖扬声器物理余音 + 房间短混响。
          *  过短 → 回声泄漏被识别成用户语音（自激循环）；过长 → 接话略迟。默认 350ms。 */
         private const val ECHO_SUPPRESSION_MS = 350L
+        /** 声纹识别 PCM 环形缓冲容量（采样数）。约 2s@16k，足够 CAM++ 提嵌入。 */
+        private const val SPEAKER_BUF_SAMPLES = 32000
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -73,6 +75,21 @@ class VoiceAssistant(
     @Volatile var streamingSttEnabled = true
     /** 端侧实时字幕开关（默认开）。关闭后不再喂流给 [asr]，字幕不显示。 */
     @Volatile var onDeviceSubtitleEnabled = true
+    /** 声纹识别开关（默认开）。关闭后不提嵌入、不上传说话人身份。 */
+    @Volatile var voiceIdentityEnabled = true
+
+    /** 声纹识别器（由外部注入；为 null 时不启用说话人识别）。 */
+    @Volatile var voiceRecognizer: VoiceRecognizer? = null
+    /** 人物库提供者（用于声纹比对）。返回全部已录入人物。 */
+    @Volatile var peopleProvider: () -> List<com.xbot.android.model.Person> = { emptyList() }
+
+    /**
+     * 当前说话人姓名（声纹识别结果）。每轮 final 时刷新，供 perceptionProvider 读取。
+     * - 命中已录入主人 → 主人昵称
+     * - 未命中/未启用/模型未就绪 → null（不上传身份）
+     */
+    @Volatile var currentSpeaker: String? = null
+        private set
 
     /** 唤醒词是否就绪（模型加载成功）。 */
     val wakeWordReady: Boolean get() = ::wakeWord.isInitialized && wakeWord.isReady
@@ -103,6 +120,27 @@ class VoiceAssistant(
     /** 设置冷却期：当前时间 + [ECHO_SUPPRESSION_MS]。TTS 播放结束（含主动消息）时调用。 */
     private fun applyEchoSuppression() {
         suppressMicUntilMs = System.currentTimeMillis() + ECHO_SUPPRESSION_MS
+    }
+
+    /**
+     * 异步声纹识别：snapshot 当前聆听窗口的 PCM 缓冲，提嵌入并与人物库比对。
+     * 在 STT WS 回调线程调用，提嵌入/native 推理丢到协程，不阻塞对话主流程。
+     * 结果写入 [currentSpeaker]（命中主人昵称 / null）。未启用/模型未就绪/过短 → null。
+     */
+    private fun identifySpeakerAsync(buf: ArrayDeque<Short>) {
+        val recognizer = voiceRecognizer
+        if (!voiceIdentityEnabled || recognizer == null || !recognizer.isReady) {
+            currentSpeaker = null
+            return
+        }
+        // snapshot：拷贝当前缓冲内容（后续 chunk 会继续追加，且 WS 回调与协程异步）。
+        val pcm = ShortArray(buf.size) { buf[it] }
+        scope.launch {
+            val emb = recognizer.embed(pcm)
+            val name = if (emb != null) recognizer.identify(emb, peopleProvider())?.name else null
+            currentSpeaker = name
+            if (name != null) log("voice_id", "声纹识别：$name")
+        }
     }
 
     /** 主动消息轮询协程。 */
@@ -439,6 +477,9 @@ class VoiceAssistant(
         // 上行抗噪门控：与端侧字幕同一判据，挡住低能量杂音/小音量旁人被上传给后端。
         // 仅在采集线程（feedListener）调用，单写者无需同步。
         val uplinkGate = AudioGate()
+        // 声纹 PCM 环形缓冲：聆听相位累积，final 时 snapshot 提嵌入。单写者（feedListener）。
+        val speakerBuf = ArrayDeque<Short>()
+        fun resetSpeakerBuf() { speakerBuf.clear() }
         sawPartialSinceListen = false
         lastPartialText = ""
         lastFinalText = ""
@@ -454,6 +495,7 @@ class VoiceAssistant(
                             lastPartialText = ""
                             // 回声冷却期内不重置门控：保留较高底噪估计，避免在残留回声窗内变得过松。
                             if (!micSuppressed()) uplinkGate.reset()
+                            resetSpeakerBuf()  // 新聆听窗口，清空声纹缓冲
                             asr?.reset()  // 端侧字幕对齐新聆听窗口
                             onPartialText("")
                             setState(VoiceState.LISTENING, null)
@@ -482,6 +524,9 @@ class VoiceAssistant(
                             lastFinalText = text
                             sawPartialSinceListen = false
                             pendingTurn.set(text to ev.voice)
+                            // 声纹识别：final 到来时本窗口已有一段完整语音，snapshot 缓冲提嵌入。
+                            // 在 WS 回调线程，提嵌入耗时，丢协程异步执行（不阻塞对话主流程）。
+                            identifySpeakerAsync(speakerBuf)
                         }
                         is SttStreamClient.Event.SessionEnd -> {
                             log("end", "服务端结束会话: ${ev.message ?: "空闲超时"}")
@@ -512,10 +557,20 @@ class VoiceAssistant(
             // 经 uplinkGate 抗噪门控：低能量杂音/小音量旁人不上传，减少后端误识别。
             // 回声冷却期内禁止上行：TTS 刚结束的扬声器余音+房间混响会被误识别成用户语音（自激循环）。
             val feedListener: (ShortArray) -> Unit = { samples ->
-                if (_state.value == VoiceState.LISTENING && !handlingTurn.get() && !sessionDone.get() &&
-                    !micSuppressed() && uplinkGate.accept(samples)
-                ) {
-                    stt.sendChunk(pophie.pcm16ToBytes(samples))
+                val listening = _state.value == VoiceState.LISTENING &&
+                    !handlingTurn.get() && !sessionDone.get() && !micSuppressed()
+                if (listening) {
+                    if (uplinkGate.accept(samples)) {
+                        stt.sendChunk(pophie.pcm16ToBytes(samples))
+                    }
+                    // 声纹缓冲：累积本窗口 PCM（无论是否过门控，保证有足够语音提嵌入）。
+                    // 仅在启用声纹且有识别器时累积，避免无谓开销。
+                    if (voiceIdentityEnabled && voiceRecognizer != null) {
+                        for (s in samples) {
+                            speakerBuf.addLast(s)
+                            if (speakerBuf.size > SPEAKER_BUF_SAMPLES) speakerBuf.removeFirst()
+                        }
+                    }
                 }
             }
             audio.addChunkListener(feedListener)
@@ -539,6 +594,7 @@ class VoiceAssistant(
                             // 回声冷却期内不重置门控：刚播完 TTS，保留较高底噪估计挡住扬声器余音，
                             // 避免在残留回声窗内 reset 到敏感初值 0.0025 而放过回声。
                             if (!micSuppressed()) uplinkGate.reset()
+                            resetSpeakerBuf()  // 新聆听窗口，清空声纹缓冲
                             asr?.reset()  // 端侧字幕对齐新聆听窗口
                             onPartialText("")
                             setState(VoiceState.LISTENING, null)
@@ -557,6 +613,7 @@ class VoiceAssistant(
             activeStt = null
             try { stt.close(sendEndFrame = true) } catch (_: Exception) {}
             robotState = null
+            currentSpeaker = null  // 会话结束，清空说话人身份（避免上轮残留）
             if (isRunning) {
                 startWakeListening()
                 setState(VoiceState.IDLE, null)

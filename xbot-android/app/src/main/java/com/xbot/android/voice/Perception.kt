@@ -51,18 +51,19 @@ object Perception {
      * 构造感知上下文 JSON（仅非空字段）。
      * @param result 当前检测结果
      * @param mirror 前置镜像（影响左右位置描述）
+     * @param speaker 声纹识别出的说话人姓名（可选）。人脸身份优先；无人脸时用声纹填 identity。
      */
-    fun build(result: DetectionResult, mirror: Boolean): JSONObject {
+    fun build(result: DetectionResult, mirror: Boolean, speaker: String? = null): JSONObject {
         val m = JSONObject()
         val face = result.face
         // 表情。
         face?.expression?.expression?.let { e ->
             m.put("facial_expression", exprKey(e))
         }
-        // 身份。
-        face?.identity?.person?.name?.let { name ->
-            if (name.isNotEmpty()) m.put("identity", name)
-        }
+        // 身份：人脸优先（视觉身份更可靠），无人脸时回退声纹。
+        val faceName = face?.identity?.person?.name?.takeIf { it.isNotEmpty() }
+        val identity = faceName ?: speaker?.takeIf { it.isNotEmpty() }
+        identity?.let { m.put("identity", it) }
         // 手势。
         gestureKey(result.hands.firstOrNull()?.gesture)?.let { g ->
             m.put("gesture", JSONObject().put("type", g))
@@ -95,13 +96,13 @@ object Perception {
         val held = objects.filter { it.heldByHand }.maxByOrNull { it.confidence }?.label
         if (!held.isNullOrEmpty()) m.put("held_object", held)
         // 场景描述（自然语言）。
-        buildSceneDescription(result, mirror)?.let { m.put("scene", it) }
+        buildSceneDescription(result, mirror, identity)?.let { m.put("scene", it) }
         return m
     }
 
     /** 拼装自然语言场景描述，利于大模型直接理解。 */
-    private fun buildSceneDescription(result: DetectionResult, mirror: Boolean): String? {
-        val who = result.face?.identity?.person?.name?.takeIf { it.isNotEmpty() } ?: "用户"
+    private fun buildSceneDescription(result: DetectionResult, mirror: Boolean, identity: String?): String? {
+        val who = identity ?: "用户"
         val parts = mutableListOf<String>()
         // 手持。
         val held = result.objects.filter { it.heldByHand && it.confidence >= CONF_THRESHOLD }

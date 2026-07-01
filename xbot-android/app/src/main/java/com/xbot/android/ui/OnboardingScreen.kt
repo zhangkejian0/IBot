@@ -14,6 +14,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -30,31 +31,37 @@ import com.xbot.android.core.AppViewModel
 import com.xbot.android.model.EnrollCapture
 import com.xbot.android.model.Gender
 import com.xbot.android.model.OwnerProfile
+import com.xbot.android.voice.AudioCapture
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.Executors
 import kotlin.coroutines.resume
 
 /**
- * 首次激活向导（5 步）。对应 Flutter OnboardingScreen。
+ * 首次激活向导（6 步）。对应 Flutter OnboardingScreen。
  *
  * 0. 欢迎
  * 1. 关于你：昵称（必填）/性别/生日
  * 2. 机器人昵称（默认「狗蛋」）
  * 3. 人脸录入：采若干样本（captureFaceSample）
- * 4. 总结 → completeOnboarding → 进 ready
+ * 4. 声纹录入：采若干句语音（captureUtterance + 声纹嵌入）
+ * 5. 总结 → completeOnboarding → 进 ready
  */
 @Composable
 fun OnboardingScreen(
     appViewModel: AppViewModel,
     onComplete: () -> Unit,
 ) {
-    val totalSteps = 5
+    val totalSteps = 6
     val requiredSamples = 5
+    val requiredVoiceSamples = 3
     var step by remember { mutableStateOf(0) }
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
 
     // 表单暂存。
     var nickname by remember { mutableStateOf("") }
@@ -66,6 +73,11 @@ fun OnboardingScreen(
     var faceState by remember { mutableStateOf(FaceScanState.IDLE) }
     var faceScanning by remember { mutableStateOf(false) }
     var faceMessage by remember { mutableStateOf<String?>(null) }
+    // 声纹样本（PCM16）+ 录入状态。
+    val voiceSamples = remember { mutableStateListOf<ShortArray>() }
+    var voiceState by remember { mutableStateOf(FaceScanState.IDLE) }
+    var voiceScanning by remember { mutableStateOf(false) }
+    var voiceMessage by remember { mutableStateOf<String?>(null) }
 
     // 启动人脸录入：循环采样直到达到 requiredSamples 或超时。
     fun startFaceScan() {
@@ -108,6 +120,50 @@ fun OnboardingScreen(
         faceSamples.clear()
         faceState = FaceScanState.IDLE
         faceMessage = null
+    }
+
+    // 启动声纹录入：循环采集若干句 PCM（带 VAD 端点检测），声纹模型就绪时立即提嵌入校验。
+    fun startVoiceScan() {
+        if (!appViewModel.canEnrollVoice) {
+            voiceState = FaceScanState.FAILED
+            voiceMessage = "未加载声纹模型，可稍后在设置中补录"
+            return
+        }
+        voiceScanning = true
+        voiceState = FaceScanState.COLLECTING
+        voiceSamples.clear()
+        voiceMessage = null
+        scope.launch {
+            val capture = AudioCapture()
+            val deadline = System.currentTimeMillis() + 30_000
+            while (voiceSamples.size < requiredVoiceSamples && System.currentTimeMillis() < deadline) {
+                // captureUtterance 阻塞直到录完一句（VAD 端点检测），必须在 IO 线程。
+                val result = withContext(Dispatchers.IO) {
+                    withTimeoutOrNull(10_000L) { capture.captureUtterance(context) }
+                }
+                val pcm = result?.pcm16
+                // 校验：能提嵌入才算有效样本（过短/噪声会被 embed 拒绝）。
+                if (pcm != null && appViewModel.enrollVoice(pcm) != null) {
+                    voiceSamples.add(pcm)
+                    if (voiceSamples.size < requiredVoiceSamples) delay(400)
+                }
+            }
+            try { capture.stop() } catch (_: Exception) {}
+            if (voiceSamples.isEmpty()) {
+                voiceState = FaceScanState.FAILED
+                voiceMessage = "未录到清晰语音，可重试或稍后补录"
+            } else {
+                voiceState = FaceScanState.SUCCESS
+                voiceMessage = "记住你的声音啦（${voiceSamples.size}/$requiredVoiceSamples）"
+            }
+            voiceScanning = false
+        }
+    }
+
+    fun resetVoiceScan() {
+        voiceSamples.clear()
+        voiceState = FaceScanState.IDLE
+        voiceMessage = null
     }
 
     Box(
@@ -162,10 +218,18 @@ fun OnboardingScreen(
                         message = faceMessage,
                         requiredSamples = requiredSamples,
                     )
-                    4 -> SummaryStep(
+                    4 -> VoiceScanStep(
+                        voiceState = voiceState,
+                        scanning = voiceScanning,
+                        message = voiceMessage,
+                        collected = voiceSamples.size,
+                        required = requiredVoiceSamples,
+                    )
+                    5 -> SummaryStep(
                         nickname = nickname, robotName = robotName,
                         gender = gender, birthday = birthday,
                         faceCount = faceSamples.size,
+                        voiceCount = voiceSamples.size,
                     )
                 }
             }
@@ -173,23 +237,29 @@ fun OnboardingScreen(
             // 导航按钮（固定在底部，独立 Row，不与上方内容重叠）。
             val isLast = step == totalSteps - 1
             val isFaceStep = step == 3
+            val isVoiceStep = step == 4
+            val anyScanning = faceScanning || voiceScanning
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 if (step > 0) {
-                    OutlinedButton(onClick = { step-- }, enabled = !faceScanning) { Text("上一步") }
+                    OutlinedButton(onClick = { step-- }, enabled = !anyScanning) { Text("上一步") }
                 } else {
                     Spacer(Modifier.width(1.dp))
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    // 人脸步骤已有样本时提供「重新录入」次级入口。
+                    // 人脸/声纹步骤已有样本时提供「重新录入」次级入口。
                     if (isFaceStep && faceSamples.isNotEmpty() && !faceScanning) {
                         TextButton(onClick = { resetFaceScan() }) { Text("重新录入") }
                         Spacer(Modifier.width(8.dp))
                     }
-                    // 主按钮：人脸步骤复用为「开始录入/采集中/继续」。
+                    if (isVoiceStep && voiceSamples.isNotEmpty() && !voiceScanning) {
+                        TextButton(onClick = { resetVoiceScan() }) { Text("重新录入") }
+                        Spacer(Modifier.width(8.dp))
+                    }
+                    // 主按钮：人脸/声纹步骤复用为「开始录入/采集中/继续」。
                     val primaryLabel: String
                     val primaryAction: (() -> Unit)?
                     if (isFaceStep) {
@@ -201,6 +271,21 @@ fun OnboardingScreen(
                             faceSamples.isEmpty() -> {
                                 primaryLabel = "开始录入"
                                 primaryAction = { startFaceScan() }
+                            }
+                            else -> {
+                                primaryLabel = "继续"
+                                primaryAction = { step++ }
+                            }
+                        }
+                    } else if (isVoiceStep) {
+                        when {
+                            voiceScanning -> {
+                                primaryLabel = "录音中…（${voiceSamples.size}/$requiredVoiceSamples）"
+                                primaryAction = null
+                            }
+                            voiceSamples.isEmpty() -> {
+                                primaryLabel = "开始录音"
+                                primaryAction = { startVoiceScan() }
                             }
                             else -> {
                                 primaryLabel = "继续"
@@ -221,6 +306,7 @@ fun OnboardingScreen(
                                         birthday = birthday.ifBlank { null },
                                     ),
                                     faceSamples = faceSamples.toList(),
+                                    voiceSamples = voiceSamples.toList(),
                                 )
                                 onComplete()
                             }
@@ -434,6 +520,116 @@ private fun FaceScanStep(
     }
 }
 
+/**
+ * 声纹录入步骤：居中麦克风图标 + 进度 + 状态卡。
+ * 范式与 [FaceScanStep] 对称（复用 [FaceScanState] 状态枚举），但不占相机预览。
+ */
+@Composable
+private fun VoiceScanStep(
+    voiceState: FaceScanState,
+    scanning: Boolean,
+    message: String?,
+    collected: Int,
+    required: Int,
+) {
+    val accent = Color(0xFF0A84FF)
+    val green = Color(0xFF30D158)
+    val red = Color(0xFFFF453A)
+    val statusColor = when (voiceState) {
+        FaceScanState.SUCCESS -> green
+        FaceScanState.FAILED, FaceScanState.DUPLICATE -> red
+        else -> accent
+    }
+    val title = when (voiceState) {
+        FaceScanState.COLLECTING -> if (scanning) "录音中…请自然说话" else "请对着机器人说话"
+        FaceScanState.SUCCESS -> "录入成功"
+        FaceScanState.FAILED -> "录入失败"
+        FaceScanState.DUPLICATE -> "已认识"
+        FaceScanState.IDLE -> "录入声音"
+    }
+    val subtitle = when (voiceState) {
+        FaceScanState.COLLECTING ->
+            if (scanning) "已采集 $collected/$required · 每句说完停顿一下"
+            else "在安静环境下清晰说话"
+        FaceScanState.FAILED -> message ?: "未录到清晰语音，可重试或稍后补录"
+        FaceScanState.DUPLICATE -> message ?: "这段声音我已认识啦"
+        FaceScanState.SUCCESS -> message ?: "记住你的声音啦，下次开口就能认出你"
+        FaceScanState.IDLE -> "让机器人通过声音认出你"
+    }
+    val progress = (collected / required.toFloat()).coerceIn(0f, 1f)
+
+    Row(modifier = Modifier.fillMaxSize()) {
+        // 左：麦克风图标 + 进度环。
+        Box(
+            modifier = Modifier.weight(1f).fillMaxHeight().padding(8.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                // 麦克风图标外圈（颜色随状态变化）。
+                Box(
+                    modifier = Modifier
+                        .size(160.dp)
+                        .background(statusColor.copy(alpha = 0.12f), CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        if (scanning) "🎙️" else "🎤",
+                        fontSize = 64.sp,
+                    )
+                }
+                Spacer(Modifier.height(24.dp))
+                // 进度条。
+                LinearProgressIndicator(
+                    progress = { progress },
+                    color = statusColor,
+                    trackColor = Color(0xFF2C2C2E),
+                    modifier = Modifier
+                        .fillMaxWidth(0.6f)
+                        .height(6.dp)
+                        .clip(CircleShape),
+                )
+                Spacer(Modifier.height(8.dp))
+                Text("$collected / $required", color = Color.Gray, fontSize = 13.sp)
+            }
+        }
+        // 右：状态卡 + 说明（与 FaceScanStep 右侧布局对称）。
+        Column(
+            modifier = Modifier
+                .width(300.dp)
+                .fillMaxHeight()
+                .verticalScroll(rememberScrollState())
+                .padding(start = 20.dp, end = 20.dp),
+            verticalArrangement = Arrangement.Center,
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFF1C1C1E), RoundedCornerShape(12.dp))
+                    .padding(14.dp),
+            ) {
+                Text(title, color = statusColor, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(4.dp))
+                Text(subtitle, color = Color(0xFF9A9AA0), fontSize = 12.sp)
+            }
+            Spacer(Modifier.height(18.dp))
+            Text("说明", color = Color(0xFF9A9AA0), fontSize = 12.sp, fontWeight = FontWeight.Medium)
+            Spacer(Modifier.height(8.dp))
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFF1C1C1E), RoundedCornerShape(12.dp))
+                    .padding(14.dp),
+            ) {
+                Text(
+                    "点击「开始录音」后，请对着机器人自然说几句话，比如『你好，我是XX』。每说完一句停顿一下，机器人会自动采音。声纹数据仅保存在本机，不会上传。",
+                    color = Color(0xFF9A9AA0),
+                    fontSize = 13.sp,
+                )
+            }
+        }
+    }
+}
+
 /** ImageProxy → Bitmap（nullable；失败返回 null）。 */
 private fun ImageProxy.toBitmapOrNull(): android.graphics.Bitmap? = try {
     toBitmap()
@@ -444,7 +640,7 @@ private fun ImageProxy.toBitmapOrNull(): android.graphics.Bitmap? = try {
 @Composable
 private fun SummaryStep(
     nickname: String, robotName: String,
-    gender: Gender?, birthday: String, faceCount: Int,
+    gender: Gender?, birthday: String, faceCount: Int, voiceCount: Int = 0,
 ) {
     Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
         StepTitle("就绪", "确认信息并完成")
@@ -454,6 +650,7 @@ private fun SummaryStep(
         SummaryRow("性别", gender?.label ?: "未填写")
         SummaryRow("生日", birthday.ifBlank { "未填写" })
         SummaryRow("人脸", if (faceCount > 0) "已录入（$faceCount 张）" else "未录入")
+        SummaryRow("声纹", if (voiceCount > 0) "已录入（$voiceCount 句）" else "未录入")
     }
 }
 

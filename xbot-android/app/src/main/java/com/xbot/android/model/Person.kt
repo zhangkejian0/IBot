@@ -13,10 +13,14 @@ data class Person(
     val name: String,
     val relation: FamilyRelation = FamilyRelation.OTHER,
     val embeddings: MutableList<List<Float>> = mutableListOf(),
+    /** 声纹特征向量（sherpa-onnx 3D-Speaker CAM++，192 维，已 L2 归一化）。
+     *  与 [embeddings]（人脸 MobileFaceNet）模态独立，同一个人两套都可能有。 */
+    val voiceEmbeddings: MutableList<List<Float>> = mutableListOf(),
     var avatarPath: String? = null,
     val createdAt: Long = System.currentTimeMillis(),
 ) {
     val sampleCount: Int get() = embeddings.size
+    val voiceSampleCount: Int get() = voiceEmbeddings.size
 }
 
 /** 与主人的家庭关系。 */
