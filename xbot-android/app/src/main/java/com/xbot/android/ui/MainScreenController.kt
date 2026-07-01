@@ -56,6 +56,12 @@ class MainScreenController(
         private const val GESTURE_MODEL_PATH = "gesture_recognizer.task"
         private const val MOBILEFACENET_PATH = "mobilefacenet.tflite"
         private const val YOLO_PATH = "yolo26n_int8.tflite"
+
+        // —— 麦克风音量经验 dB 校准（详见 levelToDb 注释）——
+        // 斜率 28.6：AGC 压缩后的动态范围补偿（理想物理值为 20，手机麦压缩到约 28~30）。
+        private const val DB_SLOPE = 28.6f
+        // 截距 88.6：使安静底噪 level≈0.03 落在 ≈45dB；全体平移改这个值即可。
+        private const val DB_OFFSET = 88.6f
     }
 
     var faceWebView: FaceWebView? = null
@@ -97,6 +103,15 @@ class MainScreenController(
     var inferMs by mutableLongStateOf(0L)
         private set
     var fps by mutableStateOf(0f)
+        private set
+
+    /**
+     * 麦克风实时音量（经验 dB，30~90 区间）。
+     * 由 [voiceLevel]（PCM RMS 归一化 0..1）映射而来，非真实环境声压级，
+     * 仅用于右上角浮层直观观察说话强度。随 [tickStats] 每 500ms 刷新。
+     * 麦克风未采流时为 30（最低值）。
+     */
+    var voiceDb by mutableStateOf(30f)
         private set
 
     // —— 当前检测结果（驱动调试覆盖层）——
@@ -304,6 +319,28 @@ class MainScreenController(
         voiceAssistant?.pophie?.config?.sessionId?.let { sid ->
             if (sid != settingsStore.settings.sessionId) settingsStore.persistSessionId(sid)
         }
+        // 刷新右上角麦克风音量（经验 dB）。
+        voiceDb = levelToDb(voiceLevel)
+    }
+
+    /**
+     * PCM RMS 归一化值（0..1）→ 经验 dB（30~90）。
+     *
+     * 校准依据（实测）：安静办公环境底噪 level≈0.022~0.039（经 [AudioCapture] EMA 平滑后），
+     * 对应真实声压级约 40~48 dB。消费级麦克风经 AGC 后动态范围被压缩，故对数斜率取 28.6
+     * （>理想值 20）做补偿，截距 88.6 使底噪落在 ≈45dB：
+     * - 安静（level≈0.03）→ ≈45 dB
+     * - 正常说话（level≈0.1~0.2）→ ≈60~69 dB
+     * - 大声/贴近（level≈0.5+）→ ≈80 dB+
+     *
+     * 非真实 SPL（无硬件校准），仅作直观参考。麦克风未采流（level=0）→ 30 dB。
+     * 若实测整体偏高/偏低，调 [DB_OFFSET]（每 +1 全体 +1dB）；动态范围过窄/过宽调 [DB_SLOPE]。
+     */
+    private fun levelToDb(level: Float): Float {
+        if (level <= 0f) return 30f
+        val clamped = level.coerceIn(1e-5f, 1f)
+        val db = DB_OFFSET + DB_SLOPE * kotlin.math.log10(clamped)
+        return db.coerceIn(30f, 90f)
     }
 
     fun release() {

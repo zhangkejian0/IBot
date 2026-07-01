@@ -163,9 +163,9 @@ private fun DebugOverlay(controller: MainScreenController) {
             )
         }
 
-        // 右上角：推理耗时 / 帧率。
+        // 右上角：推理耗时 / 帧率 / 麦克风音量。
         Text(
-            text = "原生后台线程\n推理: ${"%.1f".format(controller.fps)} fps\n耗时: ${controller.inferMs} ms/帧",
+            text = "原生后台线程\n推理: ${"%.1f".format(controller.fps)} fps\n耗时: ${controller.inferMs} ms/帧\n音量: ${"%.0f".format(controller.voiceDb)} dB",
             color = Color.White,
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier
