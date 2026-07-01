@@ -15,6 +15,9 @@ import com.xbot.android.store.SettingsStore
 import com.xbot.android.vision.FaceLandmarkEngine
 import com.xbot.android.vision.FaceRecognizer
 import com.xbot.android.vision.ImageUtils
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import java.io.File
 import java.io.FileOutputStream
 import java.util.concurrent.atomic.AtomicReference
@@ -115,6 +118,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      *
      * 若带人脸样本：构造主脸 Person（relation=owner），填 embeddings，存头像 + 存人物，
      * 回填 profile.personId / faceRegistered。本地立即生效进 ready（不阻塞于网络）。
+     * 后台 best-effort 同步 owner 到 Pophie 后端。
      */
     fun completeOnboarding(profile: OwnerProfile, faceSamples: List<EnrollCapture>?) {
         var p = profile.copy(syncedToServer = false)
@@ -135,6 +139,28 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
         ownerProfileStore.save(p)
         phase.set(AppPhase.READY)
+        // 后台 best-effort 同步 owner 到 Pophie（失败静默，不影响本地已生效）。
+        syncOwnerToServer(p)
+    }
+
+    /** 后台同步 owner 档案到 Pophie 后端。成功置 syncedToServer=true 并落盘。 */
+    private fun syncOwnerToServer(profile: OwnerProfile) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val config = settingsStore.toPophieConfig()
+                val client = com.xbot.android.voice.PophieClient(config)
+                val ok = client.registerOwner(profile.toPophieJson())
+                if (ok) {
+                    val updated = profile.copy(syncedToServer = true)
+                    ownerProfileStore.save(updated)
+                    Log.i(TAG, "owner 档案已同步到 Pophie")
+                } else {
+                    Log.w(TAG, "owner 档案同步失败（后端返回非 2xx）")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "owner 档案同步异常: ${e.message}")
+            }
+        }
     }
 
     /** 重置主人：重新进入向导。对应 Flutter resetOwner。 */

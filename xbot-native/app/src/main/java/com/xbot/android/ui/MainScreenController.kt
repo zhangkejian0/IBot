@@ -143,6 +143,13 @@ class MainScreenController(
             onLevel = { lvl ->
                 faceWebView?.bridge?.voiceLevel = lvl
             },
+            perceptionProvider = {
+                // 由当前检测结果构造 Pophie 感知上下文（表情/身份/手势/物体/场景）。
+                com.xbot.android.voice.Perception.build(
+                    result,
+                    com.xbot.android.core.AppTuning.FLIP_FRONT_CAMERA_HORIZONTAL,
+                )
+            },
             conversationLog = conversationLog,
             config = settingsStore.toPophieConfig(),
         ).also {
@@ -301,15 +308,15 @@ class MainScreenController(
 
     fun release() {
         try { voiceAssistant?.release() } catch (_: Exception) {}
-        cameraManager.release()
-        faceEngine.close()
-        mlkitEngine.close()
-        handEngine.close()
-        poseEngine.close()
-        objectEngine.close()
-        faceRecognizer.close()
-        behaviorTracker.reset()
-        activityTracker.reset()
+        try { cameraManager.release() } catch (_: Exception) {}
+        try { faceEngine.close() } catch (_: Exception) {}
+        try { mlkitEngine.close() } catch (_: Exception) {}
+        try { handEngine.close() } catch (_: Exception) {}
+        try { poseEngine.close() } catch (_: Exception) {}
+        try { objectEngine.close() } catch (_: Exception) {}
+        try { faceRecognizer.close() } catch (_: Exception) {}
+        try { behaviorTracker.reset() } catch (_: Exception) {}
+        try { activityTracker.reset() } catch (_: Exception) {}
     }
 }
 

@@ -123,4 +123,93 @@ class AudioCapture(
         val rms = kotlin.math.sqrt(sumSq / samples.size)
         return (rms / RMS_DENOM).toFloat().coerceIn(0f, 1f)
     }
+
+    // ============ VAD 端点检测（批量模式用）============
+
+    /** VAD 采样结果。 */
+    data class VadResult(val pcm16: ShortArray, val silenceMs: Long?)
+
+    /**
+     * 阻塞采集一段用户语音（带端点检测），供批量对话模式用。
+     * 对应 Flutter audio_capture_service.captureUtterance。
+     *
+     * - onset 阈值 0.15，需连续 3 帧（~300ms）确认说话开始
+     * - sustain 阈值 0.08，低于此算静音
+     * - 说话开始后静音 500ms 即认为结束
+     * - 最长 12s，onset 超时 10s
+     *
+     * **必须在后台线程调用**（阻塞直到返回）。
+     */
+    fun captureUtterance(
+        context: android.content.Context,
+        maxDurationMs: Long = 12000L,
+        silenceTimeoutMs: Long = 500L,
+        onsetTimeoutMs: Long = 10000L,
+        speechThreshold: Float = 0.15f,
+        silenceThreshold: Float = 0.08f,
+        speechOnsetFrames: Int = 3,
+    ): VadResult? {
+        if (!hasPermission(context)) return null
+        // 启动采流（如果未启动）。
+        val wasRunning = running.get()
+        if (!wasRunning) start(context)
+        val buf = ArrayList<Short>(16000) // 预分配 ~1s
+        val frameSize = 1600 // 100ms@16k
+        val readBuf = ShortArray(frameSize)
+        val record = this.record ?: return null
+        val startTime = System.currentTimeMillis()
+        var speechStarted = false
+        var onsetCount = 0
+        var lastSpeechTime = 0L
+        val preRoll = ArrayList<Short>() // 说话开始前的预滚缓冲
+
+        try {
+            while (running.get()) {
+                val now = System.currentTimeMillis()
+                // onset 超时。
+                if (!speechStarted && now - startTime > onsetTimeoutMs) return null
+                // 最长限制。
+                if (now - startTime > maxDurationMs) break
+
+                val n = record.read(readBuf, 0, frameSize)
+                if (n <= 0) continue
+                val level = rmsLevel(if (n == frameSize) readBuf else readBuf.copyOf(n))
+
+                if (!speechStarted) {
+                    if (level >= speechThreshold) {
+                        onsetCount++
+                        if (onsetCount >= speechOnsetFrames) {
+                            speechStarted = true
+                            lastSpeechTime = now
+                            // 合入预滚缓冲（保留 onset 前的声音）。
+                            buf.addAll(preRoll)
+                            buf.addAll(readBuf.take(n))
+                        } else {
+                            preRoll.addAll(readBuf.take(n))
+                            if (preRoll.size > frameSize * speechOnsetFrames) {
+                                preRoll.subList(0, preRoll.size - frameSize * speechOnsetFrames).clear()
+                            }
+                        }
+                    } else {
+                        onsetCount = 0
+                        preRoll.clear()
+                    }
+                } else {
+                    buf.addAll(readBuf.take(n))
+                    if (level >= silenceThreshold) {
+                        lastSpeechTime = now
+                    } else if (now - lastSpeechTime > silenceTimeoutMs) {
+                        // 静音超时 → 结束。
+                        val pcm = ShortArray(buf.size) { buf[it] }
+                        return VadResult(pcm, now - lastSpeechTime)
+                    }
+                }
+            }
+        } finally {
+            if (!wasRunning) stop()
+        }
+        if (!speechStarted || buf.isEmpty()) return null
+        val pcm = ShortArray(buf.size) { buf[it] }
+        return VadResult(pcm, null)
+    }
 }
