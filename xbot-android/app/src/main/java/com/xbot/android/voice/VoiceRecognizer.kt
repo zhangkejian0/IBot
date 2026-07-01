@@ -96,13 +96,26 @@ class VoiceRecognizer(
             stream.acceptWaveform(f, SAMPLE_RATE)
             stream.inputFinished()
             // isReady=false 说明喂入语音过短，模型尚未积累足够上下文。
-            if (!ex.isReady(stream)) null else ex.compute(stream).toList()
+            if (!ex.isReady(stream)) null else l2Normalize(ex.compute(stream))
         } catch (e: Exception) {
             Log.w(TAG, "声纹 embed 异常: ${e.message}")
             null
         } finally {
             try { stream?.release() } catch (_: Exception) {}
         }
+    }
+
+    /**
+     * L2 归一化：CAM++ 原始输出**未归一化**（向量模长远大于 1），
+     * 直接用点积当余弦会得到远超 1 的值（实测可达 200+）。
+     * 归一化后点积即余弦，落在 [-1,1]，阈值才有意义。
+     */
+    private fun l2Normalize(v: FloatArray): List<Float> {
+        var sum = 0.0
+        for (x in v) sum += (x * x).toDouble()
+        val norm = kotlin.math.sqrt(sum)
+        if (norm == 0.0) return v.toList()
+        return List(v.size) { (v[it] / norm).toFloat() }
     }
 
     /**
@@ -139,12 +152,21 @@ class VoiceRecognizer(
     /** 声纹比对结果（[identifyWithScore] 返回）。score 为最高余弦相似度，person 为对应人（可能 null）。 */
     data class VoiceMatch(val person: Person?, val score: Float)
 
-    /** 余弦相似度（两侧均已 L2 归一化，点积即余弦）。与 FaceRecognizer.cosine 一致。 */
+    /** 余弦相似度 = a·b / (|a||b|)。嵌入已在 [embed] 做 L2 归一化（模长=1），
+     *  此处仍保留除法以双保险，防止换用未归一化模型时点积越界。 */
     private fun cosine(a: List<Float>, b: List<Float>): Float {
         if (a.size != b.size) return -1f
         var dot = 0.0
-        for (i in a.indices) dot += (a[i] * b[i]).toDouble()
-        return dot.toFloat()
+        var na = 0.0
+        var nb = 0.0
+        for (i in a.indices) {
+            dot += (a[i] * b[i]).toDouble()
+            na += (a[i] * a[i]).toDouble()
+            nb += (b[i] * b[i]).toDouble()
+        }
+        val denom = kotlin.math.sqrt(na) * kotlin.math.sqrt(nb)
+        if (denom == 0.0) return -1f
+        return (dot / denom).toFloat()
     }
 
     fun release() {
