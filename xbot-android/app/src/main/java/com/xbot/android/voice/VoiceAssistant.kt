@@ -40,7 +40,12 @@ class VoiceAssistant(
     /** 端侧流式 ASR 的实时识别文本（驱动字幕浮层）。仅显示，不影响对话。 */
     private val onPartialText: (String) -> Unit = {},
 ) {
-    companion object { private const val TAG = "VoiceAssistant" }
+    companion object {
+        private const val TAG = "VoiceAssistant"
+        /** TTS 结束后抑制麦克上行/字幕/唤醒的时长(ms)，覆盖扬声器物理余音 + 房间短混响。
+         *  过短 → 回声泄漏被识别成用户语音（自激循环）；过长 → 接话略迟。默认 350ms。 */
+        private const val ECHO_SUPPRESSION_MS = 350L
+    }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val audio = AudioCapture()
@@ -87,17 +92,30 @@ class VoiceAssistant(
     /** 用户主动中止当前对话轮（由 stopConversation 置位，runStreamingConversation 据此干净退出）。 */
     @Volatile private var abortConversation = false
 
+    /** TTS 回声冷却期截止时间戳：此时间之前抑制所有麦克消费路径（上行/字幕/唤醒喂流），
+     *  避免扬声器物理余音 + 房间混响被麦克风拾取后误识别成用户语音（自激循环）。
+     *  由 [applyEchoSuppression] 在每次 TTS 播放结束时刷新。 */
+    @Volatile private var suppressMicUntilMs: Long = 0L
+
+    /** 是否处于 TTS 回声冷却期内。在所有麦克喂流监听器里调用，单读无锁。 */
+    private fun micSuppressed(): Boolean = System.currentTimeMillis() < suppressMicUntilMs
+
+    /** 设置冷却期：当前时间 + [ECHO_SUPPRESSION_MS]。TTS 播放结束（含主动消息）时调用。 */
+    private fun applyEchoSuppression() {
+        suppressMicUntilMs = System.currentTimeMillis() + ECHO_SUPPRESSION_MS
+    }
+
     /** 主动消息轮询协程。 */
     private var proactiveJob: Job? = null
     @Volatile private var lastProactiveId: Long = 0L
 
-    /** 唤醒词喂流监听器（稳定引用，避免重复 add 累积）。 */
+    /** 唤醒词喂流监听器（稳定引用，避免重复 add 累积）。回声冷却期内跳过（避免主动消息播报尾音误触发）。 */
     private val wakeFeedListener: (ShortArray) -> Unit = { samples ->
-        if (::wakeWord.isInitialized) wakeWord.feedPcm16(samples)
+        if (::wakeWord.isInitialized && !micSuppressed()) wakeWord.feedPcm16(samples)
     }
     /** 端侧 ASR 喂流监听器（稳定引用）。仅在聆听相位喂流（半双工，避开 TTS 回声）。 */
     private val asrFeedListener: (ShortArray) -> Unit = { samples ->
-        if (onDeviceSubtitleEnabled && _state.value == VoiceState.LISTENING) {
+        if (onDeviceSubtitleEnabled && _state.value == VoiceState.LISTENING && !micSuppressed()) {
             asr?.feedPcm16(samples)
         }
     }
@@ -251,6 +269,8 @@ class VoiceAssistant(
             tts.release()
             audio.externalLevel = false
             onLevel(0f)
+            // 设置回声冷却期：扬声器余音+房间混响不应触发唤醒词或被误识别。
+            applyEchoSuppression()
             log("proactive", "主动消息播报完成")
         } catch (e: Exception) {
             log("proactive", "主动消息播报失败: ${e.message}", true)
@@ -396,6 +416,8 @@ class VoiceAssistant(
         tts.release()
         audio.externalLevel = false
         onLevel(0f)
+        // 设置回声冷却期：扬声器余音+房间混响在随后切回聆听时不应被当作用户语音上行。
+        applyEchoSuppression()
         log("speak", "播报完成")
     }
 
@@ -430,7 +452,8 @@ class VoiceAssistant(
                         is SttStreamClient.Event.Ready -> {
                             sawPartialSinceListen = false
                             lastPartialText = ""
-                            uplinkGate.reset()  // 上行门控对齐新聆听窗口
+                            // 回声冷却期内不重置门控：保留较高底噪估计，避免在残留回声窗内变得过松。
+                            if (!micSuppressed()) uplinkGate.reset()
                             asr?.reset()  // 端侧字幕对齐新聆听窗口
                             onPartialText("")
                             setState(VoiceState.LISTENING, null)
@@ -487,9 +510,10 @@ class VoiceAssistant(
 
             // 持续把麦克风 chunk 上行（仅聆听相位、未在处理轮、会话未结束）。
             // 经 uplinkGate 抗噪门控：低能量杂音/小音量旁人不上传，减少后端误识别。
+            // 回声冷却期内禁止上行：TTS 刚结束的扬声器余音+房间混响会被误识别成用户语音（自激循环）。
             val feedListener: (ShortArray) -> Unit = { samples ->
                 if (_state.value == VoiceState.LISTENING && !handlingTurn.get() && !sessionDone.get() &&
-                    uplinkGate.accept(samples)
+                    !micSuppressed() && uplinkGate.accept(samples)
                 ) {
                     stt.sendChunk(pophie.pcm16ToBytes(samples))
                 }
@@ -512,7 +536,9 @@ class VoiceAssistant(
                             sawPartialSinceListen = false
                             lastPartialText = ""
                             lastFinalText = ""
-                            uplinkGate.reset()  // 上行门控对齐新聆听窗口
+                            // 回声冷却期内不重置门控：刚播完 TTS，保留较高底噪估计挡住扬声器余音，
+                            // 避免在残留回声窗内 reset 到敏感初值 0.0025 而放过回声。
+                            if (!micSuppressed()) uplinkGate.reset()
                             asr?.reset()  // 端侧字幕对齐新聆听窗口
                             onPartialText("")
                             setState(VoiceState.LISTENING, null)
@@ -587,6 +613,8 @@ class VoiceAssistant(
                 tts.release()
                 audio.externalLevel = false
                 onLevel(0f)
+                // 设置回声冷却期：扬声器余音+房间混响在随后切回聆听时不应被当作用户语音上行。
+                applyEchoSuppression()
                 log("speak", "播报完成")
             }
         } catch (e: Exception) {
