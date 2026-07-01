@@ -58,10 +58,10 @@ class MainScreenController(
         private const val YOLO_PATH = "yolo26n_int8.tflite"
 
         // —— 麦克风音量经验 dB 校准（详见 levelToDb 注释）——
-        // 斜率 28.6：AGC 压缩后的动态范围补偿（理想物理值为 20，手机麦压缩到约 28~30）。
-        private const val DB_SLOPE = 28.6f
-        // 截距 88.6：使安静底噪 level≈0.03 落在 ≈45dB；全体平移改这个值即可。
-        private const val DB_OFFSET = 88.6f
+        // 斜率 13.3：降噪后人声动态更舒展（比降噪前的 28.6 平缓，避免说话过早顶到 90）。
+        private const val DB_SLOPE = 13.3f
+        // 截距 81.9：使降噪后安静底噪 level≈0.001 落在 ≈42dB；全体平移改这个值即可。
+        private const val DB_OFFSET = 81.9f
     }
 
     var faceWebView: FaceWebView? = null
@@ -326,13 +326,15 @@ class MainScreenController(
     /**
      * PCM RMS 归一化值（0..1）→ 经验 dB（30~90）。
      *
-     * 校准依据（实测）：安静办公环境底噪 level≈0.022~0.039（经 [AudioCapture] EMA 平滑后），
-     * 对应真实声压级约 40~48 dB。消费级麦克风经 AGC 后动态范围被压缩，故对数斜率取 28.6
-     * （>理想值 20）做补偿，截距 88.6 使底噪落在 ≈45dB：
-     * - 安静（level≈0.03）→ ≈45 dB
-     * - 正常说话（level≈0.1~0.2）→ ≈60~69 dB
-     * - 大声/贴近（level≈0.5+）→ ≈80 dB+
+     * 校准依据（降噪后实测 2026-07-01）：开启 GTCRN 降噪后，安静办公环境底噪 level≈4e-4~2e-3
+     * （EMA 平滑后，比降噪前的 0.022~0.039 低约一个数量级）。取安静代表值 0.001 锚定 42dB：
+     * - 极安静（level≈1e-4）→ ≈30 dB（下限）
+     * - 安静（level≈0.001）→ ≈42 dB
+     * - 轻微声响（level≈0.01）→ ≈55 dB
+     * - 正常说话（level≈0.03~0.05）→ ≈62~65 dB
+     * - 大声/贴近（level≈0.2+）→ ≈73 dB+
      *
+     * 降噪后人声动态范围比降噪前舒展，故斜率从 28.6 降至 13.3（避免说话过早顶到 90）。
      * 非真实 SPL（无硬件校准），仅作直观参考。麦克风未采流（level=0）→ 30 dB。
      * 若实测整体偏高/偏低，调 [DB_OFFSET]（每 +1 全体 +1dB）；动态范围过窄/过宽调 [DB_SLOPE]。
      */

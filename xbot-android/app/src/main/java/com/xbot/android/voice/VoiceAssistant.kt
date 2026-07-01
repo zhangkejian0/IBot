@@ -43,6 +43,8 @@ class VoiceAssistant(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val audio = AudioCapture()
     private lateinit var wakeWord: WakeWordService
+    /** 端侧降噪器（GTCRN）。由 [start] 异步初始化并注入 [audio]；失败降级直通。 */
+    private var denoiser: SpeechDenoiser? = null
     val pophie = PophieClient(config)
     private val tts = StreamingTtsPlayer(onLevel = onLevel)
 
@@ -110,9 +112,29 @@ class VoiceAssistant(
         if (isRunning) return
         isRunning = true
         setState(VoiceState.IDLE, null)
+        // 端侧降噪：异步初始化（native 加载），完成后注入采集管线。失败降级直通。
+        initDenoiser()
         audio.start(context)
         startWakeListening()
         startProactivePolling()
+    }
+
+    /** 初始化 GTCRN 降噪器并注入 [audio]。幂等：已存在则跳过。 */
+    private fun initDenoiser() {
+        if (denoiser != null) return
+        scope.launch {
+            val d = SpeechDenoiser(context)
+            d.initialize()
+            if (d.isReady) {
+                denoiser = d
+                audio.denoiser = d
+                log("denoise", "GTCRN 降噪已启用")
+            } else {
+                // 加载失败：保留实例便于 release，但采集直通（audio.denoiser 保持 null）。
+                denoiser = d
+                log("denoise", "GTCRN 降噪未就绪，采集直通", true)
+            }
+        }
     }
 
     fun stop() {
@@ -128,7 +150,11 @@ class VoiceAssistant(
             try { wakeWord.stop() } catch (_: Exception) {}
         }
         try { audio.removeChunkListener(wakeFeedListener) } catch (_: Exception) {}
+        // 先摘除 denoiser 引用再 stop（避免采集线程在释放中仍访问）。
+        audio.denoiser = null
         try { audio.stop() } catch (_: Exception) {}
+        try { denoiser?.release() } catch (_: Exception) {}
+        denoiser = null
         try { tts.release() } catch (_: Exception) {}
         try { setState(VoiceState.IDLE, null) } catch (_: Exception) {}
     }

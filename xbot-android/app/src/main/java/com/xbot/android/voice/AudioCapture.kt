@@ -13,7 +13,10 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * 麦克风采流服务。对应 Flutter audio_capture_service.dart。
  *
- * - 格式：16kHz / mono / PCM16bit，启用 AGC/AEC/NS
+ * - 格式：16kHz / mono / PCM16bit，AudioSource=VOICE_RECOGNITION（**不**开系统 AGC/AEC/NS，
+ *   保留原始未处理信号供识别器；回声靠半双工避免，见 VoiceAssistant）
+ * - 端侧降噪：注入 [denoiser]（GTCRN）后，广播的 chunk 与 [level] 均为降噪后值；
+ *   未注入或未就绪时直通原始 PCM，功能不受影响
  * - 暴露 [chunkListeners]：每个 PCM16 chunk 广播给消费者（唤醒词 + STT）
  * - 暴露 [level]：归一化音量 0..1（驱动虚拟形象嘴部张合），RMS/6000 + EMA 0.6/0.4
  *
@@ -39,6 +42,13 @@ class AudioCapture(
     /** TTS 是否接管 level（true 时停止写 level）。 */
     @Volatile
     var externalLevel: Boolean = false
+
+    /**
+     * 端侧降噪器（GTCRN）。注入后，[start] 广播的 chunk 与 [level] 均为降噪后值。
+     * 未注入或未就绪时直通原始 PCM。可运行时热切换（采集线程读取 @Volatile 引用）。
+     */
+    @Volatile
+    var denoiser: SpeechDenoiser? = null
 
     private val chunkListeners = mutableListOf<(ShortArray) -> Unit>()
     private val listenersLock = Any()
@@ -88,16 +98,19 @@ class AudioCapture(
             while (running.get()) {
                 val n = r.read(buf, 0, buf.size)
                 if (n > 0) {
-                    val chunk = if (n == buf.size) buf else buf.copyOf(n)
-                    // 音量（除非 TTS 接管）。
+                    val raw = if (n == buf.size) buf else buf.copyOf(n)
+                    // 端侧降噪（GTCRN）：未注入/未就绪时 denoise() 直通，无额外开销。
+                    val den = denoiser
+                    val cleaned = if (den != null) den.denoise(raw) else raw
+                    // 音量用降噪后值（除非 TTS 接管）。
                     if (!externalLevel) {
-                        val newLevel = rmsLevel(chunk)
+                        val newLevel = rmsLevel(cleaned)
                         level = level * 0.6f + newLevel * 0.4f
                     }
-                    // 广播。
+                    // 广播降噪后 chunk（唤醒词 / STT 均受益）。
                     val snapshot: List<(ShortArray) -> Unit>
                     synchronized(listenersLock) { snapshot = chunkListeners.toList() }
-                    for (l in snapshot) l(chunk)
+                    for (l in snapshot) l(cleaned)
                 }
             }
         }, "xbot-audio-capture").apply { isDaemon = true; start() }
@@ -173,7 +186,15 @@ class AudioCapture(
 
                 val n = record.read(readBuf, 0, frameSize)
                 if (n <= 0) continue
-                val level = rmsLevel(if (n == frameSize) readBuf else readBuf.copyOf(n))
+                // 端侧降噪：与 [start] 广播路径一致，未注入/未就绪时直通。
+                val den = denoiser
+                val frame: ShortArray = if (den != null) {
+                    val raw = if (n == frameSize) readBuf else readBuf.copyOf(n)
+                    den.denoise(raw)
+                } else {
+                    if (n == frameSize) readBuf else readBuf.copyOf(n)
+                }
+                val level = rmsLevel(frame)
 
                 if (!speechStarted) {
                     if (level >= speechThreshold) {
@@ -183,9 +204,9 @@ class AudioCapture(
                             lastSpeechTime = now
                             // 合入预滚缓冲（保留 onset 前的声音）。
                             buf.addAll(preRoll)
-                            buf.addAll(readBuf.take(n))
+                            buf.addAll(frame.take(n))
                         } else {
-                            preRoll.addAll(readBuf.take(n))
+                            preRoll.addAll(frame.take(n))
                             if (preRoll.size > frameSize * speechOnsetFrames) {
                                 preRoll.subList(0, preRoll.size - frameSize * speechOnsetFrames).clear()
                             }
@@ -195,7 +216,7 @@ class AudioCapture(
                         preRoll.clear()
                     }
                 } else {
-                    buf.addAll(readBuf.take(n))
+                    buf.addAll(frame.take(n))
                     if (level >= silenceThreshold) {
                         lastSpeechTime = now
                     } else if (now - lastSpeechTime > silenceTimeoutMs) {
