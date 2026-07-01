@@ -6,6 +6,7 @@ import {
   type AmbientExpressionId, type EyeStyle, type MouthKind, type PropKind,
 } from './ambientExpression';
 import { chooseAutoMouth } from './autoMouth';
+import { buildHeadTransform } from './headTransform';
 
 /**
  * KawaiiFace ── 卡哇伊麻薯团子风格。
@@ -76,7 +77,6 @@ export function KawaiiFace() {
   const squash = Math.sin(t / 620) * 0.035;
   const sx = 1 + squash;
   const sy = 1 - squash * 0.85;
-  const bob = Math.sin(t / 620) * 5 + params.headBobY;
 
   const baseEye = EYE_MAP[desc.eye];
   const leftEye: EyeMode = desc.eye === 'wink' ? 'happy' : baseEye;
@@ -88,10 +88,16 @@ export function KawaiiFace() {
 
   const tiltExtra = (desc.headTilt ?? 0) * 0.6 + (desc.spin ? Math.sin(t / 480) * 6 : 0);
   const shakeX = desc.shake ? Math.sin(t / 45) * desc.shake : 0;
-
-  const bodyTransform =
-    `translate(${(BODY_CX + shakeX).toFixed(2)} ${(BODY_CY + bob).toFixed(2)}) ` +
-    `rotate(${tiltExtra.toFixed(2)}) scale(${sx.toFixed(4)} ${sy.toFixed(4)}) translate(${-BODY_CX} ${-BODY_CY})`;
+  const bodyTransform = buildHeadTransform(BODY_CX, BODY_CY, {
+    ...params,
+    headBobY: params.headBobY + Math.sin(t / 620) * 5,
+  }, {
+    tilt: tiltExtra,
+    shakeX,
+    neckYOffset: 95,
+    scaleX: sx,
+    scaleY: sy,
+  });
 
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%', overflow: 'hidden',
@@ -144,6 +150,7 @@ export function KawaiiFace() {
 
           {/* 嘴 */}
           <Mouth mode={mouth} curve={params.mouth.curve} openness={params.mouth.openness}
+                 cornerLift={params.mouth.cornerLift}
                  isHappy={desc.eye === 'star'} t={t} />
 
           {/* 脸侧装饰道具 */}
@@ -263,10 +270,10 @@ const MOUTH_MAP: Record<MouthKind, MouthMode> = {
   frown: 'frown', pout: 'cat', cat: 'cat', wavy: 'wave', small: 'cat', hidden: 'none',
 };
 
-function Mouth({ mode, curve, openness, isHappy, t }: {
-  mode: MouthMode; curve: number; openness: number; isHappy: boolean; t: number;
+function Mouth({ mode, curve, openness, cornerLift = 0, isHappy, t }: {
+  mode: MouthMode; curve: number; openness: number; cornerLift?: number; isHappy: boolean; t: number;
 }) {
-  const cx = BODY_CX, cy = MOUTH_CY;
+  const cx = BODY_CX, cy = MOUTH_CY + cornerLift * 10;
   const stroke = { stroke: EYE_DARK, strokeWidth: 6, fill: 'none' as const, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const };
   // auto：沿用底层 FaceParams（curve/openness）分流，与 AmbientFace 对齐
   const resolved: Exclude<MouthMode, 'auto'> =

@@ -6,6 +6,7 @@ import {
   buildScleraShadowPath, buildStarHighlightPath, buildTearPoolPath, buildUpperLashPath,
   buildUpperLidPath, EYE_RX, EYE_RY, IRIS_RX, IRIS_RY,
 } from './paths';
+import { buildHeadTransform } from './headTransform';
 
 export const VIEW_W = 1000;
 export const VIEW_H = 600;
@@ -231,7 +232,7 @@ function applyEye(
 export function writeFaceToRefs(refs: FaceRefs, p: FaceParams) {
   refs.headGroup.setAttribute(
     'transform',
-    `translate(${VIEW_W / 2} ${VIEW_H / 2 + p.headBobY}) rotate(${p.headTilt}) translate(${-VIEW_W / 2} ${-VIEW_H / 2})`,
+    buildHeadTransform(VIEW_W / 2, VIEW_H / 2, p),
   );
 
   applyEye(p.leftEye, LEFT_EYE_CX, true, {

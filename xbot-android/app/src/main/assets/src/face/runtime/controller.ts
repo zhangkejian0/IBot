@@ -15,6 +15,7 @@ import {
   getAmbientExpression,
   type AmbientExpressionId,
 } from '../render/ambientExpression';
+import { applyGazeEyeChannel, computeGazeBody, computeGazeEyes, gazeWeightForState, type GazeEyeChannel } from './gazeResponse';
 
 /**
  * FaceState → 氛围表情预设。让 setState 自动驱动渲染器的眼形/嘴形/光晕/道具，
@@ -67,6 +68,15 @@ class FaceController {
   private overlays = new Map<ExpressionName, number>();
   private gazeX = 0;
   private gazeY = 0;
+  private gazePointerEnabled = true;
+  private gazeExternalActive = false;
+  private gazeExternalListeners = new Set<(active: boolean) => void>();
+  private gazeBodyTilt = 0;
+  private gazeBodyBob = 0;
+  private gazeBodyPanX = 0;
+  private gazeBodyPitch = 0;
+  private gazeEyesLeft: GazeEyeChannel = { pupilX: 0, pupilY: 0, openness: 0, upperLidCurve: 0, lidTilt: 0 };
+  private gazeEyesRight: GazeEyeChannel = { pupilX: 0, pupilY: 0, openness: 0, upperLidCurve: 0, lidTilt: 0 };
   private listeningLoudness = 0;
   private renderCb: RenderCallback | null = null;
   private stopTicker: (() => void) | null = null;
@@ -107,9 +117,37 @@ class FaceController {
     return Array.from(this.overlays.entries()).map(([expression, intensity]) => ({ expression, intensity }));
   }
 
-  setGazeTarget(x: number, y: number) {
-    this.gazeX = Math.max(-1, Math.min(1, x));
-    this.gazeY = Math.max(-1, Math.min(1, y));
+  setGazeTarget(x: number, y: number, source: 'host' | 'pointer' = 'host') {
+    if (source === 'host') {
+      this.setGazeExternalActive(true);
+    } else if (this.gazeExternalActive) {
+      return;
+    }
+    this.gazeX = Math.max(-1.15, Math.min(1.15, x));
+    this.gazeY = Math.max(-1.15, Math.min(1.15, y));
+    if (this.gazeX === 0 && this.gazeY === 0 && source === 'host') {
+      this.setGazeExternalActive(false);
+    }
+  }
+
+  setGazePointerEnabled(enabled: boolean) {
+    this.gazePointerEnabled = enabled;
+    if (!enabled) this.setGazeTarget(0, 0, 'pointer');
+  }
+
+  isGazeInputEnabled(): boolean {
+    return this.gazePointerEnabled && !this.gazeExternalActive;
+  }
+
+  onGazeExternalChange(cb: (active: boolean) => void): () => void {
+    this.gazeExternalListeners.add(cb);
+    return () => { this.gazeExternalListeners.delete(cb); };
+  }
+
+  private setGazeExternalActive(active: boolean) {
+    if (this.gazeExternalActive === active) return;
+    this.gazeExternalActive = active;
+    this.gazeExternalListeners.forEach((cb) => cb(active));
   }
 
   setListeningLoudness(v: number) {
@@ -153,13 +191,27 @@ class FaceController {
 
     const target = blendParams(layers.length ? layers : [{ pose: NEUTRAL_PARAMS, weight: 1 }]);
 
-    // Gaze direction overrides pupil
-    target.leftEye.pupilX = this.gazeX;
-    target.rightEye.pupilX = this.gazeX;
-    target.leftEye.pupilY = this.gazeY;
-    target.rightEye.pupilY = this.gazeY;
-
     return { target, activeOsc };
+  }
+
+  private easeGazeEyeChannel(
+    current: GazeEyeChannel,
+    target: GazeEyeChannel,
+    dtSec: number,
+    speed: number,
+  ): GazeEyeChannel {
+    return {
+      pupilX: this.easeToward(current.pupilX, target.pupilX, dtSec, speed),
+      pupilY: this.easeToward(current.pupilY, target.pupilY, dtSec, speed),
+      openness: this.easeToward(current.openness, target.openness, dtSec, speed),
+      upperLidCurve: this.easeToward(current.upperLidCurve, target.upperLidCurve, dtSec, speed),
+      lidTilt: this.easeToward(current.lidTilt, target.lidTilt, dtSec, speed),
+    };
+  }
+
+  private easeToward(current: number, target: number, dt: number, speed: number): number {
+    const t = 1 - Math.exp(-speed * dt);
+    return current + (target - current) * t;
   }
 
   private tick = (dt: number, nowMs: number) => {
@@ -174,10 +226,32 @@ class FaceController {
       blush: { ...smoothed.blush },
       headTilt: smoothed.headTilt,
       headBobY: smoothed.headBobY,
+      headPanX: smoothed.headPanX,
+      headPitch: smoothed.headPitch,
     };
 
     applyOscillators(out, activeOsc, nowMs / 1000);
     applyMicroMotion(out, nowMs, STATE_SPECS[faceMachine.get()].microMotionProfile);
+
+    const gazeW = gazeWeightForState(faceMachine.get());
+    const eyes = computeGazeEyes(this.gazeX, this.gazeY, gazeW);
+    const body = computeGazeBody(this.gazeX, this.gazeY, gazeW);
+    const dtSec = Math.min(dt, 1 / 30);
+
+    // 眼球先于头部响应（桌面宠物常见节奏）
+    this.gazeEyesLeft = this.easeGazeEyeChannel(this.gazeEyesLeft, eyes.left, dtSec, 13);
+    this.gazeEyesRight = this.easeGazeEyeChannel(this.gazeEyesRight, eyes.right, dtSec, 13);
+    applyGazeEyeChannel(out.leftEye, this.gazeEyesLeft);
+    applyGazeEyeChannel(out.rightEye, this.gazeEyesRight);
+
+    this.gazeBodyPanX = this.easeToward(this.gazeBodyPanX, body.headPanX, dtSec, 7);
+    this.gazeBodyTilt = this.easeToward(this.gazeBodyTilt, body.headTilt, dtSec, 7);
+    this.gazeBodyBob = this.easeToward(this.gazeBodyBob, body.headBobY, dtSec, 6.5);
+    this.gazeBodyPitch = this.easeToward(this.gazeBodyPitch, body.headPitch, dtSec, 6.5);
+    out.headPanX += this.gazeBodyPanX;
+    out.headTilt += this.gazeBodyTilt;
+    out.headBobY += this.gazeBodyBob;
+    out.headPitch += this.gazeBodyPitch;
 
     // Listening loudness drives extra mouth open
     if (this.listeningLoudness > 0) {

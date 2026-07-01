@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { faceController } from '../runtime/controller';
 import { cloneNeutral } from '../params/neutral';
 import { buildMouthPath } from './paths';
+import { buildHeadTransform } from './headTransform';
 import {
   FACE_VIEW_W, FACE_VIEW_H, FACE_MOUTH_CX, FACE_MOUTH_CY, faceDisplayViewBox,
 } from './faceLayout';
@@ -23,8 +24,7 @@ export function Face() {
 
   const cx = FACE_VIEW_W / 2;
   const cy = FACE_VIEW_H / 2;
-  const headTransform =
-    `translate(${cx} ${cy + params.headBobY}) rotate(${params.headTilt}) translate(${-cx} ${-cy})`;
+  const headTransform = buildHeadTransform(cx, cy, params);
 
   return (
     <svg

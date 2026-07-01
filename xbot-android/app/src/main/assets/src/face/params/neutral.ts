@@ -19,6 +19,8 @@ export const NEUTRAL_PARAMS: FaceParams = {
   blush: { intensity: 0.0, size: 1.0 },
   headTilt: 0.0,
   headBobY: 0.0,
+  headPanX: 0.0,
+  headPitch: 0.0,
 };
 
 export function cloneNeutral(): FaceParams {
@@ -29,5 +31,7 @@ export function cloneNeutral(): FaceParams {
     blush: { ...NEUTRAL_PARAMS.blush },
     headTilt: 0,
     headBobY: 0,
+    headPanX: 0,
+    headPitch: 0,
   };
 }

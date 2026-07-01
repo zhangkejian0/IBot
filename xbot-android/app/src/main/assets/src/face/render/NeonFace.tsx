@@ -3,6 +3,7 @@ import { faceController } from '../runtime/controller';
 import { eventBus } from '../runtime/eventBus';
 import { cloneNeutral } from '../params/neutral';
 import { faceDisplayViewBox } from './faceLayout';
+import { buildHeadTransform } from './headTransform';
 import type { FaceState } from '../types';
 
 /**
@@ -81,8 +82,7 @@ export function NeonFace() {
   // 头部微动（headBobY / headTilt 来自 oscillators）
   const cx = 500;
   const cy = 370;
-  const headTransform =
-    `translate(${cx} ${cy + params.headBobY}) rotate(${params.headTilt}) translate(${-cx} ${-cy})`;
+  const headTransform = buildHeadTransform(cx, cy, params, { neckYOffset: 80 });
 
   return (
     <svg

@@ -8,6 +8,8 @@ import {
 } from './ambientExpression';
 import { getAmbientSkin, subscribeAmbientSkin, type AmbientSkin } from './ambientSkin';
 import { chooseAutoMouth } from './autoMouth';
+import { splitEyeGaze } from './eyeGaze';
+import { buildHeadTransform } from './headTransform';
 
 /**
  * AmbientFace ── 暗背景 + 柔光晕染 + 可爱 Q 眼。
@@ -89,13 +91,14 @@ export function AmbientFace() {
 
   // 头部：呼吸缩放 + 预设倾角/抖动/晕摆
   const t = clock;
-  const breatheScale = 1 + params.headBobY * 0.012;
+  const breatheScale = 1 + Math.sin(t / 620) * 0.012;
   const tiltExtra = (desc.headTilt ?? 0) + (desc.spin ? Math.sin(t / 480) * 7 : 0);
   const shakeX = desc.shake ? Math.sin(t / 45) * desc.shake : 0;
-  const headTransform =
-    `translate(${(VIEW_CX + shakeX).toFixed(2)} ${(FACE_CY + params.headBobY).toFixed(2)}) ` +
-    `rotate(${(params.headTilt + tiltExtra).toFixed(3)}) scale(${breatheScale.toFixed(4)}) ` +
-    `translate(${-VIEW_CX} ${-FACE_CY})`;
+  const headTransform = buildHeadTransform(VIEW_CX, FACE_CY, params, {
+    tilt: tiltExtra,
+    shakeX,
+    scale: breatheScale,
+  });
 
   const blushOpacity = desc.blush * 0.9;
   const auraStrong = desc.glowBoost ?? 0;
@@ -189,6 +192,7 @@ export function AmbientFace() {
 
           <Mouth kind={desc.mouth}
                  curve={params.mouth.curve} openness={params.mouth.openness} width={params.mouth.width}
+                 cornerLift={params.mouth.cornerLift}
                  isHappy={desc.eye === 'star'} t={t} hi={skin.highlight} />
 
           {desc.prop && <Prop kind={desc.prop} t={t} aura={emotionAura} />}
@@ -276,8 +280,11 @@ function Eye({
   const ry = rx * openK;
   const pupilRx = PUPIL_BASE_R * pupilScale * pupilK;
   const pupilRy = PUPIL_BASE_R * pupilScale * pupilK * Math.max(0.25, openK);
-  const pupilCx = cx + pupilDx;
-  const pupilCy = cy + pupilDy - 4 + pupilDownPush;
+  const { rollX, rollY, pupilX: pdx, pupilY: pdy } = splitEyeGaze(pupilDx, pupilDy);
+  const eyeCx = cx + rollX;
+  const eyeCy = cy + rollY;
+  const pupilCx = eyeCx + pdx;
+  const pupilCy = eyeCy + pdy - 4 + pupilDownPush;
 
   // ─── 星星眼 ★ ───
   if (style === 'star' && openK > 0.3) {
@@ -286,12 +293,12 @@ function Eye({
     const sx = pupilCx, sy = pupilCy + 2;
     return (
       <g>
-        <ellipse cx={cx} cy={cy} rx={rx} ry={ry} fill="url(#amb-eye)" />
+        <ellipse cx={eyeCx} cy={eyeCy} rx={rx} ry={ry} fill="url(#amb-eye)" />
         <path d={starPath(sx, sy, starOuter * 1.25, starInner * 1.25, 5, -Math.PI / 2)}
               fill={aura} opacity={0.45} filter="url(#amb-soft)" />
         <path d={starPath(sx, sy, starOuter, starInner, 5, -Math.PI / 2)} fill="url(#amb-pupil)" />
         <circle cx={sx - starOuter * 0.18} cy={sy - starOuter * 0.3} r={HIGHLIGHT_SUB_R * 1.1} fill={hi} opacity={0.95} />
-        <path d={starPath(cx + (isLeft ? -1 : 1) * rx * 0.5, cy - ry * 0.5, 11, 3.6, 4, -Math.PI / 2)}
+        <path d={starPath(eyeCx + (isLeft ? -1 : 1) * rx * 0.5, eyeCy - ry * 0.5, 11, 3.6, 4, -Math.PI / 2)}
               fill={hi} opacity={0.85} />
       </g>
     );
@@ -304,7 +311,7 @@ function Eye({
 
   return (
     <g>
-      <ellipse cx={cx} cy={cy} rx={rx} ry={ry} fill="url(#amb-eye)" />
+      <ellipse cx={eyeCx} cy={eyeCy} rx={rx} ry={ry} fill="url(#amb-eye)" />
       <ellipse cx={pupilCx} cy={pupilCy} rx={pupilRx} ry={pupilRy} fill="url(#amb-pupil)" />
 
       {openK > 0.2 && (
@@ -328,10 +335,10 @@ function Eye({
       {lidSlant > 0 && (
         <path
           d={[
-            `M ${cx - rx - 2} ${cy - ry - 2}`,
-            `L ${cx + rx + 2} ${cy - ry - 2}`,
-            `L ${cx + rx + 2} ${cy - ry + (isLeft ? ry * 1.5 : ry * 0.4)}`,
-            `L ${cx - rx - 2} ${cy - ry + (isLeft ? ry * 0.4 : ry * 1.5)}`,
+            `M ${eyeCx - rx - 2} ${eyeCy - ry - 2}`,
+            `L ${eyeCx + rx + 2} ${eyeCy - ry - 2}`,
+            `L ${eyeCx + rx + 2} ${eyeCy - ry + (isLeft ? ry * 1.5 : ry * 0.4)}`,
+            `L ${eyeCx - rx - 2} ${eyeCy - ry + (isLeft ? ry * 0.4 : ry * 1.5)}`,
             'Z',
           ].join(' ')}
           fill={bg}
@@ -342,11 +349,11 @@ function Eye({
 }
 
 function Mouth({
-  kind, curve, openness, width, isHappy, t, hi,
+  kind, curve, openness, width, cornerLift = 0, isHappy, t, hi,
 }: {
-  kind: MouthKind; curve: number; openness: number; width: number; isHappy: boolean; t: number; hi: string;
+  kind: MouthKind; curve: number; openness: number; width: number; cornerLift?: number; isHappy: boolean; t: number; hi: string;
 }) {
-  const cx = MOUTH_CX, cy = MOUTH_CY, mw = MOUTH_BASE_W * width;
+  const cx = MOUTH_CX, cy = MOUTH_CY + cornerLift * 14, mw = MOUTH_BASE_W * width;
 
   if (kind === 'hidden') return null;
 
