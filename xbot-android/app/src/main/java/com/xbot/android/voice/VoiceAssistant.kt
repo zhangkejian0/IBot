@@ -28,6 +28,7 @@ import java.util.concurrent.atomic.AtomicReference
  * @param onLevel 音量变化（listening 用麦音量，speaking 用 TTS 音量）
  * @param perceptionProvider 每轮对话上传的感知上下文（表情/身份/手势/物体/场景）
  * @param conversationLog 交互日志收集器（可空；设置页「交互日志」查看）
+ * @param voiceLog 语音识别记录收集器（可空；设置页「语音记录」查看）——每句 final 记录文字+说话人
  * @param config Pophie 后端配置（地址/robotId/音色；可由设置注入）
  */
 class VoiceAssistant(
@@ -36,6 +37,7 @@ class VoiceAssistant(
     private val onLevel: (Float) -> Unit,
     private val perceptionProvider: () -> JSONObject? = { null },
     val conversationLog: ConversationLogger? = null,
+    val voiceLog: VoiceLogStore? = null,
     config: PophieConfig = PophieConfig(),
     /** 端侧流式 ASR 的实时识别文本（驱动字幕浮层）。仅显示，不影响对话。 */
     private val onPartialText: (String) -> Unit = {},
@@ -43,10 +45,12 @@ class VoiceAssistant(
     companion object {
         private const val TAG = "VoiceAssistant"
         /** TTS 结束后抑制麦克上行/字幕/唤醒的时长(ms)，覆盖扬声器物理余音 + 房间短混响。
-         *  过短 → 回声泄漏被识别成用户语音（自激循环）；过长 → 接话略迟。默认 350ms。 */
+         *  过短 → 回声泄漏被识别成用户语音（自激循环）；过长 → 接接略迟。默认 350ms。 */
         private const val ECHO_SUPPRESSION_MS = 350L
         /** 声纹识别 PCM 环形缓冲容量（采样数）。约 2s@16k，足够 CAM++ 提嵌入。 */
         private const val SPEAKER_BUF_SAMPLES = 32000
+        /** 常驻声纹 PCM 环形缓冲容量（采样数）。约 2s@16k，供 [onAsrFinal] 提嵌入。 */
+        private const val AMBIENT_BUF_SAMPLES = 32000
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -106,6 +110,13 @@ class VoiceAssistant(
     @Volatile private var sawPartialSinceListen = false
     @Volatile private var lastFinalText: String = ""
 
+    // —— 常驻语音记录（设置页「语音记录」）：只要识别到整句就记录，无需唤醒对话 ——
+    /** 常驻声纹 PCM 环形缓冲：持续累积麦克风 PCM，[onAsrFinal] 检出整句时 snapshot 提嵌入。
+     *  单写者（ambientFeedListener 在 xbot-audio-capture 线程），无需同步。 */
+    private val ambientSpeakerBuf = ArrayDeque<Short>()
+    /** 常驻记录去重：上一次记录的文字，避免端侧 ASR 把同一句切成多段重复记录。 */
+    @Volatile private var lastLoggedText: String = ""
+
     /** 用户主动中止当前对话轮（由 stopConversation 置位，runStreamingConversation 据此干净退出）。 */
     @Volatile private var abortConversation = false
 
@@ -126,6 +137,9 @@ class VoiceAssistant(
      * 异步声纹识别：snapshot 当前聆听窗口的 PCM 缓冲，提嵌入并与人物库比对。
      * 在 STT WS 回调线程调用，提嵌入/native 推理丢到协程，不阻塞对话主流程。
      * 结果写入 [currentSpeaker]（命中主人昵称 / null）。未启用/模型未就绪/过短 → null。
+     *
+     * 仅负责对话轮的说话人身份（供 perceptionProvider 读取）；语音记录由常驻 ASR
+     * 的 final 回调（[onAsrFinal]）统一记录，这里不再重复写日志。
      */
     private fun identifySpeakerAsync(buf: ArrayDeque<Short>) {
         val recognizer = voiceRecognizer
@@ -151,10 +165,67 @@ class VoiceAssistant(
     private val wakeFeedListener: (ShortArray) -> Unit = { samples ->
         if (::wakeWord.isInitialized && !micSuppressed()) wakeWord.feedPcm16(samples)
     }
-    /** 端侧 ASR 喂流监听器（稳定引用）。仅在聆听相位喂流（半双工，避开 TTS 回声）。 */
-    private val asrFeedListener: (ShortArray) -> Unit = { samples ->
-        if (onDeviceSubtitleEnabled && _state.value == VoiceState.LISTENING && !micSuppressed()) {
-            asr?.feedPcm16(samples)
+
+    /**
+     * 常驻 ASR 喂流 + 声纹缓冲累积监听器（稳定引用，[initAsr] 成功后挂载一次，常驻整个运行期）。
+     *
+     * 在 **IDLE 和 LISTENING** 两个相位都工作，使端侧 ASR 能持续检出整句（不仅限于对话中），
+     * 实现「只要说出完整句子就记录」。回声冷却期内同样跳过（TTS/主动消息的扬声器余音不应被当成用户语音）。
+     *
+     * 双重职责：
+     * 1. 喂 PCM 给端侧 ASR（[asr]）做整句检出 → final 回调到 [onAsrFinal] 记录。
+     * 2. 累积 PCM 到 [ambientSpeakerBuf]，供 [onAsrFinal] snapshot 提嵌入识别说话人。
+     *
+     * LISTENING 期不累积声纹缓冲：对话路径的 [identifySpeakerAsync]（用 [speakerBuf]）已负责
+     * 该相位的说话人识别；[onAsrFinal] 也仅在 IDLE 记录，避免重复。LISTENING 期仍喂流给 ASR
+     * 以驱动对话字幕显示（与原行为一致）。
+     */
+    private val ambientFeedListener: (ShortArray) -> Unit = { samples ->
+        if (!micSuppressed() && onDeviceSubtitleEnabled) {
+            val s = _state.value
+            if (s == VoiceState.IDLE || s == VoiceState.LISTENING) {
+                asr?.feedPcm16(samples)
+                // 仅在 IDLE 累积声纹缓冲（LISTENING 期由对话路径 identifySpeakerAsync 负责，
+                // 避免双重识别 + 重复记录）。
+                if (s == VoiceState.IDLE && voiceIdentityEnabled && voiceRecognizer != null) {
+                    for (sm in samples) {
+                        ambientSpeakerBuf.addLast(sm)
+                        if (ambientSpeakerBuf.size > AMBIENT_BUF_SAMPLES) ambientSpeakerBuf.removeFirst()
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * 常驻 ASR 整句回调：端侧 ASR 检出一句即记录到 [voiceLog]，并 snapshot [ambientSpeakerBuf]
+     * 提嵌入识别说话人（主人/其他人/未知）。仅在 [VoiceState.IDLE] 记录——对话聆听相位由对话
+     * 主流程处理，避免重复。
+     *
+     * 去重：与上一条相同文字不重复记录（端侧 ASR 可能把尾音切成多段 final）。
+     */
+    private fun onAsrFinal(text: String) {
+        val t = text.trim()
+        if (t.isEmpty()) return
+        // 仅在 IDLE 记录：对话期间（WAKING/LISTENING/...）由对话路径处理，避免重复。
+        if (_state.value != VoiceState.IDLE) return
+        if (t == lastLoggedText) return
+        lastLoggedText = t
+        val vl = voiceLog ?: return
+        val recognizer = voiceRecognizer
+        // 声纹未启用/未就绪：直接记未知说话人。
+        if (!voiceIdentityEnabled || recognizer == null || !recognizer.isReady || ambientSpeakerBuf.isEmpty()) {
+            vl.log(t, null, false)
+            return
+        }
+        // snapshot 当前缓冲并异步提嵌入识别。
+        val pcm = ShortArray(ambientSpeakerBuf.size) { ambientSpeakerBuf[it] }
+        scope.launch {
+            val emb = recognizer.embed(pcm)
+            val person = if (emb != null) recognizer.identify(emb, peopleProvider()) else null
+            val name = person?.name
+            val owner = person?.relation == com.xbot.android.model.FamilyRelation.OWNER
+            vl.log(t, name, owner)
         }
     }
 
@@ -207,7 +278,7 @@ class VoiceAssistant(
         }
     }
 
-    /** 初始化端侧流式 ASR（仅字幕）。幂等：已存在则跳过。模型加载失败则字幕降级关闭。 */
+    /** 初始化端侧流式 ASR（字幕 + 常驻语音记录）。幂等：已存在则跳过。模型加载失败则字幕降级关闭。 */
     private fun initAsr() {
         if (asr != null) return
         scope.launch {
@@ -215,16 +286,20 @@ class VoiceAssistant(
                 context = context,
                 modelDir = "voice/sherpa-onnx-streaming-paraformer-bilingual-zh-en",
                 onPartial = onPartialText,
-                onFinal = onPartialText,
+                // final：既刷新字幕（与原行为一致），又驱动常驻语音记录（[onAsrFinal]）。
+                onFinal = { text ->
+                    onPartialText(text)
+                    onAsrFinal(text)
+                },
             )
             a.initialize()
             if (a.isReady) {
                 a.start()
                 asr = a
-                // 挂上喂流监听（聆听相位门控在 listener 内）。常驻挂载，靠 state 门控喂流，
-                // 避免每次进出聆听都 start/stop 解码线程。
-                audio.removeChunkListener(asrFeedListener)
-                audio.addChunkListener(asrFeedListener)
+                // 挂上常驻喂流监听（IDLE+LISTENING 都喂流，实现持续整句检出 + 语音记录）。
+                // 回声冷却与相位门控在 listener 内，靠 state 门控喂流与缓冲累积。
+                audio.removeChunkListener(ambientFeedListener)
+                audio.addChunkListener(ambientFeedListener)
                 log("asr", "端侧实时字幕已启用")
             } else {
                 // 加载失败：保留实例便于 release，但不挂监听（字幕不显示）。
@@ -247,7 +322,7 @@ class VoiceAssistant(
             try { wakeWord.stop() } catch (_: Exception) {}
         }
         try { audio.removeChunkListener(wakeFeedListener) } catch (_: Exception) {}
-        try { audio.removeChunkListener(asrFeedListener) } catch (_: Exception) {}
+        try { audio.removeChunkListener(ambientFeedListener) } catch (_: Exception) {}
         // 先摘除 denoiser 引用再 stop（避免采集线程在释放中仍访问）。
         audio.denoiser = null
         try { audio.stop() } catch (_: Exception) {}

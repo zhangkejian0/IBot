@@ -47,6 +47,7 @@ import androidx.compose.ui.unit.sp
 import com.xbot.android.core.AppViewModel
 import com.xbot.android.voice.AudioCapture
 import com.xbot.android.voice.ConversationEntry
+import com.xbot.android.voice.VoiceLogEntry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -74,6 +75,8 @@ fun SettingsScreen(
 
     // 弹窗状态。
     var showLog by remember { mutableStateOf(false) }
+    // 语音记录子页（设置页「语音记录」入口）。
+    var showVoiceLog by remember { mutableStateOf(false) }
     var editTarget by remember { mutableStateOf<EditTarget?>(null) }
     var confirmReset by remember { mutableStateOf(false) }
     var connResult by remember { mutableStateOf<Boolean?>(null) }
@@ -91,6 +94,11 @@ fun SettingsScreen(
 
     if (showLog) {
         ConversationLogScreen(controller, onBack = { showLog = false })
+        return
+    }
+
+    if (showVoiceLog) {
+        VoiceLogScreen(controller, onBack = { showVoiceLog = false })
         return
     }
 
@@ -174,6 +182,9 @@ fun SettingsScreen(
                     SwitchRow("流式对话模式", s.streamingSttEnabled, enabled = s.voiceEnabled) { v ->
                         store.update { it.copy(streamingSttEnabled = v) }
                         controller.applyVoiceSettings()
+                    }
+                    NavRow("语音记录", "查看识别到的语音及说话人", enabled = s.voiceEnabled) {
+                        showVoiceLog = true
                     }
                 }
 
@@ -723,5 +734,87 @@ private fun stageColor(stage: String, error: Boolean): Color {
         "speak" -> Color(0xFF30D158)
         "end" -> Color(0xFF8E8E93)
         else -> Color(0xFF9A9AA0)
+    }
+}
+
+/** 语音记录页：倒序展示识别到的语音文本及声纹判定的说话人，可清空。 */
+@Composable
+private fun VoiceLogScreen(controller: MainScreenController, onBack: () -> Unit) {
+    val entries = controller.voiceLog.entries
+    val fmt = remember { SimpleDateFormat("MM-dd HH:mm:ss", Locale.getDefault()) }
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background),
+    ) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFF15151A))
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(onClick = onBack) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "返回",
+                        tint = Color.White,
+                    )
+                }
+                Text("语音记录", color = Color.White, fontSize = 18.sp, modifier = Modifier.weight(1f))
+                TextButton(onClick = { controller.voiceLog.clear() }) { Text("清空") }
+            }
+            if (entries.isEmpty()) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text(
+                        "暂无记录\n唤醒或双击对话后，识别到的语音会记录在此",
+                        color = Color(0xFF9A9AA0),
+                    )
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize().padding(8.dp),
+                    reverseLayout = true,
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    items(entries.reversed()) { e ->
+                        VoiceLogRow(e, fmt)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun VoiceLogRow(e: VoiceLogEntry, fmt: SimpleDateFormat) {
+    // 说话人徽标颜色：主人=绿、其他人=橙、未知=灰。
+    val (dot, label) = when {
+        e.isOwner -> Color(0xFF30D158) to "主人"
+        e.speakerName != null -> Color(0xFFFFD60A) to e.speakerName
+        else -> Color(0xFF6A6A70) to "未知"
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFF15151A), RoundedCornerShape(10.dp))
+            .padding(10.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .padding(top = 4.dp, end = 8.dp)
+                .size(8.dp)
+                .background(dot, RoundedCornerShape(4.dp)),
+        )
+        Column(modifier = Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(label, color = dot, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.width(8.dp))
+                Text(fmt.format(Date(e.timestamp)), color = Color(0xFF6A6A70), fontSize = 11.sp)
+            }
+            Spacer(Modifier.height(2.dp))
+            Text(e.text, color = Color.White, fontSize = 13.sp)
+        }
     }
 }

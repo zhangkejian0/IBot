@@ -71,6 +71,9 @@ class MainScreenController(
     /** 对话交互日志（设置页「交互日志」查看）。 */
     val conversationLog = ConversationLogger()
 
+    /** 语音识别记录（设置页「语音记录」查看）：每句识别文字 + 声纹判定说话人。 */
+    val voiceLog = com.xbot.android.voice.VoiceLogStore()
+
     /** 语音助手（惰性初始化：仅当需要时才创建，避免启动阶段因 sherpa-onnx 等 native 库加载导致崩溃）。 */
     @Volatile var voiceAssistant: com.xbot.android.voice.VoiceAssistant? = null
         private set
@@ -173,6 +176,7 @@ class MainScreenController(
                 )
             },
             conversationLog = conversationLog,
+            voiceLog = voiceLog,
             config = settingsStore.toPophieConfig(),
             onPartialText = { recognizedText = it },
         ).also {
