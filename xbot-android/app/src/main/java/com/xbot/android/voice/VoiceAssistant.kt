@@ -41,6 +41,8 @@ class VoiceAssistant(
     config: PophieConfig = PophieConfig(),
     /** 端侧流式 ASR 的实时识别文本（驱动字幕浮层）。仅显示，不影响对话。 */
     private val onPartialText: (String) -> Unit = {},
+    /** 资源管理器：解析已下载的 paraformer 模型路径供端侧字幕 ASR 使用。 */
+    private val resources: com.xbot.android.core.ResourceManager? = null,
 ) {
     companion object {
         private const val TAG = "VoiceAssistant"
@@ -281,9 +283,11 @@ class VoiceAssistant(
     /** 初始化端侧流式 ASR（字幕 + 常驻语音记录）。幂等：已存在则跳过。模型加载失败则字幕降级关闭。 */
     private fun initAsr() {
         if (asr != null) return
+        val rm = resources ?: return  // 无资源管理器则跳过（不应发生在新流程）
         scope.launch {
             val a = StreamingAsrService(
                 context = context,
+                resources = rm,
                 modelDir = "voice/sherpa-onnx-streaming-paraformer-bilingual-zh-en",
                 onPartial = onPartialText,
                 // final：既刷新字幕（与原行为一致），又驱动常驻语音记录（[onAsrFinal]）。

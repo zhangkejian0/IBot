@@ -50,6 +50,8 @@ class MainScreenController(
     val settingsStore: SettingsStore,
     private val peopleProvider: () -> List<Person> = { emptyList() },
     private val voiceRecognizerProvider: () -> com.xbot.android.voice.VoiceRecognizer? = { null },
+    /** 资源管理器：供端侧字幕 ASR 解析已下载的 paraformer 模型路径。 */
+    private val resources: com.xbot.android.core.ResourceManager? = null,
 ) {
     companion object {
         private const val FACE_MODEL_PATH = "face_landmarker.task"
@@ -179,6 +181,7 @@ class MainScreenController(
             voiceLog = voiceLog,
             config = settingsStore.toPophieConfig(),
             onPartialText = { recognizedText = it },
+            resources = resources,
         ).also {
             // 注入声纹识别器与人物库（对话时识别说话人）。
             it.voiceRecognizer = voiceRecognizerProvider()
@@ -385,6 +388,7 @@ fun rememberMainScreenController(
     settingsStore: SettingsStore,
     peopleProvider: () -> List<Person> = { emptyList() },
     voiceRecognizerProvider: () -> com.xbot.android.voice.VoiceRecognizer? = { null },
+    resources: com.xbot.android.core.ResourceManager? = null,
 ): MainScreenController {
     val context = androidx.compose.ui.platform.LocalContext.current
     val controller = remember {
@@ -401,6 +405,7 @@ fun rememberMainScreenController(
             settingsStore = settingsStore,
             peopleProvider = peopleProvider,
             voiceRecognizerProvider = voiceRecognizerProvider,
+            resources = resources,
         )
     }
     LaunchedEffect(Unit) {

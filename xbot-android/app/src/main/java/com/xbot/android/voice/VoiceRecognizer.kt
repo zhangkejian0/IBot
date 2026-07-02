@@ -5,6 +5,7 @@ import android.util.Log
 import com.k2fsa.sherpa.onnx.OnlineStream
 import com.k2fsa.sherpa.onnx.SpeakerEmbeddingExtractor
 import com.k2fsa.sherpa.onnx.SpeakerEmbeddingExtractorConfig
+import com.xbot.android.core.ResourceManager
 import com.xbot.android.model.Person
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -18,24 +19,27 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * 模型已 L2 归一化，点积即余弦（与 [FaceRecognizer] 的 cosine 逻辑一致）。
  *
- * - 模型：3D-Speaker CAM++ zh-cn 16k（~7MB），[assets]/[modelDir]/speaker.onnx
+ * - 模型：3D-Speaker CAM++ zh-cn 16k（~28MB），首次启动从 CDN 下载到
+ *   filesDir/xbot_models/[MODEL_DIR]/speaker.onnx（见 [ResourceManager]）
  * - 输入：PCM16（short，16kHz mono），**需至少约 1s 语音**否则 isReady 返回 false
  * - 输出：embedding（192 维，已 L2 归一化）
  *
- * 降级策略：模型缺失/加载失败 → [isReady]=false，[embed] 返回 null，不阻断功能。
+ * 降级策略：模型未下载/加载失败 → [isReady]=false，[embed] 返回 null，不阻断功能。
  *
- * @param modelDir assets 中的模型目录（如 "voice/sherpa-onnx-3dspeaker-campplus-zh-cn-16k-common"），
- *                 其下应有 speaker.onnx
+ * @param resources 资源管理器（解析已下载的 speaker.onnx 绝对路径）
+ * @param modelDir 相对资源路径下的模型目录（默认 CAM++ zh-cn 16k 目录）
  * @param matchThreshold 识别命中阈值（余弦相似度）。家用单麦克风默认 0.6，误识/漏识可调。
  */
 class VoiceRecognizer(
     private val context: Context,
-    private val modelDir: String = "voice/sherpa-onnx-3dspeaker-campplus-zh-cn-16k-common",
+    private val resources: ResourceManager,
+    private val modelDir: String = MODEL_DIR,
     /** 识别命中阈值（余弦相似度，-1..1）。sherpa CAM++ 经验值约 0.6。 */
     var matchThreshold: Float = MATCH_THRESHOLD,
 ) {
     companion object {
         private const val TAG = "VoiceRecognizer"
+        private const val MODEL_DIR = "voice/sherpa-onnx-3dspeaker-campplus-zh-cn-16k-common"
         private const val MODEL_FILE = "speaker.onnx"
         private const val SAMPLE_RATE = 16000
         /** 喂入模型的最小采样数（约 1s）。短于此 isReady 返回 false，无法提嵌入。 */
@@ -54,18 +58,30 @@ class VoiceRecognizer(
     /** 提取器是否就绪（模型加载成功）。false 时 [embed] 返回 null。 */
     val isReady: Boolean get() = ready.get()
 
+    /** 已下载的 speaker.onnx 绝对路径；文件不存在返回 null（触发降级）。 */
+    private fun modelAbsolutePath(): String? {
+        val f = resources.localFile("$modelDir/$MODEL_FILE")
+        return if (f.exists()) f.absolutePath else null
+    }
+
     /** 初始化：加载 CAM++ 模型。失败置 ready=false（降级），不抛异常。 */
     fun initialize() {
         try {
-            // model 是 val（构造必传），其余可变字段用 apply 设置。
-            val cfg = SpeakerEmbeddingExtractorConfig(model = "$modelDir/$MODEL_FILE").apply {
+            val abs = modelAbsolutePath()
+            if (abs == null) {
+                Log.w(TAG, "speaker.onnx 尚未下载，声纹识别降级停用")
+                extractor = null
+                ready.set(false)
+                return
+            }
+            val cfg = SpeakerEmbeddingExtractorConfig(model = abs).apply {
                 numThreads = 1
                 debug = false
                 provider = "cpu"
             }
-            // SpeakerEmbeddingExtractor(AssetManager, config)：模型从 assets 加载。
-            // native 层通过 AssetManager 读取 .onnx，model 路径相对 assets 根（与 SpeechDenoiser 一致）。
-            val ex = SpeakerEmbeddingExtractor(context.assets, cfg)
+            // 用无 AssetManager 的构造（AssetManager 传 null）：cfg.model 指向文件系统绝对路径，
+            // 与 OnlineRecognizer(null, cfg) 同构（native newFromFile）。已下载文件可直接 mmap。
+            val ex = SpeakerEmbeddingExtractor(null, cfg)
             embeddingDim = ex.dim()
             extractor = ex
             ready.set(true)

@@ -19,6 +19,7 @@ import androidx.lifecycle.lifecycleScope
 import com.xbot.android.core.AppPhase
 import com.xbot.android.core.AppViewModel
 import com.xbot.android.core.AppViewModelFactory
+import com.xbot.android.ui.AssetDownloadScreen
 import com.xbot.android.ui.MainScreen
 import com.xbot.android.ui.OnboardingScreen
 import com.xbot.android.ui.rememberMainScreenController
@@ -76,6 +77,15 @@ class MainActivity : ComponentActivity() {
                     AppPhase.LOADING, AppPhase.ERROR, AppPhase.PERMISSION_DENIED -> {
                         com.xbot.android.ui.LoadingScreen()
                     }
+                    AppPhase.DOWNLOADING -> {
+                        AssetDownloadScreen(
+                            appViewModel = appViewModel,
+                            onComplete = {
+                                appViewModel.onAssetsDownloaded()
+                                phaseFlow.value = appViewModel.phase.get()
+                            },
+                        )
+                    }
                     AppPhase.ONBOARDING -> {
                         OnboardingScreen(
                             appViewModel = appViewModel,
@@ -92,6 +102,7 @@ class MainActivity : ComponentActivity() {
                             settingsStore = appViewModel.settingsStore,
                             peopleProvider = { appViewModel.personRepository.people },
                             voiceRecognizerProvider = { appViewModel.voiceRecognizer },
+                            resources = appViewModel.resourceManager,
                         )
                         MainScreen(
                             controller = controller,
@@ -99,6 +110,9 @@ class MainActivity : ComponentActivity() {
                             onResetOwner = {
                                 appViewModel.resetOwner()
                                 phaseFlow.value = AppPhase.ONBOARDING
+                            },
+                            onRedownload = {
+                                phaseFlow.value = AppPhase.DOWNLOADING
                             },
                         )
                     }

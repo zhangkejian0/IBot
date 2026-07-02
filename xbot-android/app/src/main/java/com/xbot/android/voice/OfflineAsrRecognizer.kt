@@ -8,6 +8,7 @@ import com.k2fsa.sherpa.onnx.OnlineParaformerModelConfig
 import com.k2fsa.sherpa.onnx.OnlineRecognizer
 import com.k2fsa.sherpa.onnx.OnlineRecognizerConfig
 import com.k2fsa.sherpa.onnx.OnlineStream
+import com.xbot.android.core.ResourceManager
 import java.io.File
 
 /**
@@ -21,22 +22,25 @@ import java.io.File
  * 与 [StreamingAsrService] 的区别：
  * - 无独立解码线程、无 onPartial/onFinal 回调；[recognize] 是同步阻塞方法。
  * - 不开端点检测（整句同步模式不需要端点）。
- * - 与字幕 ASR 共用同一份磁盘模型（cacheDir/xbot_asr_model/，文件名相同幂等复制），
+ * - 与字幕 ASR 共用同一份已下载模型（filesDir/xbot_models/ 下，幂等读取，不重复占盘），
  *   但持有独立的 [OnlineRecognizer] 实例（独立 native 指针）。
  *
  * 职责边界：仅做「PCM → 文字」的整句识别，不参与对话决策，不存任何状态。
  *
- * @param modelDir assets 中的模型目录
+ * @param resources 资源管理器（解析已下载的 paraformer 模型目录绝对路径）
+ * @param modelDir 相对资源路径下的模型目录
  */
 class OfflineAsrRecognizer(
     private val context: Context,
-    private val modelDir: String,
+    private val resources: ResourceManager,
+    private val modelDir: String = MODEL_DIR,
 ) {
     companion object {
         private const val TAG = "OfflineAsrRecognizer"
         private const val SAMPLE_RATE = 16000
+        const val MODEL_DIR = "voice/sherpa-onnx-streaming-paraformer-bilingual-zh-en"
 
-        private val FILES_TO_COPY = listOf(
+        private val REQUIRED_FILES = listOf(
             "encoder.int8.onnx",
             "decoder.int8.onnx",
             "tokens.txt",
@@ -49,28 +53,26 @@ class OfflineAsrRecognizer(
     val isReady: Boolean get() = recognizer != null
 
     /**
-     * 初始化：模型从 assets 复制到 cacheDir，再用绝对路径构造 [OnlineRecognizer]。
-     * 与 [StreamingAsrService.initialize] 同构（AssetManager 传 null，规避 native
-     * 读取绝对路径的 "Read binary file failed"）。需在后台线程调用。
+     * 初始化：直接指向已下载的 paraformer 目录构造 [OnlineRecognizer]。
+     * AssetManager 传 null，cfg 用文件系统绝对路径（与 [StreamingAsrService.initialize] 同构，
+     * 规避 native 读取绝对路径的 "Read binary file failed"）。需在后台线程调用。
+     * 模型未下载时降级（recognizer=null）。
      */
     fun initialize() {
         try {
-            val destDir = File(context.cacheDir, "xbot_asr_model").apply { mkdirs() }
-            for (name in FILES_TO_COPY) {
-                val dest = File(destDir, name)
-                if (!dest.exists()) {
-                    context.assets.open("$modelDir/$name").use { input ->
-                        dest.outputStream().use { output -> input.copyTo(output) }
-                    }
-                }
+            val dir = resources.localFile(modelDir)
+            if (!REQUIRED_FILES.all { File(dir, it).exists() }) {
+                Log.w(TAG, "paraformer 模型尚未下载，整句 ASR 降级停用")
+                recognizer = null
+                return
             }
             val paraformerCfg = OnlineParaformerModelConfig().apply {
-                encoder = File(destDir, "encoder.int8.onnx").absolutePath
-                decoder = File(destDir, "decoder.int8.onnx").absolutePath
+                encoder = File(dir, "encoder.int8.onnx").absolutePath
+                decoder = File(dir, "decoder.int8.onnx").absolutePath
             }
             val modelCfg = OnlineModelConfig().apply {
                 paraformer = paraformerCfg
-                tokens = File(destDir, "tokens.txt").absolutePath
+                tokens = File(dir, "tokens.txt").absolutePath
                 numThreads = 2
                 debug = false
                 provider = "cpu"

@@ -39,7 +39,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         private const val TAG = "AppViewModel"
         private const val FACE_MODEL_PATH = "face_landmarker.task"
         private const val MOBILEFACENET_PATH = "mobilefacenet.tflite"
+        /** 声纹模型相对路径（assets 或下载根下的子目录）。 */
         private const val VOICE_MODEL_PATH = "voice/sherpa-onnx-3dspeaker-campplus-zh-cn-16k-common"
+        /** ASR 模型相对路径（assets 或下载根下的子目录）。 */
         private const val ASR_MODEL_PATH = "voice/sherpa-onnx-streaming-paraformer-bilingual-zh-en"
     }
 
@@ -47,13 +49,21 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     val ownerProfileStore = OwnerProfileStore(app)
     val settingsStore = SettingsStore(app)
 
+    /**
+     * 可下载资源管理器。重型模型（ASR paraformer + 声纹 CAM++）首次启动从 CDN 下载，
+     * 落到 filesDir/xbot_models/。模型加载器据此解析路径（已下载用绝对路径，否则降级停用）。
+     */
+    val resourceManager = ResourceManager(app)
+
     /** 录入用的人脸引擎 + 身份识别（与主界面引擎独立，避免抢占）。 */
     private val enrollFaceEngine = FaceLandmarkEngine(app, FACE_MODEL_PATH)
     private val faceRecognizer = FaceRecognizer(app, MOBILEFACENET_PATH)
-    /** 声纹识别（3D-Speaker CAM++）。录入采样 + 对话时识别共用同一实例。 */
-    internal val voiceRecognizer = VoiceRecognizer(app, VOICE_MODEL_PATH)
-    /** 整句语音识别（流式 paraformer 同步用法）。向导声纹录入「念一句话→识别文字」用。 */
-    internal val asrRecognizer = OfflineAsrRecognizer(app, ASR_MODEL_PATH)
+    /** 声纹识别（3D-Speaker CAM++）。录入采样 + 对话时识别共用同一实例。
+     *  模型路径由 [resourceManager] 解析：已下载用本地绝对路径，否则 null 触发降级。 */
+    internal val voiceRecognizer = VoiceRecognizer(app, resourceManager)
+    /** 整句语音识别（流式 paraformer 同步用法）。向导声纹录入「念一句话→识别文字」用。
+     *  模型路径由 [resourceManager] 解析。 */
+    internal val asrRecognizer = OfflineAsrRecognizer(app, resourceManager)
 
     /** 当前阶段。 */
     val phase = AtomicReference(AppPhase.LOADING)
@@ -134,6 +144,30 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             personRepository.load()
             ownerProfileStore.load()
             settingsStore.load()
+            // 加载本地缓存的 manifest（不触发网络），用于就绪判定与下载清单。
+            resourceManager.loadCachedManifest()
+            // 重型模型未就绪 → 进下载页，先不下模型（避免加载缺失文件）。
+            if (!resourceManager.isReady()) {
+                phase.set(AppPhase.DOWNLOADING)
+                return
+            }
+            proceedAfterAssetsReady()
+        } catch (e: Exception) {
+            Log.e(TAG, "初始化失败: ${e.message}")
+            phase.set(AppPhase.ERROR)
+        }
+    }
+
+    /**
+     * 重型模型下载完成后调用（由下载页回调）。重跑阶段分流并异步加载声纹/ASR 模型。
+     */
+    fun onAssetsDownloaded() {
+        proceedAfterAssetsReady()
+    }
+
+    /** 资源就绪后的共同初始化：分流 onboarding/ready + 异步加载声纹/ASR。 */
+    private fun proceedAfterAssetsReady() {
+        try {
             phase.set(if (ownerProfileStore.isRegistered) AppPhase.READY else AppPhase.ONBOARDING)
             // 声纹模型异步加载（native 加载耗时），完成后可录入/识别。失败降级（canEnrollVoice=false）。
             CoroutineScope(Dispatchers.IO).launch {
@@ -153,9 +187,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "初始化失败: ${e.message}")
+            Log.e(TAG, "资源就绪后初始化失败: ${e.message}")
             phase.set(AppPhase.ERROR)
         }
+    }
+
+    /**
+     * 触发重新下载（设置页「重新下载」用）。清除就绪标记并回到下载页。
+     * 不删已下文件，下次下载走断点续传。
+     */
+    fun requestRedownload() {
+        resourceManager.clearReady()
+        phase.set(AppPhase.DOWNLOADING)
     }
 
     /**

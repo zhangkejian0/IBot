@@ -67,6 +67,7 @@ fun SettingsScreen(
     appViewModel: AppViewModel,
     onClose: () -> Unit,
     onResetOwner: () -> Unit,
+    onRedownload: () -> Unit = {},
 ) {
     val store = controller.settingsStore
     val s = store.settings
@@ -77,6 +78,8 @@ fun SettingsScreen(
     var showLog by remember { mutableStateOf(false) }
     // 语音记录子页（设置页「语音记录」入口）。
     var showVoiceLog by remember { mutableStateOf(false) }
+    // 模型资源重下确认弹窗（开发期测试用）。
+    var confirmRedownload by remember { mutableStateOf(false) }
     var editTarget by remember { mutableStateOf<EditTarget?>(null) }
     var confirmReset by remember { mutableStateOf(false) }
     var connResult by remember { mutableStateOf<Boolean?>(null) }
@@ -225,6 +228,22 @@ fun SettingsScreen(
                     }
                 }
 
+                // —— 模型资源 ——
+                SettingsSection("模型资源") {
+                    val rm = appViewModel.resourceManager
+                    val ready = rm.isReady()
+                    val ok = ready && rm.verifyAll()
+                    InfoRow(
+                        "端侧模型状态",
+                        when {
+                            ok -> "已就绪"
+                            ready -> "已下载（校验未通过）"
+                            else -> "未下载"
+                        },
+                    )
+                    NavRow("重新下载", "清除就绪标记并回到下载页（开发测试用）") { confirmRedownload = true }
+                }
+
                 // —— 关于 ——
                 SettingsSection("关于") {
                     InfoRow("版本", "1.0.0")
@@ -300,6 +319,23 @@ fun SettingsScreen(
             dismissButton = { TextButton(onClick = { confirmReset = false }) { Text("取消") } },
             title = { Text("重新设置主人") },
             text = { Text("将清除主人信息（含人脸）并重新进入引导。此操作不可撤销，确定继续吗？") },
+        )
+    }
+
+    // —— 弹窗：重新下载模型确认 ——
+    if (confirmRedownload) {
+        AlertDialog(
+            onDismissRequest = { confirmRedownload = false },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmRedownload = false
+                    appViewModel.requestRedownload()
+                    onRedownload()
+                }) { Text("重新下载") }
+            },
+            dismissButton = { TextButton(onClick = { confirmRedownload = false }) { Text("取消") } },
+            title = { Text("重新下载模型") },
+            text = { Text("将清除就绪标记并回到下载页。已下载的文件不会被删除（走断点续传）。继续吗？") },
         )
     }
 

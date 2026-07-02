@@ -49,6 +49,7 @@ fun MainScreen(
     controller: MainScreenController,
     appViewModel: AppViewModel,
     onResetOwner: () -> Unit,
+    onRedownload: () -> Unit = {},
 ) {
     var showSettings by remember { mutableStateOf(false) }
 
@@ -60,6 +61,10 @@ fun MainScreen(
             onResetOwner = {
                 showSettings = false
                 onResetOwner()
+            },
+            onRedownload = {
+                showSettings = false
+                onRedownload()
             },
         )
         return

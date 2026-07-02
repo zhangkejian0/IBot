@@ -10,6 +10,7 @@ import com.k2fsa.sherpa.onnx.OnlineParaformerModelConfig
 import com.k2fsa.sherpa.onnx.OnlineRecognizer
 import com.k2fsa.sherpa.onnx.OnlineRecognizerConfig
 import com.k2fsa.sherpa.onnx.OnlineStream
+import com.xbot.android.core.ResourceManager
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -17,7 +18,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  * 端侧流式语音识别（sherpa-onnx OnlineRecognizer），仅用于右上角实时字幕显示。
  *
  * 与 [WakeWordService] 同构，是其流式 ASR 版本：
- * - 模型：sherpa-onnx-streaming-paraformer-bilingual-zh-en（中英双语，int8）
+ * - 模型：sherpa-onnx-streaming-paraformer-bilingual-zh-en（中英双语，int8），
+ *   首次启动从 CDN 下载到 filesDir/xbot_models/（见 [ResourceManager]）
  * - OnlineRecognizer 通过文件系统绝对路径加载（AssetManager 传 null，规避 native
  *   读取绝对路径的 "Read binary file failed"，与 KWS 同一 workaround）
  * - numThreads=2, provider=cpu, decodingMethod=greedy_search, enableEndpoint=true
@@ -37,12 +39,14 @@ import java.util.concurrent.atomic.AtomicBoolean
  * - 输出侧「稳定性 + 最短长度过滤」（解码线程）：partial 需前缀连续稳定 [STABILITY_HITS] 次
  *   且长度≥[MIN_PARTIAL_LEN] 才刷 UI，抑制噪声导致的跳字/回删闪现。
  *
- * @param modelDir assets 中的模型目录
+ * @param resources 资源管理器（解析已下载的 paraformer 模型目录绝对路径）
+ * @param modelDir 相对资源路径下的模型目录
  * @param onPartial 流式增量文本（每 ~150ms 回调一次，节流防刷屏）
  * @param onFinal 端点检出后的整句（[OnlineRecognizer.isEndpoint] 为真后回调一次并 reset）
  */
 class StreamingAsrService(
     private val context: Context,
+    private val resources: ResourceManager,
     private val modelDir: String,
     private val onPartial: (String) -> Unit,
     private val onFinal: (String) -> Unit,
@@ -61,7 +65,7 @@ class StreamingAsrService(
         /** partial 最短显示长度（字符）。 */
         private const val MIN_PARTIAL_LEN = 2
 
-        private val FILES_TO_COPY = listOf(
+        private val REQUIRED_FILES = listOf(
             "encoder.int8.onnx",
             "decoder.int8.onnx",
             "tokens.txt",
@@ -91,31 +95,26 @@ class StreamingAsrService(
     val isReady: Boolean get() = recognizer != null
 
     /**
-     * 初始化：把模型从 assets 复制到 cacheDir，再用无 AssetManager 的构造函数加载。
+     * 初始化：直接指向已下载的 paraformer 目录构造 OnlineRecognizer。
      * 原因同 [WakeWordService]：sherpa-onnx native 层用文件系统绝对路径加载模型最稳，
-     * AssetManager 构造函数对绝对路径会触发 fatal。
+     * AssetManager 构造函数对绝对路径会触发 fatal。模型未下载时降级（recognizer=null）。
      */
     fun initialize() {
         try {
-            // 1. 把模型从 assets 复制到 cacheDir（已存在则跳过）。
-            val destDir = File(context.cacheDir, "xbot_asr_model").apply { mkdirs() }
-            for (name in FILES_TO_COPY) {
-                val dest = File(destDir, name)
-                if (!dest.exists()) {
-                    context.assets.open("$modelDir/$name").use { input ->
-                        dest.outputStream().use { output -> input.copyTo(output) }
-                    }
-                }
+            val dir = resources.localFile(modelDir)
+            if (!REQUIRED_FILES.all { File(dir, it).exists() }) {
+                Log.w(TAG, "paraformer 模型尚未下载，流式字幕降级关闭")
+                recognizer = null
+                return
             }
-
-            // 2. 用绝对路径构造 config，用无 AssetManager 构造函数。
+            // 用绝对路径构造 config，用无 AssetManager 构造函数。
             val paraformerCfg = OnlineParaformerModelConfig().apply {
-                encoder = File(destDir, "encoder.int8.onnx").absolutePath
-                decoder = File(destDir, "decoder.int8.onnx").absolutePath
+                encoder = File(dir, "encoder.int8.onnx").absolutePath
+                decoder = File(dir, "decoder.int8.onnx").absolutePath
             }
             val modelCfg = OnlineModelConfig().apply {
                 paraformer = paraformerCfg
-                tokens = File(destDir, "tokens.txt").absolutePath
+                tokens = File(dir, "tokens.txt").absolutePath
                 numThreads = 2
                 debug = false
                 provider = "cpu"

@@ -41,6 +41,10 @@ android {
     // MediaPipe tasks-vision / TFLite / sherpa-onnx 需要从 assets 读取 .task/.tflite/.onnx，开启不解压。
     androidResources {
         noCompress += listOf("task", "tflite", "onnx")
+        // 排除前端开发依赖（node_modules，~69MB）出 APK：仅构建时用到 dist/（已编译产物），
+        // 运行时 WebView 经 WebViewAssetLoader 读 assets/dist，不依赖 node_modules。
+        // 源文件保留在仓库，可逆；若 WebView 改为本地构建再打包，移除此行即可。
+        ignoreAssetsPattern = "node_modules"
     }
 }
 
