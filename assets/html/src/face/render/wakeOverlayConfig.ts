@@ -31,7 +31,7 @@ export type WakeOverlayConfig = {
 };
 
 /** 递增后会对旧版持久化配置做字段迁移 */
-const CONFIG_VERSION = 4;
+const CONFIG_VERSION = 7;
 
 export const DEFAULT_WAKE_OVERLAY_CONFIG: WakeOverlayConfig = {
   enabled: true,
@@ -40,8 +40,8 @@ export const DEFAULT_WAKE_OVERLAY_CONFIG: WakeOverlayConfig = {
   bottomOffset: 0,
   glowIntensity: 0.82,
   breatheSpeed: 1.25,
-  textSize: 12,
-  letterSpacing: 1,
+  textSize: 14,
+  letterSpacing: 2,
   showOnWaking: true,
   hideOnWakeEnd: true,
   autoHideMs: 0,
@@ -55,7 +55,7 @@ function clamp01(v: number): number {
 }
 
 function clampTextSize(v: number): number {
-  return Math.max(8, Math.min(24, v));
+  return Math.max(8, Math.min(64, v));
 }
 
 function migrateConfig(j: Partial<WakeOverlayConfig> & { glowHeight?: number; configVersion?: number; themeId?: string }): WakeOverlayConfig {
