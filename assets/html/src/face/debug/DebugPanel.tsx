@@ -10,6 +10,11 @@ import {
   DEFAULT_GAZE_MOTION, getGazeMotionConfig, resetGazeMotionConfig, setGazeMotionConfig,
   subscribeGazeMotionConfig, type GazeMotionConfig,
 } from '../runtime/gazeMotionConfig';
+import {
+  DEFAULT_WAKE_OVERLAY_CONFIG, getWakeOverlayConfig, resetWakeOverlayConfig,
+  setWakeOverlayConfig, setWakeOverlayText, subscribeWakeOverlayConfig,
+  type WakeOverlayConfig,
+} from '../render/wakeOverlayConfig';
 
 export function DebugPanel({ onClose }: { onClose?: () => void }) {
   const [gazePointerEnabled, setGazePointerEnabled] = useState(true);
@@ -18,10 +23,19 @@ export function DebugPanel({ onClose }: { onClose?: () => void }) {
   const [ambExpr, setAmbExpr] = useState<AmbientExpressionId>(() => getAmbientExpression());
   const [ambSkin, setAmbSkin] = useState<string>(() => getAmbientSkinId());
   const [gazeMotion, setGazeMotionState] = useState<GazeMotionConfig>(() => getGazeMotionConfig());
+  const [wakeCfg, setWakeCfgState] = useState<WakeOverlayConfig>(() => getWakeOverlayConfig());
+  const [wakeText, setWakeText] = useState(() => getWakeOverlayConfig().defaultText);
   const listeningRef = useRef(0);
 
   useEffect(() => {
     return subscribeGazeMotionConfig(setGazeMotionState);
+  }, []);
+
+  useEffect(() => {
+    return subscribeWakeOverlayConfig((cfg) => {
+      setWakeCfgState(cfg);
+      setWakeText(cfg.defaultText);
+    });
   }, []);
 
   const onFaceStyle = (id: FaceStyleId) => {
@@ -70,6 +84,10 @@ export function DebugPanel({ onClose }: { onClose?: () => void }) {
     setListening(0);
     resetGazeMotionConfig();
     setGazeMotionState({ ...DEFAULT_GAZE_MOTION });
+    resetWakeOverlayConfig();
+    setWakeCfgState({ ...DEFAULT_WAKE_OVERLAY_CONFIG });
+    setWakeText(DEFAULT_WAKE_OVERLAY_CONFIG.defaultText);
+    faceController.hideWakeOverlay();
     setAmbientExpression('idle');
     setAmbExpr('idle');
   };
@@ -119,6 +137,79 @@ export function DebugPanel({ onClose }: { onClose?: () => void }) {
           </div>
         </Section>
       )}
+
+      <Section title="唤醒光效">
+        <label style={s.checkbox}>
+          <input
+            type="checkbox"
+            checked={wakeCfg.enabled}
+            onChange={(e) => setWakeOverlayConfig({ enabled: e.target.checked })}
+          />
+          启用底部唤醒光效
+        </label>
+        <input
+          style={s.textInput}
+          value={wakeText}
+          placeholder="播报文案（模拟用户说话，实时更新）"
+          onChange={(e) => {
+            const v = e.target.value;
+            setWakeText(v);
+            setWakeOverlayConfig({ defaultText: v });
+            setWakeOverlayText(v);
+          }}
+        />
+        <SliderRow
+          label="底带高度"
+          value={wakeCfg.bottomBand}
+          min={0.14} max={0.28} step={0.01}
+          onChange={(v) => setWakeOverlayConfig({ bottomBand: v })}
+          format={(v) => v.toFixed(2)}
+        />
+        <SliderRow
+          label="底边微调"
+          value={wakeCfg.bottomOffset}
+          min={0} max={0.06} step={0.005}
+          onChange={(v) => setWakeOverlayConfig({ bottomOffset: v })}
+          format={(v) => v.toFixed(3)}
+        />
+        <SliderRow
+          label="光晕强度"
+          value={wakeCfg.glowIntensity}
+          min={0.3} max={1} step={0.01}
+          onChange={(v) => setWakeOverlayConfig({ glowIntensity: v })}
+          format={(v) => v.toFixed(2)}
+        />
+        <SliderRow
+          label="呼吸速度"
+          value={wakeCfg.breatheSpeed}
+          min={0.4} max={2.5} step={0.05}
+          onChange={(v) => setWakeOverlayConfig({ breatheSpeed: v })}
+          format={(v) => v.toFixed(2)}
+        />
+        <div style={s.row2}>
+          <button
+            style={s.btn}
+            onClick={() => {
+              faceController.showWakeOverlay();
+              faceController.setWakeOverlayText(wakeText);
+            }}
+          >
+            预览光效
+          </button>
+          <button style={s.btn} onClick={() => faceController.hideWakeOverlay()}>
+            隐藏
+          </button>
+          <button
+            style={s.btn}
+            onClick={() => {
+              faceController.setState('waking');
+              setTimeout(() => faceController.setState('listening'), 1200);
+            }}
+          >
+            模拟唤醒
+          </button>
+        </div>
+      </Section>
 
       <Section title="感知信号模拟">
         <label style={s.checkbox}>
@@ -218,6 +309,11 @@ const s: Record<string, React.CSSProperties> = {
   range: { width: '100%' },
   checkbox: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#cfd2dc' },
   hint: { fontSize: 11, color: '#6a7080', lineHeight: 1.45 },
+  textInput: {
+    width: '100%', boxSizing: 'border-box', padding: '8px 10px', borderRadius: 6,
+    border: '1px solid #2a2e44', background: '#1a1d29', color: '#cfd2dc', fontSize: 12,
+  },
+  row2: { display: 'flex', flexWrap: 'wrap', gap: 6 },
   resetBtn: {
     padding: '8px 12px', borderRadius: 6, border: '1px solid #3a3e54',
     background: '#1a1d29', color: '#cfd2dc', cursor: 'pointer', fontSize: 12,

@@ -43,6 +43,7 @@ extension VoiceStateFaceMapping on VoiceState {
       case VoiceState.idle:
         return 'idle';
       case VoiceState.waking:
+        return 'waking';
       case VoiceState.listening:
         return 'listening';
       case VoiceState.thinking:

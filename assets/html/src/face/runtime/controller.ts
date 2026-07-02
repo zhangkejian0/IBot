@@ -20,6 +20,11 @@ import {
   getGazeMotionConfig, setGazeMotionConfig, resetGazeMotionConfig,
   type GazeMotionConfig,
 } from './gazeMotionConfig';
+import {
+  getWakeOverlayConfig, setWakeOverlayConfig, resetWakeOverlayConfig,
+  showWakeOverlay, hideWakeOverlay, setWakeOverlayLevel, setWakeOverlayText,
+  type WakeOverlayConfig,
+} from '../render/wakeOverlayConfig';
 
 /**
  * FaceState → 氛围表情预设。让 setState 自动驱动渲染器的眼形/嘴形/光晕/道具，
@@ -82,6 +87,7 @@ class FaceController {
   private gazeEyesLeft: GazeEyeChannel = { pupilX: 0, pupilY: 0, openness: 0, upperLidCurve: 0, lidTilt: 0 };
   private gazeEyesRight: GazeEyeChannel = { pupilX: 0, pupilY: 0, openness: 0, upperLidCurve: 0, lidTilt: 0 };
   private listeningLoudness = 0;
+  private wasWaking = false;
   private renderCb: RenderCallback | null = null;
   private stopTicker: (() => void) | null = null;
   private lastEmitMs = 0;
@@ -101,7 +107,21 @@ class FaceController {
     const spec = STATE_SPECS[state];
     this.spring.setSlow(!!spec.slowSpring);
     setAmbientExpression(STATE_TO_AMBIENT[state]);
+    this.syncWakeOverlay(state);
     eventBus.emit('state:change', { state });
+  }
+
+  private syncWakeOverlay(state: FaceState) {
+    const cfg = getWakeOverlayConfig();
+    if (state === 'waking') {
+      if (cfg.showOnWaking) showWakeOverlay();
+      this.wasWaking = true;
+      return;
+    }
+    if (this.wasWaking && cfg.hideOnWakeEnd) {
+      hideWakeOverlay();
+    }
+    this.wasWaking = false;
   }
 
   getState(): FaceState {
@@ -156,6 +176,7 @@ class FaceController {
 
   setListeningLoudness(v: number) {
     this.listeningLoudness = Math.max(0, Math.min(1, v));
+    setWakeOverlayLevel(this.listeningLoudness);
   }
 
   /**
@@ -181,6 +202,30 @@ class FaceController {
 
   resetGazeMotionConfig() {
     resetGazeMotionConfig();
+  }
+
+  getWakeOverlayConfig(): WakeOverlayConfig {
+    return getWakeOverlayConfig();
+  }
+
+  setWakeOverlayConfig(patch: Partial<WakeOverlayConfig>) {
+    setWakeOverlayConfig(patch);
+  }
+
+  resetWakeOverlayConfig() {
+    resetWakeOverlayConfig();
+  }
+
+  showWakeOverlay(text?: string | null, opts?: { autoHideMs?: number }) {
+    showWakeOverlay(text, opts);
+  }
+
+  hideWakeOverlay() {
+    hideWakeOverlay();
+  }
+
+  setWakeOverlayText(text: string) {
+    setWakeOverlayText(text);
   }
 
   private buildTarget(): { target: FaceParams; activeOsc: ActiveOscillator[] } {

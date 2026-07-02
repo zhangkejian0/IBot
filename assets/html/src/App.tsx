@@ -8,6 +8,7 @@ import { readInitialDebugFlag, setDebugEnabled } from './face/debug/debugFlag';
 import { FACE_BG } from './face/render/faceLayout';
 import { getFaceStyle, subscribeFaceStyle } from './face/render/faceStyle';
 import { bindGazePointer } from './face/runtime/gazeInput';
+import { WakeOverlay } from './face/render/WakeOverlay';
 
 const SECRET_TAP_COUNT = 5;
 const SECRET_TAP_WINDOW_MS = 2000;
@@ -64,7 +65,10 @@ export function App() {
   return (
     <div style={styles.root}>
       <div ref={faceAreaRef} style={styles.faceArea} className="face-area">
-        <FaceComponent />
+        <div style={styles.faceStage}>
+          <FaceComponent />
+          <WakeOverlay />
+        </div>
       </div>
 
       {!panelOpen && (
@@ -103,10 +107,24 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex', flexDirection: 'row', overflow: 'hidden',
   },
   faceArea: {
-    flex: 1, display: 'flex', alignItems: 'stretch', justifyContent: 'center',
-    minWidth: 0, minHeight: 0, background: 'transparent',
+    flex: 1,
+    display: 'flex',
+    alignItems: 'stretch',
+    justifyContent: 'stretch',
+    minWidth: 0,
+    minHeight: 0,
+    background: 'transparent',
     padding:
       'max(6px, env(safe-area-inset-top)) max(6px, env(safe-area-inset-right)) max(6px, env(safe-area-inset-bottom)) max(6px, env(safe-area-inset-left))',
+  },
+  faceStage: {
+    position: 'relative',
+    flex: 1,
+    width: '100%',
+    height: '100%',
+    minWidth: 0,
+    minHeight: 0,
+    overflow: 'hidden',
   },
   cornerTrigger: {
     position: 'fixed', top: 0, left: 0, width: 72, height: 72, zIndex: 1000,
