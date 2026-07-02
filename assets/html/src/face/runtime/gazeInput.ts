@@ -1,6 +1,7 @@
 import { faceController } from './controller';
+import { setGazeViewport } from './gazeViewport';
 
-const GAZE_CLAMP = 1.15;
+const GAZE_CLAMP = 1;
 
 function clampGaze(v: number): number {
   return Math.max(-GAZE_CLAMP, Math.min(GAZE_CLAMP, v));
@@ -26,6 +27,18 @@ export function pointerToGaze(clientX: number, clientY: number, root: HTMLElemen
  */
 export function bindGazePointer(root: HTMLElement): () => void {
   let externalLock = false;
+
+  const syncViewport = () => {
+    const rect = root.getBoundingClientRect();
+    setGazeViewport(rect.width, rect.height);
+  };
+
+  syncViewport();
+  const ro = typeof ResizeObserver !== 'undefined'
+    ? new ResizeObserver(syncViewport)
+    : null;
+  ro?.observe(root);
+  window.addEventListener('resize', syncViewport);
 
   const push = (clientX: number, clientY: number) => {
     if (externalLock || !faceController.isGazeInputEnabled()) return;
@@ -54,6 +67,8 @@ export function bindGazePointer(root: HTMLElement): () => void {
 
   return () => {
     offExternal();
+    ro?.disconnect();
+    window.removeEventListener('resize', syncViewport);
     root.removeEventListener('mousemove', onMove);
     root.removeEventListener('mouseleave', onLeave);
     root.removeEventListener('touchmove', onTouch);

@@ -16,6 +16,10 @@ import {
   type AmbientExpressionId,
 } from '../render/ambientExpression';
 import { applyGazeEyeChannel, computeGazeBody, computeGazeEyes, gazeWeightForState, type GazeEyeChannel } from './gazeResponse';
+import {
+  getGazeMotionConfig, setGazeMotionConfig, resetGazeMotionConfig,
+  type GazeMotionConfig,
+} from './gazeMotionConfig';
 
 /**
  * FaceState → 氛围表情预设。让 setState 自动驱动渲染器的眼形/嘴形/光晕/道具，
@@ -165,6 +169,18 @@ class FaceController {
   }
   setAmbientExpression(id: AmbientExpressionId) {
     setAmbientExpression(id);
+  }
+
+  getGazeMotionConfig(): GazeMotionConfig {
+    return getGazeMotionConfig();
+  }
+
+  setGazeMotionConfig(patch: Partial<GazeMotionConfig>) {
+    setGazeMotionConfig(patch);
+  }
+
+  resetGazeMotionConfig() {
+    resetGazeMotionConfig();
   }
 
   private buildTarget(): { target: FaceParams; activeOsc: ActiveOscillator[] } {

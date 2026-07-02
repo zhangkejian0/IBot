@@ -1,4 +1,6 @@
 import type { EyeParams, FaceParams, FaceState } from '../types';
+import { getGazeMotionConfig, type GazeMotionConfig } from './gazeMotionConfig';
+import { getGazePanLimits } from './gazeViewport';
 
 /** 各状态注视跟随强度（睡眠时减弱） */
 const GAZE_WEIGHT_BY_STATE: Record<FaceState, number> = {
@@ -42,7 +44,11 @@ const ZERO_EYE: GazeEyeChannel = {
   pupilX: 0, pupilY: 0, openness: 0, upperLidCurve: 0, lidTilt: 0,
 };
 
-/** 边缘略收敛，避免贴边时动作过猛 */
+function clampGazeAxis(v: number): number {
+  return Math.max(-1, Math.min(1, v));
+}
+
+/** 眼球方向略软化，避免贴边时瞳孔过猛 */
 function softenAxis(v: number): number {
   const a = Math.abs(v);
   const s = Math.sign(v);
@@ -109,28 +115,34 @@ export function applyGazeEyeChannel(eye: EyeParams, ch: GazeEyeChannel): void {
 }
 
 /**
- * 头部：左右时整脸水平平移为主；上下幅度明显减小。
+ * 整脸平移：配置 1 + 注视到边缘 → 平移至屏幕裁切框边缘（线性映射，不软化）。
  */
 export function computeGazeBody(
   gazeX: number,
   gazeY: number,
   weight: number,
+  motion: GazeMotionConfig = getGazeMotionConfig(),
 ): GazeBodyOffset {
   if (weight <= 0 || (gazeX === 0 && gazeY === 0)) {
     return { headPanX: 0, headBobY: 0, headTilt: 0, headPitch: 0 };
   }
-  const w = weight;
-  const { gx, gy, horizBlend } = gazeComponents(gazeX, gazeY);
 
-  // 偏左右时：加大整脸平移，减弱绕轴转动（「整体挪过去」而非猛甩头）
-  const panScale = 1 + horizBlend * 0.65;
-  const tiltScale = 1 - horizBlend * 0.4;
+  const w = weight;
+  const gx = clampGazeAxis(gazeX);
+  const gy = clampGazeAxis(gazeY);
+  const { horizBlend } = gazeComponents(gazeX, gazeY);
+  const h = motion.panHorizontal;
+  const v = motion.panVertical;
+  const limits = getGazePanLimits();
+  const panXMag = gx < 0 ? limits.maxPanLeft : limits.maxPanRight;
+  const panYMag = gy < 0 ? limits.maxPanUp : limits.maxPanDown;
+  const tiltScale = 1 - horizBlend * 0.35;
 
   return {
-    headPanX: gx * 38 * w * panScale,
-    headBobY: gy * 6 * w,
-    headTilt: gx * 4.5 * w * tiltScale,
-    headPitch: gy * 2 * w,
+    headPanX: gx * panXMag * h * w,
+    headBobY: gy * panYMag * v * w,
+    headTilt: gx * 10 * h * w * tiltScale,
+    headPitch: gy * 6 * v * w,
   };
 }
 

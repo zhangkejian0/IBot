@@ -6,6 +6,10 @@ import {
 } from '../render/ambientExpression';
 import { AMBIENT_SKINS, getAmbientSkinId, setAmbientSkin } from '../render/ambientSkin';
 import { FACE_STYLES, getFaceStyle, setFaceStyle, type FaceStyleId } from '../render/faceStyle';
+import {
+  DEFAULT_GAZE_MOTION, getGazeMotionConfig, resetGazeMotionConfig, setGazeMotionConfig,
+  subscribeGazeMotionConfig, type GazeMotionConfig,
+} from '../runtime/gazeMotionConfig';
 
 export function DebugPanel({ onClose }: { onClose?: () => void }) {
   const [gazePointerEnabled, setGazePointerEnabled] = useState(true);
@@ -13,7 +17,12 @@ export function DebugPanel({ onClose }: { onClose?: () => void }) {
   const [faceStyle, setFaceStyleState] = useState<FaceStyleId>(() => getFaceStyle());
   const [ambExpr, setAmbExpr] = useState<AmbientExpressionId>(() => getAmbientExpression());
   const [ambSkin, setAmbSkin] = useState<string>(() => getAmbientSkinId());
+  const [gazeMotion, setGazeMotionState] = useState<GazeMotionConfig>(() => getGazeMotionConfig());
   const listeningRef = useRef(0);
+
+  useEffect(() => {
+    return subscribeGazeMotionConfig(setGazeMotionState);
+  }, []);
 
   const onFaceStyle = (id: FaceStyleId) => {
     setFaceStyle(id);
@@ -59,6 +68,8 @@ export function DebugPanel({ onClose }: { onClose?: () => void }) {
   const reset = () => {
     setGazePointerEnabled(true);
     setListening(0);
+    resetGazeMotionConfig();
+    setGazeMotionState({ ...DEFAULT_GAZE_MOTION });
     setAmbientExpression('idle');
     setAmbExpr('idle');
   };
@@ -127,6 +138,26 @@ export function DebugPanel({ onClose }: { onClose?: () => void }) {
         />
       </Section>
 
+      <Section title="注视整体移动">
+        <SliderRow
+          label="左右"
+          value={gazeMotion.panHorizontal}
+          min={0} max={1} step={0.01}
+          onChange={(v) => setGazeMotionConfig({ panHorizontal: v })}
+          format={(v) => v.toFixed(2)}
+        />
+        <SliderRow
+          label="上下"
+          value={gazeMotion.panVertical}
+          min={0} max={1} step={0.01}
+          onChange={(v) => setGazeMotionConfig({ panVertical: v })}
+          format={(v) => v.toFixed(2)}
+        />
+        <div style={s.hint}>
+          1 = 鼠标到边缘时 SVG 脸组贴屏幕边；默认左右 {DEFAULT_GAZE_MOTION.panHorizontal} / 上下 {DEFAULT_GAZE_MOTION.panVertical}
+        </div>
+      </Section>
+
       <button style={s.resetBtn} onClick={reset}>重置</button>
       {onClose && (
         <button style={s.closeBtn} onClick={onClose}>关闭调试面板</button>
@@ -186,6 +217,7 @@ const s: Record<string, React.CSSProperties> = {
   rowValue: { fontSize: 11, color: '#8a8f9f', textAlign: 'right' },
   range: { width: '100%' },
   checkbox: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#cfd2dc' },
+  hint: { fontSize: 11, color: '#6a7080', lineHeight: 1.45 },
   resetBtn: {
     padding: '8px 12px', borderRadius: 6, border: '1px solid #3a3e54',
     background: '#1a1d29', color: '#cfd2dc', cursor: 'pointer', fontSize: 12,
