@@ -196,6 +196,12 @@ class AudioCapture(
                 }
                 val level = rmsLevel(frame)
 
+                // 同步 level 字段（与 start() 的采集线程同款 EMA 平滑），让阻塞采集路径
+                // 也能被 UI 轮询拿到实时音量（向导声纹录入的分贝曲线背景依赖此值）。
+                if (!externalLevel) {
+                    this.level = this.level * 0.6f + level * 0.4f
+                }
+
                 if (!speechStarted) {
                     if (level >= speechThreshold) {
                         onsetCount++

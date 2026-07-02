@@ -9,6 +9,7 @@ import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -21,6 +22,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
@@ -58,7 +61,9 @@ fun OnboardingScreen(
 ) {
     val totalSteps = 6
     val requiredSamples = 5
-    val requiredVoiceSamples = 3
+    /** 声纹录入提示语：用户逐句念，匹配后该句变绿。 */
+    val voicePhrases = listOf("你好，我是XX", "今天天气真好", "很高兴认识你")
+    val requiredVoiceSamples = voicePhrases.size
     var step by remember { mutableStateOf(0) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -78,6 +83,10 @@ fun OnboardingScreen(
     var voiceState by remember { mutableStateOf(FaceScanState.IDLE) }
     var voiceScanning by remember { mutableStateOf(false) }
     var voiceMessage by remember { mutableStateOf<String?>(null) }
+    // 声纹录入专用采音器（共享引用，供 startVoiceScan 与分贝曲线轮询共用同一实例）。
+    val voiceCapture = remember { AudioCapture() }
+    // 实时分贝历史（归一化音量 0..1），驱动左侧分贝曲线背景。
+    val dbHistory = remember { mutableStateListOf<Float>() }
 
     // 启动人脸录入：循环采样直到达到 requiredSamples 或超时。
     fun startFaceScan() {
@@ -129,12 +138,21 @@ fun OnboardingScreen(
             voiceMessage = "未加载声纹模型，可稍后在设置中补录"
             return
         }
+        // 麦克风权限未授予时不进入采音循环（captureUtterance 无权限会静默返回 null）。
+        val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            voiceState = FaceScanState.FAILED
+            voiceMessage = "未授予麦克风权限，无法录入声纹"
+            return
+        }
         voiceScanning = true
         voiceState = FaceScanState.COLLECTING
         voiceSamples.clear()
         voiceMessage = null
+        val useAsr = appViewModel.canRecognizeSpeech
         scope.launch {
-            val capture = AudioCapture()
+            val capture = voiceCapture
             val deadline = System.currentTimeMillis() + 30_000
             while (voiceSamples.size < requiredVoiceSamples && System.currentTimeMillis() < deadline) {
                 // captureUtterance 阻塞直到录完一句（VAD 端点检测），必须在 IO 线程。
@@ -142,11 +160,27 @@ fun OnboardingScreen(
                     withTimeoutOrNull(10_000L) { capture.captureUtterance(context) }
                 }
                 val pcm = result?.pcm16
-                // 校验：能提嵌入才算有效样本（过短/噪声会被 embed 拒绝）。
-                if (pcm != null && appViewModel.enrollVoice(pcm) != null) {
-                    voiceSamples.add(pcm)
-                    if (voiceSamples.size < requiredVoiceSamples) delay(400)
+                // 先校验声纹有效（过短/噪声会被 embed 拒绝）。
+                if (pcm == null || appViewModel.enrollVoice(pcm) == null) {
+                    voiceMessage = "未录到清晰语音，请重念：${voicePhrases[voiceSamples.size]}"
+                    continue
                 }
+                // ASR 就绪：识别文字并宽松匹配当前提示语；不匹配则重念当前句。
+                if (useAsr) {
+                    val text = withContext(Dispatchers.IO) { appViewModel.recognizeSpeech(pcm) }
+                    if (!isSimilar(text, voicePhrases[voiceSamples.size])) {
+                        voiceMessage = "没听清这句，请重念：${voicePhrases[voiceSamples.size]}"
+                        continue
+                    }
+                }
+                // 通过：存样本（matchedCount = voiceSamples.size 自动驱动逐句变绿）。
+                voiceSamples.add(pcm)
+                voiceMessage = if (voiceSamples.size < requiredVoiceSamples) {
+                    "请念下一句：${voicePhrases[voiceSamples.size]}"
+                } else {
+                    null
+                }
+                if (voiceSamples.size < requiredVoiceSamples) delay(400)
             }
             try { capture.stop() } catch (_: Exception) {}
             if (voiceSamples.isEmpty()) {
@@ -164,6 +198,17 @@ fun OnboardingScreen(
         voiceSamples.clear()
         voiceState = FaceScanState.IDLE
         voiceMessage = null
+    }
+
+    // 录音中每 50ms 采样一次实时音量 → 分贝历史缓冲（驱动左侧曲线背景）。
+    // 协作式轮询，不阻塞主线程（与 ListeningMarquee 的轮询模式一致）。
+    LaunchedEffect(voiceScanning) {
+        if (!voiceScanning) { dbHistory.clear(); return@LaunchedEffect }
+        while (true) {
+            dbHistory.add(voiceCapture.level.coerceIn(0f, 1f))
+            if (dbHistory.size > 60) dbHistory.removeAt(0)  // 环形，保留 ~3s（50ms×60）
+            delay(50)
+        }
     }
 
     Box(
@@ -224,6 +269,8 @@ fun OnboardingScreen(
                         message = voiceMessage,
                         collected = voiceSamples.size,
                         required = requiredVoiceSamples,
+                        phrases = voicePhrases,
+                        dbHistory = dbHistory,
                     )
                     5 -> SummaryStep(
                         nickname = nickname, robotName = robotName,
@@ -257,6 +304,11 @@ fun OnboardingScreen(
                     }
                     if (isVoiceStep && voiceSamples.isNotEmpty() && !voiceScanning) {
                         TextButton(onClick = { resetVoiceScan() }) { Text("重新录入") }
+                        Spacer(Modifier.width(8.dp))
+                    }
+                    // 声纹步骤样本为空时允许「跳过」，稍后可在设置中补录。
+                    if (isVoiceStep && voiceSamples.isEmpty() && !voiceScanning) {
+                        TextButton(onClick = { step++ }) { Text("跳过") }
                         Spacer(Modifier.width(8.dp))
                     }
                     // 主按钮：人脸/声纹步骤复用为「开始录入/采集中/继续」。
@@ -321,6 +373,38 @@ fun OnboardingScreen(
             }
         }
     }
+}
+
+/**
+ * ASR 识别文字与提示语的宽松匹配（容错端侧识别误差）。
+ *
+ * 规则（满足任一即认为念对了这句）：
+ * - 去掉标点/空格后，识别文字包含提示语中 ≥2 个连续字符；
+ * - 或识别文字与提示语去标点后的字符重合度（ Dice 系数）≥ 0.5。
+ *
+ * [recognized] 为 null/空时返回 false（识别失败按不匹配处理，要求重念）。
+ */
+private fun isSimilar(recognized: String?, target: String): Boolean {
+    if (recognized.isNullOrBlank()) return false
+    val r = recognized.replace(Regex("[\\s\\p{Punct}]"), "")
+    val t = target.replace(Regex("[\\s\\p{Punct}]"), "")
+    if (t.length < 2) return r.contains(t)
+    // 规则 1：识别文字包含提示语的任意 2 连续字符。
+    for (i in 0..t.length - 2) {
+        if (r.contains(t.substring(i, i + 2))) return true
+    }
+    // 规则 2：字符重合度（Dice 系数，基于 bigram）。
+    val rb = bigrams(r)
+    val tb = bigrams(t)
+    if (rb.isEmpty() || tb.isEmpty()) return false
+    val inter = rb.intersect(tb).size.toFloat()
+    return inter * 2f / (rb.size + tb.size) >= 0.5f
+}
+
+/** 字符串的 bigram（相邻两字）集合，用于相似度计算。 */
+private fun bigrams(s: String): Set<String> {
+    if (s.length < 2) return emptySet()
+    return (0..s.length - 2).map { s.substring(it, it + 2) }.toSet()
 }
 
 @Composable
@@ -521,8 +605,10 @@ private fun FaceScanStep(
 }
 
 /**
- * 声纹录入步骤：居中麦克风图标 + 进度 + 状态卡。
+ * 声纹录入步骤：左侧分贝曲线背景 + 半透明麦克风，右侧提示语逐句变绿。
+ *
  * 范式与 [FaceScanStep] 对称（复用 [FaceScanState] 状态枚举），但不占相机预览。
+ * 用户逐句念 [phrases] 中的提示语，每句被 ASR 识别匹配后变绿（[collected] 驱动）。
  */
 @Composable
 private fun VoiceScanStep(
@@ -531,7 +617,24 @@ private fun VoiceScanStep(
     message: String?,
     collected: Int,
     required: Int,
+    phrases: List<String>,
+    dbHistory: List<Float>,
 ) {
+    val context = LocalContext.current
+    var hasMic by remember { mutableStateOf(false) }
+
+    // 进入声纹步骤即请求麦克风权限（与 FaceScanStep 请求相机权限对称）。
+    val permLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted -> hasMic = granted }
+
+    LaunchedEffect(Unit) {
+        val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        hasMic = granted
+        if (!granted) permLauncher.launch(Manifest.permission.RECORD_AUDIO)
+    }
+
     val accent = Color(0xFF0A84FF)
     val green = Color(0xFF30D158)
     val red = Color(0xFFFF453A)
@@ -541,7 +644,7 @@ private fun VoiceScanStep(
         else -> accent
     }
     val title = when (voiceState) {
-        FaceScanState.COLLECTING -> if (scanning) "录音中…请自然说话" else "请对着机器人说话"
+        FaceScanState.COLLECTING -> if (scanning) "录音中…请念出高亮的句子" else "请对着机器人说话"
         FaceScanState.SUCCESS -> "录入成功"
         FaceScanState.FAILED -> "录入失败"
         FaceScanState.DUPLICATE -> "已认识"
@@ -549,50 +652,40 @@ private fun VoiceScanStep(
     }
     val subtitle = when (voiceState) {
         FaceScanState.COLLECTING ->
-            if (scanning) "已采集 $collected/$required · 每句说完停顿一下"
+            if (scanning) "已念完 $collected/$required · 每句说完停顿一下"
             else "在安静环境下清晰说话"
         FaceScanState.FAILED -> message ?: "未录到清晰语音，可重试或稍后补录"
         FaceScanState.DUPLICATE -> message ?: "这段声音我已认识啦"
         FaceScanState.SUCCESS -> message ?: "记住你的声音啦，下次开口就能认出你"
         FaceScanState.IDLE -> "让机器人通过声音认出你"
     }
-    val progress = (collected / required.toFloat()).coerceIn(0f, 1f)
 
     Row(modifier = Modifier.fillMaxSize()) {
-        // 左：麦克风图标 + 进度环。
+        // 左：分贝曲线背景 + 半透明麦克风图标。
         Box(
             modifier = Modifier.weight(1f).fillMaxHeight().padding(8.dp),
             contentAlignment = Alignment.Center,
         ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                // 麦克风图标外圈（颜色随状态变化）。
-                Box(
-                    modifier = Modifier
-                        .size(160.dp)
-                        .background(statusColor.copy(alpha = 0.12f), CircleShape),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        if (scanning) "🎙️" else "🎤",
-                        fontSize = 64.sp,
-                    )
-                }
-                Spacer(Modifier.height(24.dp))
-                // 进度条。
-                LinearProgressIndicator(
-                    progress = { progress },
-                    color = statusColor,
-                    trackColor = Color(0xFF2C2C2E),
-                    modifier = Modifier
-                        .fillMaxWidth(0.6f)
-                        .height(6.dp)
-                        .clip(CircleShape),
+            DbWaveformBackdrop(
+                dbHistory = dbHistory,
+                color = statusColor,
+                modifier = Modifier.fillMaxSize(),
+            )
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.padding(bottom = 48.dp),
+            ) {
+                // 麦克风图标半透明叠加在分贝曲线背景之上（曲线更直观地反映声音情况）。
+                Text(
+                    if (scanning) "🎙️" else "🎤",
+                    fontSize = 80.sp,
+                    color = Color.White.copy(alpha = 0.35f),
                 )
                 Spacer(Modifier.height(8.dp))
                 Text("$collected / $required", color = Color.Gray, fontSize = 13.sp)
             }
         }
-        // 右：状态卡 + 说明（与 FaceScanStep 右侧布局对称）。
+        // 右：状态卡 + 逐句提示语（与 FaceScanStep 右侧布局对称）。
         Column(
             modifier = Modifier
                 .width(300.dp)
@@ -612,21 +705,87 @@ private fun VoiceScanStep(
                 Text(subtitle, color = Color(0xFF9A9AA0), fontSize = 12.sp)
             }
             Spacer(Modifier.height(18.dp))
-            Text("说明", color = Color(0xFF9A9AA0), fontSize = 12.sp, fontWeight = FontWeight.Medium)
+            Text("请依次念出以下句子", color = Color(0xFF9A9AA0), fontSize = 12.sp, fontWeight = FontWeight.Medium)
             Spacer(Modifier.height(8.dp))
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(Color(0xFF1C1C1E), RoundedCornerShape(12.dp))
                     .padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                Text(
-                    "点击「开始录音」后，请对着机器人自然说几句话，比如『你好，我是XX』。每说完一句停顿一下，机器人会自动采音。声纹数据仅保存在本机，不会上传。",
-                    color = Color(0xFF9A9AA0),
-                    fontSize = 13.sp,
-                )
+                phrases.forEachIndexed { index, phrase ->
+                    PhraseRow(
+                        order = index + 1,
+                        text = phrase,
+                        matched = index < collected,
+                        current = index == collected && scanning,
+                        green = green,
+                        accent = accent,
+                    )
+                }
+            }
+            if (!hasMic) {
+                Spacer(Modifier.height(12.dp))
+                Text("需要麦克风权限才能录入声纹", color = Color.Gray, fontSize = 12.sp)
             }
         }
+    }
+}
+
+/**
+ * 分贝曲线背景：把 [dbHistory]（归一化音量 0..1）画成示波器/心电线式单条曲线——
+ * 从左到右一条连续折线，振幅随音量自基线（中横线）向上偏移。仅录音中（dbHistory 非空）绘制。
+ */
+@Composable
+private fun DbWaveformBackdrop(
+    dbHistory: List<Float>,
+    color: Color,
+    modifier: Modifier = Modifier,
+) {
+    if (dbHistory.isEmpty()) return
+    Canvas(modifier = modifier) {
+        val w = size.width
+        val h = size.height
+        if (w <= 0f || h <= 0f || dbHistory.size < 2) return@Canvas
+        val cy = h / 2f
+        val stepX = w / (dbHistory.size - 1).coerceAtLeast(1)
+        // 单条曲线：从左到右，每个采样点的 y 由基线 cy 向上抬起（音量越大抬得越高）。
+        val line = Path().apply {
+            dbHistory.forEachIndexed { i, level ->
+                val x = i * stepX
+                val y = cy - level * (cy * 0.9f)
+                if (i == 0) moveTo(x, y) else lineTo(x, y)
+            }
+        }
+        drawPath(line, color = color.copy(alpha = 0.7f), style = Stroke(width = 3f))
+    }
+}
+
+/** 单句提示行：未念=灰、当前=高亮、已匹配=绿+✓。 */
+@Composable
+private fun PhraseRow(
+    order: Int,
+    text: String,
+    matched: Boolean,
+    current: Boolean,
+    green: Color,
+    accent: Color,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            if (matched) "✓" else "$order",
+            color = if (matched) green else if (current) accent else Color.Gray,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.width(20.dp),
+        )
+        Text(
+            text,
+            color = if (matched) green else if (current) Color.White else Color(0xFF9A9AA0),
+            fontSize = 14.sp,
+            fontWeight = if (current || matched) FontWeight.SemiBold else FontWeight.Normal,
+        )
     }
 }
 

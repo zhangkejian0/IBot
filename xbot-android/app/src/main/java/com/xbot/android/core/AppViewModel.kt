@@ -13,6 +13,7 @@ import com.xbot.android.store.OwnerProfileStore
 import com.xbot.android.store.PersonRepository
 import com.xbot.android.store.SettingsStore
 import com.xbot.android.voice.VoiceRecognizer
+import com.xbot.android.voice.OfflineAsrRecognizer
 import com.xbot.android.vision.FaceLandmarkEngine
 import com.xbot.android.vision.FaceRecognizer
 import com.xbot.android.vision.ImageUtils
@@ -39,6 +40,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         private const val FACE_MODEL_PATH = "face_landmarker.task"
         private const val MOBILEFACENET_PATH = "mobilefacenet.tflite"
         private const val VOICE_MODEL_PATH = "voice/sherpa-onnx-3dspeaker-campplus-zh-cn-16k-common"
+        private const val ASR_MODEL_PATH = "voice/sherpa-onnx-streaming-paraformer-bilingual-zh-en"
     }
 
     val personRepository = PersonRepository(app)
@@ -50,6 +52,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val faceRecognizer = FaceRecognizer(app, MOBILEFACENET_PATH)
     /** 声纹识别（3D-Speaker CAM++）。录入采样 + 对话时识别共用同一实例。 */
     internal val voiceRecognizer = VoiceRecognizer(app, VOICE_MODEL_PATH)
+    /** 整句语音识别（流式 paraformer 同步用法）。向导声纹录入「念一句话→识别文字」用。 */
+    internal val asrRecognizer = OfflineAsrRecognizer(app, ASR_MODEL_PATH)
 
     /** 当前阶段。 */
     val phase = AtomicReference(AppPhase.LOADING)
@@ -60,11 +64,20 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** 是否可录入声纹（声纹模型加载成功）。 */
     val canEnrollVoice: Boolean get() = voiceRecognizer.isReady
 
+    /** 是否可识别语音文字（ASR 模型加载成功）。 */
+    val canRecognizeSpeech: Boolean get() = asrRecognizer.isReady
+
     /**
      * 提取一段 PCM 的声纹向量（向导录入时校验有效性用）。
      * @return 声纹向量；模型未就绪/语音过短返回 null
      */
     fun enrollVoice(pcm16: ShortArray): List<Float>? = voiceRecognizer.embed(pcm16)
+
+    /**
+     * 同步识别一段 PCM 的文字（向导声纹录入「念一句话→识别文字」用）。
+     * @return 识别文字（可能为空串）；模型未就绪/异常返回 null
+     */
+    fun recognizeSpeech(pcm16: ShortArray): String? = asrRecognizer.recognize(pcm16)
 
     /**
      * 测试一段语音与已录入声纹的匹配情况（设置页「声纹测试」用）。
@@ -129,6 +142,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     applyVoiceThreshold()  // 加载成功后同步持久化阈值
                 } catch (e: Exception) {
                     Log.w(TAG, "声纹模型加载失败: ${e.message}")
+                }
+            }
+            // 整句 ASR 异步加载（向导声纹录入识别文字用）。失败降级（canRecognizeSpeech=false）。
+            CoroutineScope(Dispatchers.IO).launch {
+                try {
+                    asrRecognizer.initialize()
+                } catch (e: Exception) {
+                    Log.w(TAG, "ASR 模型加载失败: ${e.message}")
                 }
             }
         } catch (e: Exception) {
